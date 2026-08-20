@@ -1,0 +1,17 @@
+FROM alpine:3.20
+
+RUN apk add --no-cache git github-cli ca-certificates openssh-client \
+ && adduser -D -u 10001 -h /home/reviewer reviewer \
+ && chmod 0777 /home/reviewer
+
+# The container runs with the host uid so checkouts stay readable on the host;
+# HOME must therefore be writable by an arbitrary uid.
+ENV HOME=/home/reviewer \
+    GIT_TERMINAL_PROMPT=0
+
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod 0755 /usr/local/bin/entrypoint.sh
+
+USER 10001:10001
+WORKDIR /work
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
