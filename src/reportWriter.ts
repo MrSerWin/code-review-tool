@@ -118,6 +118,18 @@ export function renderReport(
     });
   }
 
+  // Non-blocking by construction: nothing here feeds the merge gate.
+  lines.push('## Suggestions (non-blocking)', '');
+  if (output.observations.length === 0) {
+    lines.push('None.', '');
+  } else {
+    output.observations.forEach((observation) => {
+      lines.push(`- ${location(observation.file, observation.line, null)} — ${inline(observation.note)}`);
+      if (observation.rationale) lines.push(`  ${inline(observation.rationale)}`);
+    });
+    lines.push('');
+  }
+
   lines.push('## Conclusion', '');
   lines.push(output.conclusion.trim() || VERDICT_BANNER[output.verdict] || '');
   lines.push('');
@@ -132,6 +144,11 @@ function ticketCell(review: ReportableReview, ticket: TicketInfo | null): string
   const label = url ? `[${key}](${url})` : key;
   const title = ticket?.title ?? review.ticket_title;
   return title ? `${label} — ${cell(title)}` : label;
+}
+
+/** Keep a list item on one line. */
+function inline(value: string | null | undefined): string {
+  return (value ?? '').replace(/\r?\n+/g, ' ').trim();
 }
 
 function location(file: string | null, line: number | null, endLine: number | null): string {

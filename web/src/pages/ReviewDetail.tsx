@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api';
 import {
   Card,
@@ -9,7 +9,14 @@ import {
   fmtTime,
 } from '../components/ui';
 import { Link, navigate } from '../router';
-import type { Finding, LogLine, ReviewDetailPayload, Severity, SseEvent } from '../types';
+import type {
+  Finding,
+  LogLine,
+  Observation,
+  ReviewDetailPayload,
+  Severity,
+  SseEvent,
+} from '../types';
 
 const ACTIVE = new Set(['queued', 'fetching', 'reviewing']);
 const SEVERITY_ORDER: Severity[] = ['blocker', 'major', 'minor', 'nit'];
@@ -19,6 +26,50 @@ const BANNER: Record<string, string> = {
   changes_requested: 'CHANGES REQUESTED — do not merge yet',
   blocked: 'BLOCKED — serious problems found',
 };
+
+/** The lens passes the runner is expected to emit progress for, in display order. */
+const LENSES = ['correctness', 'security', 'tests', 'contracts', 'regressions'] as const;
+
+type LensState = 'pending' | 'running' | 'done' | 'failed';
+interface LensProgress {
+  name: string;
+  state: LensState;
+  note: string;
+}
+
+// Matches run-log lines such as `lens correctness: started` or
+// `lens correctness: 2 findings, 1 observation`.
+const LENS_RE = /^\s*lens\s+([a-z][\w-]*)\s*:\s*(.+?)\s*$/i;
+
+/**
+ * Best-effort read of per-lens progress out of the run log. Returns null when the
+ * log carries no recognisable lens lines, so the caller can fall back to the raw log.
+ */
+function deriveLensProgress(logs: LogLine[]): LensProgress[] | null {
+  const seen = new Map<string, { state: LensState; note: string }>();
+  for (const line of logs) {
+    const match = LENS_RE.exec(String(line?.message ?? ''));
+    if (!match) continue;
+    const name = match[1]!.toLowerCase();
+    const rest = match[2]!;
+    const lower = rest.toLowerCase();
+    if (lower.startsWith('start')) seen.set(name, { state: 'running', note: '' });
+    else if (lower.includes('fail') || lower.includes('error')) seen.set(name, { state: 'failed', note: rest });
+    else seen.set(name, { state: 'done', note: rest });
+  }
+  if (seen.size === 0) return null;
+
+  const known: LensProgress[] = LENSES.map((name) => ({
+    name,
+    state: seen.get(name)?.state ?? 'pending',
+    note: seen.get(name)?.note ?? '',
+  }));
+  // An unexpected lens name still deserves a chip rather than being dropped.
+  const extra: LensProgress[] = [...seen.entries()]
+    .filter(([name]) => !(LENSES as readonly string[]).includes(name))
+    .map(([name, v]) => ({ name, ...v }));
+  return [...known, ...extra];
+}
 
 export default function ReviewDetail({ id }: { id: number }) {
   const [data, setData] = useState<ReviewDetailPayload | null>(null);
@@ -80,11 +131,16 @@ export default function ReviewDetail({ id }: { id: number }) {
     logEndRef.current?.scrollIntoView({ block: 'end' });
   }, [live.length]);
 
+  const lenses = useMemo(() => deriveLensProgress(live), [live]);
+
   if (error) return <p className="error-line">{error}</p>;
   if (!data) return <p className="muted">Loading…</p>;
 
   const { review, requirements, findings } = data;
+  const observations = data.observations ?? [];
   const running = ACTIVE.has(review.status);
+  const finished = review.status === 'done';
+  const unmet = requirements.filter((r) => r.status === 'missing' || r.status === 'partial');
 
   const rerun = async (): Promise<void> => {
     try {
@@ -212,6 +268,7 @@ export default function ReviewDetail({ id }: { id: number }) {
         </Card>
 
         <Card title={`Log${running ? ' · live' : ''}`}>
+          {lenses && <LensChips lenses={lenses} />}
           <div className="log">
             {live.length === 0 && <div className="muted">No log output yet.</div>}
             {live.map((l) => (
@@ -258,7 +315,21 @@ export default function ReviewDetail({ id }: { id: number }) {
 
       <Card title={`Findings (${findings.length})`}>
         {findings.length === 0 ? (
-          <p className="muted">No issues found.</p>
+          review.verdict && review.verdict !== 'approve' ? (
+            <div className="empty-note">
+              <p>
+                No individual defects were raised, yet the verdict is{' '}
+                <strong>{BANNER[review.verdict]?.split('—')[0]?.trim().toLowerCase() ?? review.verdict}</strong>.
+              </p>
+              <p className="muted">
+                {unmet.length > 0
+                  ? `The blocker is requirement coverage: ${unmet.length} of ${requirements.length} ticket requirements are not fully met. Fix those rows above — they are the work left to do.`
+                  : 'Nothing was pinned to a specific line. Check the run summary and the log below for what the review objected to.'}
+              </p>
+            </div>
+          ) : (
+            <p className="muted">No issues found.</p>
+          )
         ) : (
           grouped.map((group) => (
             <div key={group.severity} className="finding-group">
@@ -272,7 +343,52 @@ export default function ReviewDetail({ id }: { id: number }) {
           ))
         )}
       </Card>
+
+      <Card title={`Suggestions (non-blocking) · ${observations.length}`}>
+        {observations.length === 0 ? (
+          <p className="muted">
+            {finished
+              ? 'No suggestions — the review had nothing non-blocking to add.'
+              : running
+                ? 'Suggestions appear once the review finishes.'
+                : 'No suggestions were recorded for this run.'}
+          </p>
+        ) : (
+          <div className="observation-list">
+            {observations.map((o) => (
+              <ObservationCard key={o.id} observation={o} />
+            ))}
+          </div>
+        )}
+      </Card>
     </div>
+  );
+}
+
+function LensChips({ lenses }: { lenses: LensProgress[] }) {
+  return (
+    <div className="lens-row" role="list" aria-label="Lens progress">
+      {lenses.map((l) => (
+        <span key={l.name} role="listitem" className={`lens lens-${l.state}`} title={l.note || l.state}>
+          <span className="lens-dot" aria-hidden="true" />
+          <span className="lens-name">{l.name}</span>
+          {l.note && <span className="lens-note">{l.note}</span>}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function ObservationCard({ observation }: { observation: Observation }) {
+  const location = observation.file
+    ? `${observation.file}${observation.line !== null ? `:${observation.line}` : ''}`
+    : null;
+  return (
+    <article className="observation">
+      {location && <div className="mono loc">{location}</div>}
+      <p className="observation-note">{observation.note}</p>
+      {observation.rationale && <p className="observation-why muted">{observation.rationale}</p>}
+    </article>
   );
 }
 

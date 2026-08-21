@@ -3,6 +3,10 @@ export type Verdict = 'approve' | 'changes_requested' | 'blocked';
 export type Severity = 'blocker' | 'major' | 'minor' | 'nit';
 export type RequirementStatus = 'met' | 'partial' | 'missing' | 'not_verifiable';
 
+/** The independent review passes that run before synthesis. */
+export const LENS_NAMES = ['correctness', 'security', 'tests', 'contracts', 'regressions'] as const;
+export type LensName = (typeof LENS_NAMES)[number];
+
 export interface TicketInfo {
   key: string; title: string; url: string; body: string;
   state: string; branchName: string | null;
@@ -20,16 +24,42 @@ export interface CheckoutResult {
   changedFiles: string[];
 }
 
-// The exact JSON the review model must return.
+/**
+ * A remark a reviewer would leave as a PR comment but would not block a merge
+ * on. Observations never influence `verdict` or `can_merge`.
+ */
+export interface Observation {
+  file: string | null;
+  line: number | null;
+  note: string;
+  rationale: string;
+}
+
+export interface Finding {
+  severity: Severity;
+  category: string;
+  file: string | null;
+  line: number | null;
+  end_line: number | null;
+  title: string;
+  problem: string;
+  why: string;
+  suggestion: string;
+  snippet: string | null;
+}
+
+/** The exact JSON one lens pass must return: candidates, not verdicts. */
+export interface LensOutput {
+  findings: Finding[];
+  observations: Observation[];
+}
+
+// The exact JSON the synthesis pass must return.
 export interface ReviewOutput {
   summary: string;
   requirements: { text: string; status: RequirementStatus; evidence: string }[];
-  findings: {
-    severity: Severity; category: string; file: string | null;
-    line: number | null; end_line: number | null;
-    title: string; problem: string; why: string; suggestion: string;
-    snippet: string | null;
-  }[];
+  findings: Finding[];
+  observations: Observation[];
   verdict: Verdict;
   can_merge: boolean;
   conclusion: string;
@@ -83,6 +113,17 @@ export interface FindingRow {
   why: string | null;
   suggestion: string | null;
   snippet: string | null;
+  ord: number;
+}
+
+/** Mirrors a row of the `observations` table. */
+export interface ObservationRow {
+  id: number;
+  review_id: number;
+  file: string | null;
+  line: number | null;
+  note: string;
+  rationale: string | null;
   ord: number;
 }
 

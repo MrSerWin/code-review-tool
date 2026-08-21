@@ -50,7 +50,8 @@ npm run setup          # installs both workspaces and builds the sandbox image
 | `DATA_DIR` | no | `<repo>/data` | Where the database, checkouts, and reports live |
 | `CLAUDE_BIN` | no | `claude` | Path to the Claude Code CLI |
 | `REVIEW_MODEL` | no | `opus` | Model passed to `claude --model` |
-| `REVIEW_TIMEOUT_MS` | no | `1800000` | Hard timeout for one review |
+| `REVIEW_TIMEOUT_MS` | no | `1800000` | Hard timeout for one review process (each lens and the synthesis pass) |
+| `REVIEW_CONCURRENCY` | no | `2` | How many reviews run at once. Each review fans out to 5 lens processes plus a synthesis pass, so the process ceiling is this value * 6 |
 | `DOCKER_BIN` | no | `docker` | Path to the Docker CLI |
 | `GIT_IMAGE` | no | `code-review-tool-git:latest` | Sandbox image tag |
 

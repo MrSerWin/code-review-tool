@@ -28,6 +28,9 @@ const schema = z.object({
   CLAUDE_BIN: z.string().min(1).default('claude'),
   REVIEW_MODEL: z.string().min(1).default('opus'),
   REVIEW_TIMEOUT_MS: z.coerce.number().int().positive().default(1_800_000),
+  // How many reviews (branches) run at once. The lens fan-out inside one
+  // review is always 4 wide, so the process ceiling is this value * 4.
+  REVIEW_CONCURRENCY: z.coerce.number().int().positive().default(2),
   DOCKER_BIN: z.string().min(1).default('docker'),
   GIT_IMAGE: z.string().min(1).default('code-review-tool-git:latest'),
 });
@@ -55,6 +58,7 @@ export const config = Object.freeze({
   claudeBin: parsed.data.CLAUDE_BIN,
   reviewModel: parsed.data.REVIEW_MODEL,
   reviewTimeoutMs: parsed.data.REVIEW_TIMEOUT_MS,
+  reviewConcurrency: parsed.data.REVIEW_CONCURRENCY,
   dockerBin: parsed.data.DOCKER_BIN,
   gitImage: parsed.data.GIT_IMAGE,
 });

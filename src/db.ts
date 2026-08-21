@@ -3,7 +3,7 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 import { config } from './config.js';
 import type {
-  FindingRow, LogLevel, LogRow, RequirementRow, ReviewOutput, ReviewRow,
+  FindingRow, LogLevel, LogRow, ObservationRow, RequirementRow, ReviewOutput, ReviewRow,
 } from './types.js';
 
 fs.mkdirSync(config.DATA_DIR, { recursive: true });
@@ -78,6 +78,18 @@ const MIGRATIONS: string[] = [
      message TEXT NOT NULL
    )`,
   `CREATE INDEX IF NOT EXISTS idx_logs_review ON review_logs(review_id)`,
+  // Added with the multi-lens pipeline. Non-blocking remarks: never part of
+  // the merge gate.
+  `CREATE TABLE IF NOT EXISTS observations (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     review_id INTEGER NOT NULL REFERENCES reviews(id) ON DELETE CASCADE,
+     file TEXT,
+     line INTEGER,
+     note TEXT NOT NULL,
+     rationale TEXT,
+     ord INTEGER NOT NULL
+   )`,
+  `CREATE INDEX IF NOT EXISTS idx_observations_review ON observations(review_id)`,
 ];
 
 export function migrate(): void {
@@ -248,6 +260,33 @@ export function replaceRequirements(reviewId: number, reqs: ReviewOutput['requir
     });
   });
   run();
+}
+
+export function replaceObservations(reviewId: number, rows: ReviewOutput['observations']): void {
+  const insert = db.prepare(
+    `INSERT INTO observations (review_id, file, line, note, rationale, ord)
+     VALUES (@review_id, @file, @line, @note, @rationale, @ord)`,
+  );
+  const run = db.transaction(() => {
+    db.prepare(`DELETE FROM observations WHERE review_id = ?`).run(reviewId);
+    rows.forEach((observation, index) => {
+      insert.run({
+        review_id: reviewId,
+        file: observation.file ?? null,
+        line: observation.line ?? null,
+        note: observation.note,
+        rationale: observation.rationale ?? null,
+        ord: index,
+      });
+    });
+  });
+  run();
+}
+
+export function getObservations(reviewId: number): ObservationRow[] {
+  return db
+    .prepare<[number], ObservationRow>(`SELECT * FROM observations WHERE review_id = ? ORDER BY ord ASC`)
+    .all(reviewId);
 }
 
 export function getRequirements(reviewId: number): RequirementRow[] {

@@ -8,6 +8,7 @@ import {
   deleteReview,
   getFindings,
   getLogs,
+  getObservations,
   getRequirements,
   getReview,
   listReviews,
@@ -123,6 +124,7 @@ export async function reviewRoutes(app: FastifyInstance): Promise<void> {
       review,
       requirements: getRequirements(review.id),
       findings: getFindings(review.id),
+      observations: getObservations(review.id),
       logs: getLogs(review.id),
     };
   });

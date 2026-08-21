@@ -74,9 +74,13 @@ export default function Home() {
 
   const submit = async (e: FormEvent): Promise<void> => {
     e.preventDefault();
-    if (TICKET_RE.test(input.trim()) && !ticket) await resolve();
-    else await run(ticket ? targets.filter((t) => picked.includes(keyOf(t))) : undefined);
+    // A ticket always resolves to its branches first; the review is started from the
+    // card, so the top button never silently launches anything.
+    if (TICKET_RE.test(input.trim())) await resolve();
+    else await run();
   };
+
+  const startPicked = (): Promise<void> => run(targets.filter((t) => picked.includes(keyOf(t))));
 
   const toggle = (k: string): void =>
     setPicked((prev) => (prev.includes(k) ? prev.filter((x) => x !== k) : [...prev, k]));
@@ -100,8 +104,8 @@ export default function Home() {
             if (ticket) reset();
           }}
         />
-        <button className="btn primary" type="submit" disabled={busy || !input.trim()}>
-          {busy ? 'Working…' : ticket ? 'Run review' : 'Review'}
+        <button className="btn" type="submit" disabled={busy || !input.trim()}>
+          {busy ? 'Working…' : TICKET_RE.test(input.trim()) ? 'Find branches' : 'Review'}
         </button>
       </form>
 
@@ -118,9 +122,20 @@ export default function Home() {
             </>
           }
           actions={
-            <button className="btn ghost" type="button" onClick={reset}>
-              Clear
-            </button>
+            <>
+              <button
+                className="btn primary"
+                type="button"
+                onClick={() => void startPicked()}
+                disabled={busy || picked.length === 0}
+                title={picked.length === 0 ? 'Select at least one branch' : undefined}
+              >
+                {busy ? 'Starting…' : `Start review${picked.length > 1 ? ` (${picked.length})` : ''}`}
+              </button>
+              <button className="btn ghost" type="button" onClick={reset}>
+                Clear
+              </button>
+            </>
           }
         >
           {targets.length === 0 ? (

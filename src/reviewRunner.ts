@@ -4,7 +4,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { config } from './config.js';
-import type { CheckoutResult, OnLog, ReviewOutput, ReviewRow, TicketInfo } from './types.js';
+import { LENS_NAMES } from './types.js';
+import type {
+  CheckoutResult, LensName, LensOutput, OnLog, ReviewOutput, ReviewRow, TicketInfo,
+} from './types.js';
 
 export interface PreviousFinding {
   severity: string;
@@ -46,26 +49,47 @@ const findingSchema = z.object({
   snippet: z.string().nullish().transform((v) => v ?? null),
 });
 
+const observationSchema = z.object({
+  file: z.string().nullish().transform((v) => v ?? null),
+  line: z.coerce.number().int().nullish().transform((v) => v ?? null),
+  note: z.string().min(1),
+  rationale: z.string().nullish().transform((v) => v ?? ''),
+});
+
+/** One lens returns candidates only: no requirements, no verdict. */
+export const lensOutputSchema = z.object({
+  findings: z.array(findingSchema).nullish().transform((v) => v ?? []),
+  observations: z.array(observationSchema).nullish().transform((v) => v ?? []),
+});
+
 export const reviewOutputSchema = z.object({
   summary: z.string().min(1),
   requirements: z.array(requirementSchema),
   findings: z.array(findingSchema),
+  observations: z.array(observationSchema).nullish().transform((v) => v ?? []),
   verdict: z.enum(['approve', 'changes_requested', 'blocked']),
   can_merge: z.coerce.boolean(),
   conclusion: z.string().nullish().transform((v) => v ?? ''),
 });
 
-const PROMPT_PATH = path.join(
-  path.dirname(fileURLToPath(import.meta.url)),
-  'prompts',
-  'review-prompt.md',
-);
+const PROMPT_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'prompts');
 
-let cachedTemplate: string | null = null;
+/** Every prompt file, so a caller can check them all. */
+export const PROMPT_FILES = [
+  'common-preamble.md',
+  'lens-common.md',
+  ...LENS_NAMES.map((lens) => `lens-${lens}.md`),
+  'synthesis.md',
+] as const;
 
-export async function loadPromptTemplate(): Promise<string> {
-  if (cachedTemplate === null) cachedTemplate = await readFile(PROMPT_PATH, 'utf8');
-  return cachedTemplate;
+const cachedTemplates = new Map<string, string>();
+
+export async function loadPromptFile(name: string): Promise<string> {
+  const cached = cachedTemplates.get(name);
+  if (cached !== undefined) return cached;
+  const text = await readFile(path.join(PROMPT_DIR, name), 'utf8');
+  cachedTemplates.set(name, text);
+  return text;
 }
 
 export interface PromptVars {
@@ -75,18 +99,63 @@ export interface PromptVars {
   previousFindings: PreviousFinding[];
 }
 
-export function buildPrompt(template: string, vars: PromptVars): string {
-  const values: Record<string, string> = {
+const PLACEHOLDER = /\{\{([A-Z_]+)\}\}/g;
+
+/**
+ * Substitute `{{KEY}}` tokens. A leftover token means a prompt file and this
+ * code disagree, which would ship a broken prompt to the model, so it throws.
+ */
+export function renderTemplate(template: string, values: Record<string, string>): string {
+  // Replace via a callback so `$&`-style sequences inside values stay literal.
+  const out = template.replace(PLACEHOLDER, (match, key: string) =>
+    Object.prototype.hasOwnProperty.call(values, key) ? values[key]! : match);
+  const leftover = out.match(PLACEHOLDER);
+  if (leftover) throw new Error(`Unresolved prompt placeholder(s): ${[...new Set(leftover)].join(', ')}`);
+  return out;
+}
+
+/** The values every prompt file may reference. */
+export function promptValues(vars: PromptVars, lensOutputs = ''): Record<string, string> {
+  return {
     TICKET: renderTicket(vars.ticket, vars.review),
     REPO: vars.review.repo,
     BRANCH: vars.review.branch,
     BASE_SHA: vars.checkout.baseSha,
     CHANGED_FILES: renderChangedFiles(vars.checkout),
     PREVIOUS_FINDINGS: renderPreviousFindings(vars.previousFindings),
+    LENS_OUTPUTS: lensOutputs,
   };
-  // Replace via a callback so `$&`-style sequences inside values stay literal.
-  return template.replace(/\{\{(TICKET|REPO|BRANCH|BASE_SHA|CHANGED_FILES|PREVIOUS_FINDINGS)\}\}/g,
-    (_m, key: string) => values[key] ?? '');
+}
+
+export async function buildLensPrompt(lens: LensName, vars: PromptVars): Promise<string> {
+  const values = promptValues(vars);
+  const [preamble, mandate, tail] = await Promise.all([
+    loadPromptFile('common-preamble.md'),
+    loadPromptFile(`lens-${lens}.md`),
+    loadPromptFile('lens-common.md'),
+  ]);
+  return [preamble, mandate, tail].map((t) => renderTemplate(t, values)).join('\n\n');
+}
+
+export async function buildSynthesisPrompt(vars: PromptVars, lensOutputs: string): Promise<string> {
+  const values = promptValues(vars, lensOutputs);
+  const [preamble, synthesis] = await Promise.all([
+    loadPromptFile('common-preamble.md'),
+    loadPromptFile('synthesis.md'),
+  ]);
+  return [preamble, synthesis].map((t) => renderTemplate(t, values)).join('\n\n');
+}
+
+/** The lens answers, as the synthesis pass sees them. */
+export function renderLensOutputs(results: LensResult[]): string {
+  return results
+    .map((r) => {
+      const body = r.error
+        ? `This lens failed and produced nothing: ${r.error}`
+        : `\`\`\`json\n${JSON.stringify(r.output, null, 2)}\n\`\`\``;
+      return `## Lens: ${r.lens}\n\n${body}`;
+    })
+    .join('\n\n');
 }
 
 function renderTicket(ticket: TicketInfo | null, review: RunnableReview): string {
@@ -184,31 +253,35 @@ export function buildClaudeArgs(prompt: string, model: string, dir: string): str
   ];
 }
 
-export async function runReview(
-  review: RunnableReview,
-  checkout: CheckoutResult,
-  ticket: TicketInfo | null,
-  onLog: OnLog,
-  opts: RunReviewOptions = {},
-): Promise<ReviewOutput> {
-  const template = await loadPromptTemplate();
-  const basePrompt = buildPrompt(template, {
-    ticket,
-    review,
-    checkout,
-    previousFindings: opts.previousFindings ?? [],
-  });
-  const model = opts.model ?? review.model ?? config.REVIEW_MODEL;
-  const timeoutMs = opts.timeoutMs ?? config.REVIEW_TIMEOUT_MS;
+export interface LensResult {
+  lens: LensName;
+  output: LensOutput | null;
+  error: string | null;
+}
 
+interface PassOptions {
+  dir: string;
+  model: string;
+  timeoutMs: number;
+  signal: AbortSignal | undefined;
+}
+
+/** Run one `claude -p` pass and parse its JSON block, retrying once. */
+async function runPass<T>(
+  label: string,
+  basePrompt: string,
+  schema: z.ZodType<T>,
+  onLog: OnLog,
+  opts: PassOptions,
+): Promise<T> {
   let lastRaw = '';
   let lastError = '';
 
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     const prompt = attempt === 1 ? basePrompt : correctivePrompt(basePrompt, lastError);
-    if (attempt === 2) onLog('warn', 'Model output was not valid JSON. Retrying once.');
+    if (attempt === 2) onLog('warn', `${label}: output was not valid JSON. Retrying once.`);
 
-    const raw = await spawnClaude(prompt, model, checkout.dir, timeoutMs, onLog, opts.signal);
+    const raw = await spawnClaude(prompt, opts.model, opts.dir, opts.timeoutMs, onLog, opts.signal);
     lastRaw = raw;
 
     const json = extractJson(raw);
@@ -216,26 +289,113 @@ export async function runReview(
       lastError = 'no JSON object found in the answer';
       continue;
     }
-    const parsed = reviewOutputSchema.safeParse(json);
+    const parsed = schema.safeParse(json);
     if (!parsed.success) {
       lastError = parsed.error.issues
         .map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`)
         .join('; ');
       continue;
     }
-    return normalize(parsed.data as ReviewOutput);
+    return parsed.data;
   }
 
   throw new Error(
-    `The review model did not return a valid ReviewOutput JSON block (${lastError}).\n` +
+    `${label}: the model did not return a valid JSON block (${lastError}).\n` +
       `--- raw answer (truncated) ---\n${lastRaw.slice(0, 4000)}`,
   );
+}
+
+function countLabel(n: number, word: string): string {
+  return `${n} ${word}${n === 1 ? '' : 's'}`;
+}
+
+/**
+ * The lenses run as independent processes against the same checkout. One
+ * lens failing degrades the review instead of losing the others; the
+ * synthesis pass is told which lens produced nothing.
+ */
+async function runLenses(
+  vars: PromptVars,
+  onLog: OnLog,
+  opts: PassOptions,
+): Promise<LensResult[]> {
+  return Promise.all(
+    LENS_NAMES.map(async (lens): Promise<LensResult> => {
+      const lensLog: OnLog = (level, message) => onLog(level, `[${lens}] ${message}`);
+      onLog('info', `lens ${lens}: started`);
+      try {
+        const prompt = await buildLensPrompt(lens, vars);
+        const output = await runPass(`lens ${lens}`, prompt, lensOutputSchema, lensLog, opts);
+        onLog(
+          'info',
+          `lens ${lens}: ${countLabel(output.findings.length, 'finding')}, ` +
+            `${countLabel(output.observations.length, 'observation')}`,
+        );
+        return { lens, output, error: null };
+      } catch (err) {
+        // A cancelled run must abort the whole review, not degrade it.
+        if (opts.signal?.aborted) throw err;
+        const message = err instanceof Error ? err.message : String(err);
+        onLog('warn', `lens ${lens}: failed — ${message.split('\n')[0]}`);
+        return { lens, output: null, error: message.slice(0, 500) };
+      }
+    }),
+  );
+}
+
+export async function runReview(
+  review: RunnableReview,
+  checkout: CheckoutResult,
+  ticket: TicketInfo | null,
+  onLog: OnLog,
+  opts: RunReviewOptions = {},
+): Promise<ReviewOutput> {
+  const vars: PromptVars = {
+    ticket,
+    review,
+    checkout,
+    previousFindings: opts.previousFindings ?? [],
+  };
+  const passOpts: PassOptions = {
+    dir: checkout.dir,
+    model: opts.model ?? review.model ?? config.REVIEW_MODEL,
+    timeoutMs: opts.timeoutMs ?? config.REVIEW_TIMEOUT_MS,
+    signal: opts.signal,
+  };
+
+  onLog('info', `Running ${LENS_NAMES.length} review lenses in parallel: ${LENS_NAMES.join(', ')}.`);
+  const lensResults = await runLenses(vars, onLog, passOpts);
+  if (lensResults.every((r) => r.output === null)) {
+    throw new Error(
+      `Every review lens failed. First error: ${lensResults[0]?.error ?? 'unknown'}`,
+    );
+  }
+
+  const totalCandidates = lensResults.reduce((n, r) => n + (r.output?.findings.length ?? 0), 0);
+  onLog('info', `synthesis: started with ${countLabel(totalCandidates, 'candidate finding')}.`);
+
+  const prompt = await buildSynthesisPrompt(vars, renderLensOutputs(lensResults));
+  const output = await runPass(
+    'synthesis',
+    prompt,
+    reviewOutputSchema,
+    (level, message) => onLog(level, `[synthesis] ${message}`),
+    passOpts,
+  );
+  onLog(
+    'info',
+    `synthesis: ${countLabel(output.findings.length, 'finding')}, ` +
+      `${countLabel(output.observations.length, 'observation')}, ` +
+      `${countLabel(output.requirements.length, 'requirement')}`,
+  );
+
+  return normalize(output as ReviewOutput);
 }
 
 function correctivePrompt(basePrompt: string, problem: string): string {
   return [
     'Your previous answer could not be parsed. Problem: ' + problem + '.',
-    'Do the review again and this time end your answer with exactly ONE ```json',
+    'Do the work again and this time end your answer with exactly ONE ```json',
     'fenced block that matches the schema. No text after that block. No comments,',
     'no trailing commas inside the JSON.',
     '',
@@ -246,12 +406,12 @@ function correctivePrompt(basePrompt: string, problem: string): string {
 function normalize(output: ReviewOutput): ReviewOutput {
   const hasBlocking = output.findings.some((f) => f.severity === 'blocker' || f.severity === 'major');
   // `not_verifiable` cannot be checked from this repository, so it does not
-  // block a merge on its own (see step 6 of the prompt). Only `partial` and
-  // `missing` do.
+  // block a merge on its own. Only `partial` and `missing` do.
   const nothingOpen = output.requirements.every(
     (r) => r.status === 'met' || r.status === 'not_verifiable',
   );
-  // The merge gate is a hard rule, not a model opinion.
+  // The merge gate is a hard rule, not a model opinion. `observations` are
+  // deliberately absent from it: they never block a merge.
   const canMerge = output.can_merge && !hasBlocking && nothingOpen;
   // Keep the verdict and the gate consistent: an "approve" banner must never
   // sit on top of can_merge = false.

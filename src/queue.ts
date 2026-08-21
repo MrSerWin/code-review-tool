@@ -5,9 +5,11 @@ import {
   getPreviousRun,
   getReview,
   replaceFindings,
+  replaceObservations,
   replaceRequirements,
   updateReview,
 } from './db.js';
+import { config } from './config.js';
 import { publish } from './events.js';
 import { assertPristine, ensureImage, fetchCheckout, pruneCheckout } from './gitSandbox.js';
 import { runReview, type PreviousFinding } from './reviewRunner.js';
@@ -28,15 +30,21 @@ interface Job {
 
 const pending: number[] = [];
 const cancelling = new Set<number>();
-let current: Job | null = null;
-let draining = false;
+const running = new Map<number, Job>();
+let workers = 0;
 
-/** Queue a review row for processing. Concurrency is 1, in-process. */
+/**
+ * How many reviews run at once. Each review fans out to four lens processes
+ * plus one synthesis process, so the real process ceiling is this times four.
+ */
+const CONCURRENCY = config.REVIEW_CONCURRENCY;
+
+/** Queue a review row for processing, in-process. */
 export function enqueueReview(reviewId: number): void {
   pending.push(reviewId);
   log(reviewId, 'info', 'Queued.');
   status(reviewId, 'queued');
-  void drain();
+  spawnWorkers();
 }
 
 /** Cancel a queued or running review. Returns false if it is neither. */
@@ -49,9 +57,10 @@ export function cancelReview(reviewId: number): boolean {
     status(reviewId, 'cancelled');
     return true;
   }
-  if (current?.reviewId === reviewId) {
+  const job = running.get(reviewId);
+  if (job) {
     cancelling.add(reviewId);
-    current.controller.abort();
+    job.controller.abort();
     log(reviewId, 'warn', 'Cancellation requested.');
     return true;
   }
@@ -79,25 +88,31 @@ export function recoverInterrupted(): void {
   }
 }
 
-async function drain(): Promise<void> {
-  if (draining) return;
-  draining = true;
+/** Top up the worker pool to `CONCURRENCY` while there is queued work. */
+function spawnWorkers(): void {
+  while (workers < CONCURRENCY && pending.length > 0) {
+    workers += 1;
+    void worker();
+  }
+}
+
+async function worker(): Promise<void> {
   try {
     while (pending.length > 0) {
       const reviewId = pending.shift()!;
       const controller = new AbortController();
-      current = { reviewId, controller };
+      running.set(reviewId, { reviewId, controller });
       try {
         await processReview(reviewId, controller.signal);
       } catch (err) {
         handleFailure(reviewId, err);
       } finally {
-        current = null;
+        running.delete(reviewId);
         cancelling.delete(reviewId);
       }
     }
   } finally {
-    draining = false;
+    workers -= 1;
   }
 }
 
@@ -160,6 +175,7 @@ async function processReview(reviewId: number, signal: AbortSignal): Promise<voi
 
   replaceRequirements(reviewId, output.requirements);
   replaceFindings(reviewId, output.findings);
+  replaceObservations(reviewId, output.observations);
 
   const reportPath = await writeReport(review, ticket, checkout, output);
   log(reviewId, 'info', `Report written to ${reportPath}`);
@@ -178,7 +194,12 @@ async function processReview(reviewId: number, signal: AbortSignal): Promise<voi
     finished_at: nowIso(),
     error: null,
   });
-  log(reviewId, 'info', `Done — verdict ${output.verdict}, can_merge=${output.can_merge}.`);
+  log(
+    reviewId,
+    'info',
+    `Done — verdict ${output.verdict}, can_merge=${output.can_merge}, ` +
+      `${output.findings.length} finding(s), ${output.observations.length} observation(s).`,
+  );
   publish(reviewId, {
     type: 'done',
     reviewId,

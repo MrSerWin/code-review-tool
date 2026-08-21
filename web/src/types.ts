@@ -68,6 +68,17 @@ export interface Finding {
   ord: number;
 }
 
+/** Non-blocking remark from a lens pass. Never affects the verdict. */
+export interface Observation {
+  id: number;
+  review_id: number;
+  file: string | null;
+  line: number | null;
+  note: string;
+  rationale: string | null;
+  ord: number;
+}
+
 export interface Requirement {
   id: number;
   review_id: number;
@@ -89,6 +100,7 @@ export interface ReviewDetailPayload {
   review: Review;
   requirements: Requirement[];
   findings: Finding[];
+  observations: Observation[];
   logs: LogLine[];
 }
 
