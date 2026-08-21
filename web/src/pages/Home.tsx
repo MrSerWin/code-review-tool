@@ -4,7 +4,9 @@ import { Card, StatusPill, VerdictBadge, fmtTime } from '../components/ui';
 import { Link, navigate } from '../router';
 import type { ResolvedTarget, Review, TicketInfo } from '../types';
 
-const TICKET_RE = /^[a-z]{2,6}-\d+$/i;
+const TICKET_RE = /^(?:[a-z]+:)?[a-z][a-z0-9_]*-\d+$/i;
+/** A GitHub issue reference, the one ticket shape that is always available. */
+const ISSUE_RE = /^(?:github:)?[\w.-]+\/[\w.-]+#\d+$/i;
 const ACTIVE = new Set(['queued', 'fetching', 'reviewing']);
 const keyOf = (t: ResolvedTarget): string => `${t.repo}#${t.branch}`;
 
@@ -16,6 +18,24 @@ export default function Home() {
   const [targets, setTargets] = useState<ResolvedTarget[]>([]);
   const [picked, setPicked] = useState<string[]>([]);
   const [history, setHistory] = useState<Review[]>([]);
+  const [trackers, setTrackers] = useState<string[] | null>(null);
+  const [requirements, setRequirements] = useState('');
+  const [manualOpen, setManualOpen] = useState(false);
+
+  // GitHub Issues need no extra credentials, so they are always available; a
+  // key like ABC-123 only means something when another tracker is configured.
+  const hasKeyTracker = trackers === null || trackers.some((t) => t !== 'github');
+  const manualText = requirements.trim();
+
+  // With requirements pasted by hand no ticket is looked up, so the input only
+  // has to name a branch.
+  const isTicketInput = !manualText && (hasKeyTracker
+    ? TICKET_RE.test(input.trim())
+    : ISSUE_RE.test(input.trim()));
+
+  const placeholder = hasKeyTracker
+    ? 'ABC-123, PR URL, or repo#branch'
+    : 'my-org/my-service#12, PR URL, or repo#branch';
 
   const loadHistory = useCallback(async () => {
     try {
@@ -29,6 +49,13 @@ export default function Home() {
   useEffect(() => {
     void loadHistory();
   }, [loadHistory]);
+
+  useEffect(() => {
+    api
+      .health()
+      .then((h) => setTrackers(h.trackers ?? []))
+      .catch(() => setTrackers(null));
+  }, []);
 
   useEffect(() => {
     if (!history.some((r) => ACTIVE.has(r.status))) return;
@@ -59,9 +86,11 @@ export default function Home() {
     setError(null);
     setBusy(true);
     try {
-      const { reviews } = await api.createReviews(
-        chosen ? { input: value, targets: chosen } : { input: value },
-      );
+      const { reviews } = await api.createReviews({
+        input: value,
+        ...(chosen ? { targets: chosen } : {}),
+        ...(manualText ? { requirementsText: manualText } : {}),
+      });
       if (reviews.length === 1) navigate(`/review/${reviews[0]!.id}`);
       else if (reviews[0]?.ticket_key) navigate(`/ticket/${reviews[0].ticket_key}`);
       else await loadHistory();
@@ -76,7 +105,7 @@ export default function Home() {
     e.preventDefault();
     // A ticket always resolves to its branches first; the review is started from the
     // card, so the top button never silently launches anything.
-    if (TICKET_RE.test(input.trim())) await resolve();
+    if (isTicketInput) await resolve();
     else await run();
   };
 
@@ -96,7 +125,7 @@ export default function Home() {
       <form className="launcher" onSubmit={(e) => void submit(e)}>
         <input
           className="launcher-input"
-          placeholder="ABC-123, PR URL, or repo#branch"
+          placeholder={placeholder}
           value={input}
           spellCheck={false}
           onChange={(e) => {
@@ -105,9 +134,40 @@ export default function Home() {
           }}
         />
         <button className="btn" type="submit" disabled={busy || !input.trim()}>
-          {busy ? 'Working…' : TICKET_RE.test(input.trim()) ? 'Find branches' : 'Review'}
+          {busy ? 'Working…' : isTicketInput ? 'Find branches' : 'Review'}
         </button>
       </form>
+
+      <div className="manual">
+        <button
+          className="manual-toggle"
+          type="button"
+          aria-expanded={manualOpen}
+          onClick={() => setManualOpen((open) => !open)}
+        >
+          {manualOpen ? '▾' : '▸'} Paste requirements instead
+          {!manualOpen && manualText ? <span className="tag tracker">in use</span> : null}
+        </button>
+        {manualOpen && (
+          <>
+            <textarea
+              className="manual-input"
+              rows={6}
+              spellCheck={false}
+              placeholder={'What should this branch do?\nThe first line becomes the title.'}
+              value={requirements}
+              onChange={(e) => {
+                setRequirements(e.target.value);
+                if (ticket) reset();
+              }}
+            />
+            <p className="muted manual-hint">
+              Used instead of a ticket. The input above only has to name a branch: a pull request
+              URL, a tree URL, or repo#branch.
+            </p>
+          </>
+        )}
+      </div>
 
       {error && <p className="error-line">{error}</p>}
 
@@ -115,9 +175,14 @@ export default function Home() {
         <Card
           title={
             <>
-              <a href={ticket.url} target="_blank" rel="noreferrer" className="mono">
-                {ticket.key}
-              </a>{' '}
+              {ticket.url ? (
+                <a href={ticket.url} target="_blank" rel="noreferrer" className="mono">
+                  {ticket.key}
+                </a>
+              ) : (
+                <span className="mono">{ticket.key || 'Requirements'}</span>
+              )}{' '}
+              <span className="tag tracker">{ticket.provider}</span>{' '}
               <span className="muted">{ticket.title}</span>
             </>
           }

@@ -1,0 +1,119 @@
+{
+  // Must match the directory name: <PREVIEW_RECIPES_DIR>/example-app/recipe.json
+  "name": "example-app",
+
+  // Shown in the UI next to the recipe name.
+  "description": "Generic web app: Postgres, an API service, and a static frontend.",
+
+  // Which allowlisted repositories this preview composes.
+  // Key   = role, used to build the CHECKOUT_/BRANCH_/BASE_ variables
+  //         (backend -> CHECKOUT_BACKEND, BRANCH_BACKEND, BASE_BACKEND).
+  // Value = repository name; it must appear in ALLOWED_REPOS.
+  // A role whose repository has no branch for the ticket runs its base branch,
+  // and the API reports that role with "usedBase": true.
+  "repos": {
+    "backend": "my-service",
+    "frontend": "my-frontend"
+  },
+
+  // Logical ports. The engine allocates one free host port per entry from
+  // PREVIEW_PORT_RANGE and exposes it as PORT_<ID in upper case>.
+  // "primary" marks the port whose URL is shown to the user; without it the
+  // first entry wins. A port with the id "db" is also used for DB_PORT.
+  "ports": [
+    { "id": "db", "internal": 5432 },
+    { "id": "api", "internal": 8000 },
+    { "id": "web", "internal": 3000, "primary": true }
+  ],
+
+  "database": {
+    "engine": "postgres",
+    "version": "16",
+
+    // Optional coordinates handed to the steps as DB_NAME, DB_USER, DB_HOST.
+    // DB_NAME defaults to preview_<id>, DB_USER to postgres, DB_HOST to 127.0.0.1.
+    "name": "preview_app",
+    "user": "app",
+    "host": "127.0.0.1",
+
+    // Where the data comes from. Resolved in order; the first that works wins,
+    // and the result is reported as DUMP_MODE.
+    "source": {
+      // auto      - try pg_dump, then dumpDir, then a clean install
+      // pg_dump   - only dump the live database
+      // dump-dir  - only use the newest file in dumpDir
+      // none      - always start clean
+      "mode": "auto",
+
+      // Absolute path, optionally ending in a glob. The newest matching,
+      // non-empty file wins.
+      "dumpDir": "/var/tmp/example-app-dumps/*.dump",
+
+      "pgDump": {
+        // Connection string for the database to dump. Put the password in
+        // "env" below as PGPASSWORD; never in this URL.
+        "url": "postgres://readonly@db.internal.example:5432/appdb",
+
+        // Tables whose rows are large and worthless in a preview.
+        "excludeTableData": ["audit_log", "request_trace_*"],
+
+        // Hard ceiling for the dump attempt. An unreachable host is detected
+        // in a few seconds and never blocks the preview.
+        "timeoutSec": 300
+      },
+
+      // clean - start from an empty database when no dump can be obtained
+      // fail  - refuse to start the preview instead
+      "onFailure": "clean"
+    }
+  },
+
+  // Extra variables handed to every step, on top of the ones the engine sets.
+  // This is where a dump password belongs.
+  "env": {
+    "PGPASSWORD": "change-me",
+    "COMPOSE_PROJECT_NAME": "example-app-preview"
+  },
+
+  // Shell commands. They run in order with PREVIEW_DIR as the working
+  // directory. Nothing is interpolated into them: every value arrives through
+  // the environment, so quote your variables.
+  "steps": {
+    // Everything needed before the stack can start.
+    "prepare": [
+      "cp \"$RECIPE_DIR/compose.yml\" \"$PREVIEW_DIR/compose.yml\"",
+      "docker compose -p \"$PREVIEW_ID\" -f \"$PREVIEW_DIR/compose.yml\" up -d db",
+      "until docker compose -p \"$PREVIEW_ID\" -f \"$PREVIEW_DIR/compose.yml\" exec -T db pg_isready -U \"$DB_USER\"; do sleep 2; done",
+      "if [ -n \"$DUMP_FILE\" ]; then docker compose -p \"$PREVIEW_ID\" -f \"$PREVIEW_DIR/compose.yml\" exec -T db pg_restore --clean --if-exists --no-owner -U \"$DB_USER\" -d \"$DB_NAME\" < \"$DUMP_FILE\"; fi",
+      "docker compose -p \"$PREVIEW_ID\" -f \"$PREVIEW_DIR/compose.yml\" run --rm api ./manage.sh migrate",
+      "if [ \"$DUMP_MODE\" = clean ]; then docker compose -p \"$PREVIEW_ID\" -f \"$PREVIEW_DIR/compose.yml\" run --rm api ./manage.sh seed-demo-data; fi"
+    ],
+
+    // Start the stack. Must return once the containers are launched.
+    "up": [
+      "docker compose -p \"$PREVIEW_ID\" -f \"$PREVIEW_DIR/compose.yml\" up -d --build"
+    ],
+
+    // Polled until every command exits 0 or readyTimeoutSec runs out.
+    "health": [
+      "curl -fsS \"http://127.0.0.1:$PORT_API/healthz\" > /dev/null",
+      "curl -fsS \"http://127.0.0.1:$PORT_WEB/\" > /dev/null"
+    ],
+
+    // Runs on stop, on failure, on timeout, on TTL expiry, and at server start
+    // for previews a crash left behind. Must be idempotent and must succeed
+    // even when nothing was ever started.
+    "down": [
+      "docker compose -p \"$PREVIEW_ID\" -f \"$PREVIEW_DIR/compose.yml\" down -v --remove-orphans || true"
+    ]
+  },
+
+  // Budget for prepare + up + health together.
+  "readyTimeoutSec": 900,
+
+  // Optional ceiling for a single command; defaults to readyTimeoutSec.
+  "stepTimeoutSec": 600,
+
+  // Shown in the UI once the preview is up.
+  "credentialsHint": "Sign in as demo@example.com / demo-password"
+}

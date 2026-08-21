@@ -8,17 +8,20 @@ import type { ResolvedTarget, TicketInfo } from './types.js';
 const HELP = `code-review-tool — run a read-only code review from the terminal.
 
 Usage:
-  tsx src/cli.ts <input> [--model <name>] [--quiet]
+  tsx src/cli.ts <input> [--model <name>] [--quiet] [--requirements <text>]
   tsx src/cli.ts --help
 
 Input can be:
-  ABC-123                                          a Linear ticket key
+  ABC-123                                          a ticket key of a configured tracker
+  jira:ABC-123                                     the same key, forced to one tracker
   https://github.com/<org>/<repo>/pull/12          a pull request URL
   https://github.com/<org>/<repo>/tree/<branch>    a branch URL
   my-service#feature/abc-123-example               repo#branch
 
 Options:
   --model <name>   review model (default: ${config.REVIEW_MODEL})
+  --requirements <text>
+                   review against these requirements instead of a ticket
   --quiet          only print the final result and report paths
   -h, --help       show this help
 
@@ -37,6 +40,7 @@ The reviewed code is never modified.`;
 interface Args {
   input: string;
   model?: string;
+  requirementsText?: string;
   quiet: boolean;
 }
 
@@ -47,6 +51,7 @@ function parseArgs(argv: string[]): Args | null {
     if (arg === '-h' || arg === '--help') return null;
     if (arg === '--quiet') { args.quiet = true; continue; }
     if (arg === '--model') { args.model = argv[i + 1]; i += 1; continue; }
+    if (arg === '--requirements') { args.requirementsText = argv[i + 1]; i += 1; continue; }
     if (arg.startsWith('-')) throw new Error(`Unknown option: ${arg}`);
     if (args.input) throw new Error('Only one input is supported.');
     args.input = arg;
@@ -73,7 +78,7 @@ async function main(): Promise<number> {
 
   let resolved: { ticket: TicketInfo | null; targets: ResolvedTarget[] };
   try {
-    resolved = await resolveTargets(args.input);
+    resolved = await resolveTargets(args.input, { requirementsText: args.requirementsText });
   } catch (err) {
     console.error(`Could not resolve "${args.input}": ${err instanceof Error ? err.message : String(err)}`);
     return 2;
@@ -84,7 +89,8 @@ async function main(): Promise<number> {
   }
 
   if (resolved.ticket) {
-    console.log(`Ticket: ${resolved.ticket.key} — ${resolved.ticket.title}`);
+    const label = resolved.ticket.key || 'Pasted requirements';
+    console.log(`Ticket (${resolved.ticket.provider}): ${label} — ${resolved.ticket.title}`);
   }
   console.log(`Branches to review (${resolved.targets.length}):`);
   for (const t of resolved.targets) console.log(`  - ${t.repo}#${t.branch} (base ${t.baseBranch})`);
@@ -93,9 +99,9 @@ async function main(): Promise<number> {
   const ids: number[] = [];
   for (const target of resolved.targets) {
     const review = db.createReview({
-      ticket_key: resolved.ticket?.key ?? null,
-      ticket_title: resolved.ticket?.title ?? null,
-      ticket_url: resolved.ticket?.url ?? null,
+      ticket_key: resolved.ticket?.key || null,
+      ticket_title: resolved.ticket?.title || null,
+      ticket_url: resolved.ticket?.url || null,
       ticket_body: resolved.ticket?.body ?? null,
       repo: target.repo,
       branch: target.branch,

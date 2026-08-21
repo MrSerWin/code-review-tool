@@ -90,6 +90,37 @@ const MIGRATIONS: string[] = [
      ord INTEGER NOT NULL
    )`,
   `CREATE INDEX IF NOT EXISTS idx_observations_review ON observations(review_id)`,
+  // Preview environments. A preview outlives the review it came from, so the
+  // reference is nulled rather than cascaded when the review row is deleted.
+  `CREATE TABLE IF NOT EXISTS previews (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     review_id INTEGER REFERENCES reviews(id) ON DELETE SET NULL,
+     recipe TEXT NOT NULL,
+     ticket_key TEXT,
+     roles_json TEXT NOT NULL,
+     ports_json TEXT NOT NULL,
+     url TEXT,
+     db_name TEXT,
+     dump_mode TEXT,
+     dump_source TEXT,
+     status TEXT NOT NULL,
+     error TEXT,
+     credentials_hint TEXT,
+     created_at TEXT NOT NULL,
+     ready_at TEXT,
+     expires_at TEXT,
+     stopped_at TEXT
+   )`,
+  `CREATE INDEX IF NOT EXISTS idx_previews_status ON previews(status)`,
+  `CREATE INDEX IF NOT EXISTS idx_previews_review ON previews(review_id)`,
+  `CREATE TABLE IF NOT EXISTS preview_logs (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     preview_id INTEGER NOT NULL REFERENCES previews(id) ON DELETE CASCADE,
+     ts TEXT NOT NULL,
+     level TEXT NOT NULL,
+     message TEXT NOT NULL
+   )`,
+  `CREATE INDEX IF NOT EXISTS idx_preview_logs_preview ON preview_logs(preview_id)`,
 ];
 
 export function migrate(): void {

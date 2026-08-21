@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api';
+import PreviewPanel from '../components/PreviewPanel';
 import {
   Card,
   RequirementStatusTag,
@@ -281,6 +282,8 @@ export default function ReviewDetail({ id }: { id: number }) {
           </div>
         </Card>
       </div>
+
+      <PreviewPanel reviewId={review.id} repo={review.repo} branch={review.branch} />
 
       <Card title="Ticket requirements">
         {requirements.length === 0 ? (

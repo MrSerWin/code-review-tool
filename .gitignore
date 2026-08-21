@@ -4,3 +4,5 @@ dist
 data/
 web/dist
 .DS_Store
+# Real preview recipes are product-specific and stay out of this repo.
+recipes/

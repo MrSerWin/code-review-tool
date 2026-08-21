@@ -5,9 +5,12 @@ import { fileURLToPath } from 'node:url';
 import fastifyStatic from '@fastify/static';
 import Fastify from 'fastify';
 import { ALLOWED_REPOS, config } from './config.js';
+import { activeTrackerNames } from './trackers/index.js';
 import { ensureImage } from './gitSandbox.js';
 import { logger } from './logger.js';
 import { recoverInterrupted } from './queue.js';
+import { previewsSummary, recoverOrphanPreviews, startReaper } from './preview/engine.js';
+import { previewRoutes } from './routes/previews.js';
 import { repoRoutes } from './routes/repos.js';
 import { reviewRoutes } from './routes/reviews.js';
 import { ticketRoutes } from './routes/tickets.js';
@@ -30,13 +33,16 @@ export async function buildServer() {
     ok: true,
     version,
     dockerImage: config.GIT_IMAGE,
-    linear: Boolean(config.LINEAR_API_KEY),
+    // Names only: which trackers are usable, never a credential.
+    trackers: activeTrackerNames(),
     repos: ALLOWED_REPOS.length,
+    previews: previewsSummary(),
   }));
 
   await app.register(repoRoutes);
   await app.register(ticketRoutes);
   await app.register(reviewRoutes);
+  await app.register(previewRoutes);
 
   const hasWeb = existsSync(path.join(webDist, 'index.html'));
   if (hasWeb) await app.register(fastifyStatic, { root: webDist });
@@ -66,6 +72,11 @@ async function main(): Promise<void> {
   ensureImage().catch((err: unknown) => {
     logger.warn(`git sandbox image unavailable: ${(err as Error).message}`);
   });
+
+  // Previews left running by a crash own containers nobody else will stop.
+  recoverOrphanPreviews()
+    .catch((err: unknown) => logger.warn(`preview recovery failed: ${(err as Error).message}`))
+    .finally(() => startReaper());
 
   const shutdown = (): void => {
     void app.close().then(() => process.exit(0));

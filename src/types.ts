@@ -8,6 +8,8 @@ export const LENS_NAMES = ['correctness', 'security', 'tests', 'contracts', 'reg
 export type LensName = (typeof LENS_NAMES)[number];
 
 export interface TicketInfo {
+  /** Which tracker produced this ticket, or 'manual' for pasted requirements. */
+  provider: string;
   key: string; title: string; url: string; body: string;
   state: string; branchName: string | null;
   comments: { author: string; body: string }[];
@@ -147,3 +149,54 @@ export interface LogRow {
 }
 
 export type OnLog = (level: LogLevel, message: string) => void;
+
+// --- preview environments ---
+
+export type PreviewStatus =
+  | 'queued' | 'preparing' | 'starting' | 'ready'
+  | 'stopping' | 'stopped' | 'failed' | 'expired';
+
+/** How the preview database was populated. */
+export type DumpMode = 'dump-dir' | 'pg_dump' | 'clean';
+
+/** One repository taking part in a preview. */
+export interface PreviewRole {
+  role: string;
+  repo: string;
+  branch: string;
+  base: string;
+  /** True when the repo had no branch for this ticket and its base branch is used. */
+  usedBase: boolean;
+}
+
+/** Mirrors a row of the `previews` table. */
+export interface PreviewRow {
+  id: number;
+  review_id: number | null;
+  recipe: string;
+  ticket_key: string | null;
+  /** JSON-encoded `PreviewRole[]`. */
+  roles_json: string;
+  /** JSON-encoded `Record<string, number>` of logical port id to host port. */
+  ports_json: string;
+  url: string | null;
+  db_name: string | null;
+  dump_mode: DumpMode | null;
+  dump_source: string | null;
+  status: PreviewStatus;
+  error: string | null;
+  credentials_hint: string | null;
+  created_at: string;
+  ready_at: string | null;
+  expires_at: string | null;
+  stopped_at: string | null;
+}
+
+/** Mirrors a row of the `preview_logs` table. */
+export interface PreviewLogRow {
+  id: number;
+  preview_id: number;
+  ts: string;
+  level: LogLevel;
+  message: string;
+}

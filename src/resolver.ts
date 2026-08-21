@@ -1,7 +1,9 @@
 import { ALLOWED_REPOS, assertAllowedRepo, config } from './config.js';
-import { getTicket, parsePrUrls, parseTicketKey } from './linear.js';
 import { ghApi, lsRemoteHeads } from './gitSandbox.js';
 import { logger } from './logger.js';
+import { parsePrUrls } from './prLinks.js';
+import { activeTrackerNames, getTicket, looksLikeTicket } from './trackers/index.js';
+import { firstLine } from './trackers/types.js';
 import type { ResolvedTarget, TicketInfo } from './types.js';
 
 const defaultBranchCache = new Map<string, string>();
@@ -16,11 +18,24 @@ async function defaultBranch(repo: string): Promise<string> {
   return branch;
 }
 
-function ticketBranchPattern(key: string): RegExp {
-  const parsed = parseTicketKey(key);
-  if (!parsed) throw new Error(`Not a ticket key: ${key}`);
-  const team = parsed.team.toLowerCase();
-  return new RegExp(`(^|[^a-z0-9])${team}-?${parsed.number}([^0-9]|$)`, 'i');
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * How a ticket key shows up in a branch name. The key is just a string here:
+ * branch discovery knows nothing about which tracker produced it.
+ */
+export function branchPattern(key: string): RegExp {
+  const projectKey = /^([A-Za-z][A-Za-z0-9_]*)-(\d+)$/.exec(key.trim());
+  if (projectKey) {
+    const project = escapeRegExp((projectKey[1] as string).toLowerCase());
+    return new RegExp(`(^|[^a-z0-9])${project}-?${projectKey[2]}([^0-9]|$)`, 'i');
+  }
+  // Numeric keys (GitHub issues, Azure work items): match the number alone.
+  const numeric = /(?:^|[/#])(\d+)$/.exec(key.trim());
+  if (numeric) return new RegExp(`(^|[^0-9])${numeric[1]}([^0-9]|$)`);
+  return new RegExp(escapeRegExp(key.trim()), 'i');
 }
 
 function pushTarget(targets: ResolvedTarget[], target: ResolvedTarget): void {
@@ -48,7 +63,7 @@ async function targetsFromTicket(ticket: TicketInfo): Promise<ResolvedTarget[]> 
     }
   }
 
-  const pattern = ticketBranchPattern(ticket.key);
+  const pattern = branchPattern(ticket.key);
   for (const repo of ALLOWED_REPOS) {
     let heads: string[];
     try {
@@ -67,25 +82,51 @@ async function targetsFromTicket(ticket: TicketInfo): Promise<ResolvedTarget[]> 
 }
 
 async function ticketFromBranchName(branch: string): Promise<TicketInfo | null> {
-  const match = /([A-Za-z]+)-(\d+)/.exec(branch);
+  const match = /([A-Za-z][A-Za-z0-9_]*)-(\d+)/.exec(branch);
   if (!match) return null;
+  const key = `${match[1]}-${match[2]}`;
   try {
-    return await getTicket(`${match[1]}-${match[2]}`);
+    if (!looksLikeTicket(key)) return null;
+    return await getTicket(key);
   } catch (error) {
-    logger.warn(`No Linear ticket for branch ${branch}:`, (error as Error).message);
+    logger.warn(`No ticket for branch ${branch}:`, (error as Error).message);
     return null;
   }
 }
 
+/** Requirements pasted by hand stand in for a ticket, without a key. */
+function manualTicket(text: string): TicketInfo {
+  const body = text.trim();
+  return {
+    provider: 'manual',
+    key: '',
+    title: firstLine(body) || 'Pasted requirements',
+    url: '',
+    body,
+    state: 'manual',
+    branchName: null,
+    comments: [],
+    attachmentUrls: [],
+  };
+}
+
+export interface ResolveOptions {
+  /** Requirements typed by the user; replaces the ticket lookup entirely. */
+  requirementsText?: string;
+}
+
 export async function resolveTargets(
   input: string,
+  options: ResolveOptions = {},
 ): Promise<{ ticket: TicketInfo | null; targets: ResolvedTarget[] }> {
   const raw = input.trim();
   if (!raw) throw new Error('Unsupported input: empty');
 
+  const manual = options.requirementsText?.trim() ? manualTicket(options.requirementsText) : null;
   const org = config.GITHUB_ORG;
 
-  if (parseTicketKey(raw)) {
+  // Pasted requirements replace the tracker, so the input only has to name a branch.
+  if (!manual && looksLikeTicket(raw)) {
     const ticket = await getTicket(raw);
     const targets = await targetsFromTicket(ticket);
     if (targets.length === 0) {
@@ -107,7 +148,7 @@ export async function resolveTargets(
     if (!pr.head?.ref) throw new Error(`Pull request ${repo}#${prNumber} has no head branch`);
     const branch = pr.head.ref;
     return {
-      ticket: await ticketFromBranchName(branch),
+      ticket: manual ?? (await ticketFromBranchName(branch)),
       targets: [{ repo, branch, baseBranch: pr.base?.ref ?? (await defaultBranch(repo)), prNumber }],
     };
   }
@@ -123,14 +164,23 @@ export async function resolveTargets(
   if (pair) {
     assertAllowedRepo(pair.repo);
     return {
-      ticket: await ticketFromBranchName(pair.branch),
+      ticket: manual ?? (await ticketFromBranchName(pair.branch)),
       targets: [
         { repo: pair.repo, branch: pair.branch, baseBranch: await defaultBranch(pair.repo), prNumber: null },
       ],
     };
   }
 
+  const active = activeTrackerNames();
+  if (manual) {
+    throw new Error(
+      `Unsupported input: ${JSON.stringify(raw)}. With pasted requirements the input must name a branch: ` +
+        'a pull request URL, a tree URL, or repo#branch.',
+    );
+  }
   throw new Error(
-    `Unsupported input: ${JSON.stringify(raw)}. Use a ticket key (ABC-123), a pull request URL, a tree URL, or repo#branch.`,
+    `Unsupported input: ${JSON.stringify(raw)}. Use a ticket key of a configured tracker ` +
+      `(${active.join(', ')}), a pull request URL, a tree URL, or repo#branch. ` +
+      'Requirements pasted by hand work without any tracker.',
   );
 }

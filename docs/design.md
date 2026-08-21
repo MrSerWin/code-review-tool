@@ -5,16 +5,17 @@ user-facing setup lives in [../README.md](../README.md).
 
 ## What it does
 
-Input is a Linear ticket key (`ABC-123`), a GitHub pull request URL, a tree URL,
-or `repo#branch`. The tool resolves that into one or more `repo` + `branch`
-targets, fetches each one inside a Docker sandbox, runs a read-only Claude Code
+Input is a ticket key (`ABC-123`, optionally prefixed with its tracker as in
+`jira:ABC-123`), a GitHub pull request URL, a tree URL, or `repo#branch` —
+optionally with requirements pasted by hand instead of a ticket. The tool
+resolves that into one or more `repo` + `branch` targets, fetches each one inside a Docker sandbox, runs a read-only Claude Code
 review against the ticket requirements — five independent lens passes plus a
 synthesis pass — stores the run in SQLite, and writes a Markdown report.
 
 Two rules shape everything else:
 
 - The reviewed code is never modified, and nothing is ever pushed or posted back
-  to GitHub or Linear.
+  to GitHub or any ticket tracker.
 - Only `https://github.com/$GITHUB_ORG/<repo>` for a repo in `ALLOWED_REPOS` may
   be fetched. Anything else is rejected.
 
@@ -25,15 +26,22 @@ package.json  tsconfig.json  .env.example  LICENSE  README.md
 docker/Dockerfile.git  docker/entrypoint.sh
 src/
   config.ts  types.ts  db.ts  logger.ts  events.ts
-  linear.ts  resolver.ts  gitSandbox.ts  reviewRunner.ts  reportWriter.ts
+  prLinks.ts  resolver.ts  gitSandbox.ts  reviewRunner.ts  reportWriter.ts
+  trackers/index.ts  trackers/types.ts  trackers/adf.ts  trackers/html.ts
+  trackers/linear.ts  trackers/jira.ts  trackers/github.ts
+  trackers/azure.ts  trackers/youtrack.ts
   queue.ts  cli.ts  server.ts
-  routes/reviews.ts  routes/tickets.ts  routes/repos.ts
+  preview/recipes.ts  preview/ports.ts  preview/database.ts
+  preview/steps.ts  preview/engine.ts  preview/store.ts  preview/events.ts
+  routes/reviews.ts  routes/tickets.ts  routes/repos.ts  routes/previews.ts
   prompts/common-preamble.md  prompts/lens-common.md
   prompts/lens-correctness.md  prompts/lens-security.md
   prompts/lens-tests.md  prompts/lens-contracts.md
   prompts/lens-regressions.md  prompts/synthesis.md
+recipes.example/   # one documented, product-neutral preview recipe
+recipes/           # gitignored: the real preview recipes
 web/     # vite + react + ts, builds to web/dist
-data/    # gitignored: review.db, checkouts/, reports/
+data/    # gitignored: review.db, checkouts/, reports/, previews/
 ```
 
 Node 20, TypeScript, ESM. `tsx` for development, `tsc` for the build. Runtime
@@ -57,6 +65,14 @@ The same module owns the allowlist:
   `https://github.com/<GITHUB_ORG>/<allowed-repo>(.git)?`.
 - `repoUrl(repo)` — builds the clone URL and re-checks it through
   `assertAllowedRemote` before returning it.
+
+### Preview configuration
+
+`PREVIEW_ENABLED` (default false) gates the whole feature. `PREVIEW_RECIPES_DIR`
+(default `<repo>/recipes`), `PREVIEW_PORT_RANGE` (default `21000-21999`),
+`PREVIEW_TTL_MINUTES` (default 120) and `PREVIEW_MAX_CONCURRENT` (default 3)
+follow the same rule as everything else: the default lives in `src/config.ts`
+and `.env.example` only lists it commented out.
 
 ## Isolation model
 
@@ -98,7 +114,8 @@ explicitly disallows `Edit`, `Write`, `MultiEdit`, `NotebookEdit`, `WebFetch`,
 `WebSearch`, and `Task`. `buildChildEnv()` builds the child environment from an
 allowlist (`PATH`, `HOME`, `SHELL`, `LANG`, `LC_ALL`, `TERM`, `USER`, `LOGNAME`,
 `TMPDIR`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`) and deletes `GH_TOKEN`,
-`GITHUB_TOKEN`, `REVIEW_GH_TOKEN`, and `LINEAR_API_KEY`. `USER` is load-bearing
+`GITHUB_TOKEN`, `REVIEW_GH_TOKEN`, and every tracker token (`LINEAR_API_KEY`,
+`JIRA_API_TOKEN`, `AZURE_PAT`, `YOUTRACK_TOKEN`). `USER` is load-bearing
 on macOS: without it the Claude CLI cannot read its credentials from the Keychain
 and every review fails with "Not logged in". None of the passthrough variables
 carry a secret. After the run, `assertPristine()` requires `git status
@@ -113,39 +130,94 @@ narrow character class and rejected if they contain `..` or a scheme.
 **The server is local only.** Fastify binds to `127.0.0.1`. There is no auth
 because there is no remote reachability.
 
+## Trackers (`src/trackers/`)
+
+A ticket source is a `TicketProvider`:
+
+```ts
+interface TicketProvider {
+  readonly name: TrackerName;          // linear | jira | github | azure | youtrack
+  readonly requiredEnv: readonly string[];
+  isConfigured(): boolean;
+  matches(input: string): boolean;
+  getTicket(input: string): Promise<TicketInfo>;
+}
+```
+
+Every provider returns the same `TicketInfo`, with `provider` naming who
+produced it, so nothing downstream knows which tracker a review came from.
+
+| provider | variables | reads |
+|---|---|---|
+| `linear` | `LINEAR_API_KEY` | one GraphQL POST to `api.linear.app`; description, state, `branchName`, attachments, comments |
+| `jira` | `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN` | REST v3 `issue/{key}?fields=summary,description,status,comment` with HTTP Basic, plus the development panel |
+| `github` | none beyond `GITHUB_ORG`, `REVIEW_GH_TOKEN` | `ghApi` inside the sandbox: `repos/{owner}/{repo}/issues/{n}` and its `/comments` |
+| `azure` | `AZURE_ORG_URL`, `AZURE_PROJECT`, `AZURE_PAT` | `wit/workitems/{id}?$expand=all` with PAT Basic auth (empty user), plus `/comments` |
+| `youtrack` | `YOUTRACK_BASE_URL`, `YOUTRACK_TOKEN` | `api/issues/{id}?fields=...` with a bearer token |
+
+Jira descriptions and comments are Atlassian Document Format, not text, so
+`trackers/adf.ts` flattens the tree to plain text with light Markdown:
+paragraphs, headings, ordered and bullet lists with nesting, code blocks,
+blockquotes, rules, tables, links, and text marks. An unknown node type is not
+an error — it recurses into its `content`, so a node type Atlassian adds later
+degrades to its text instead of disappearing. Jira's development information is
+best effort: a token without that permission produces a warning in the log, not
+a failed fetch. Azure DevOps fields are HTML, flattened by `trackers/html.ts`
+(block tags become breaks, list items get a bullet, links keep their target,
+entities are decoded, everything else is dropped).
+
+`trackers/index.ts` is the registry. Only providers whose variables are all set
+are active. For one input it picks, in order:
+
+1. the provider named by an explicit prefix (`jira:ABC-123`); an unconfigured
+   one is an error naming the variables to set;
+2. the single active provider whose `matches()` returns true;
+3. when several match a bare `ABC-123` — Linear, Jira, and YouTrack share that
+   shape — the one named by `DEFAULT_TRACKER`.
+
+If several match and `DEFAULT_TRACKER` names none of them, that is an error
+listing the candidates and how to disambiguate. Guessing is never an option.
+GitHub Issues need no variables beyond the ones the sandbox already requires,
+so that provider is always active; every other tracker is opt-in. Configuring
+none of them is not an error: the input then simply has to name a branch, with
+the requirements pasted instead.
+
 ## Resolver (`src/resolver.ts`)
 
-`resolveTargets(input)` returns `{ ticket, targets }`.
+`resolveTargets(input, { requirementsText? })` returns `{ ticket, targets }`.
 
-1. **Ticket key** (`ABC-123`, any team prefix matching `[A-Za-z]+-\d+`,
-   case-insensitive) — the ticket is fetched from Linear, then targets are
-   collected from, in order:
-   - pull request attachment URLs, asking GitHub for each PR's head and base
-     branch;
+1. **Ticket key** - anything the registry claims. The ticket is fetched through
+   its provider, then targets are collected from, in order:
+   - pull request links, asking GitHub for each PR's head and base branch;
    - a remote branch scan: `git ls-remote --heads` on every allowlisted repo,
-     keeping branches whose name contains the ticket key, plus an exact match on
+     keeping branches whose name matches the ticket key, plus an exact match on
      the ticket's `branchName`.
 
-   Targets are deduplicated by `repo` + `branch`. The base branch falls back to
-   the repository's default branch, cached per process.
-2. **`https://github.com/<org>/<repo>/pull/<n>`** — a single target from the PR's
+   Branch discovery is provider-agnostic: the key is just a string.
+   `branchPattern(key)` handles `ABC-123` (project prefix, optional dash), a
+   trailing number for GitHub issue and Azure work item keys, and otherwise
+   matches the key literally. Targets are deduplicated by `repo` + `branch`.
+   The base branch falls back to the repository's default branch, cached per
+   process.
+2. **`https://github.com/<org>/<repo>/pull/<n>`** - a single target from the PR's
    head and base.
-3. **`https://github.com/<org>/<repo>/tree/<branch>`** or **`<repo>#<branch>`** —
+3. **`https://github.com/<org>/<repo>/tree/<branch>`** or **`<repo>#<branch>`** -
    a single target; the ticket is looked up from the branch name if it contains a
-   ticket-key token.
+   ticket-key token and some tracker claims it.
+
+`requirementsText` replaces the tracker entirely: the ticket becomes a manual
+`TicketInfo` (`provider: 'manual'`, empty `key`, title from the first line), no
+lookup happens, and the input only has to name a branch. The empty key is what
+stores `ticket_key` as `NULL`.
+
+`src/prLinks.ts` is the provider-agnostic half of the old Linear module:
+`parsePrUrls()` extracts `{ repo, prNumber }` from pull request URLs and
+silently drops anything outside the organization or the allowlist, and
+`collectPrUrls()` finds pull request links in the free text of trackers that
+have no attachment list.
 
 Anything else throws. If a ticket resolves to no branches, the error names what
 was searched.
-
-## Linear (`src/linear.ts`)
-
-One POST to `https://api.linear.app/graphql` with the raw API key in
-`Authorization` (no `Bearer` prefix). `getTicket(key)` splits the key into a team
-prefix and a number and queries
-`issues(filter: { number: { eq: N }, team: { key: { eq: "ABC" } } }, first: 1)`,
-selecting identifier, title, url, description, state, branch name, attachments,
-and comments. `parsePrUrls(urls)` extracts `{ repo, prNumber }` from pull request
-URLs and silently drops anything not in the allowlist.
 
 ## Review runner (`src/reviewRunner.ts`)
 
@@ -315,7 +387,8 @@ CREATE INDEX idx_logs_review ON review_logs(review_id);
 `ReviewStatus`, `Verdict` (`approve|changes_requested|blocked`), `Severity`
 (`blocker|major|minor|nit`), and `RequirementStatus`
 (`met|partial|missing|not_verifiable`) mirror the columns above. `LENS_NAMES`
-and `LensName` name the five lenses. `TicketInfo`, `ResolvedTarget`, and
+and `LensName` name the five lenses. `TicketInfo` carries `provider`: the
+tracker that produced it, or `manual`. `TicketInfo`, `ResolvedTarget`, and
 `CheckoutResult` are the values passed between the resolver, the sandbox, and
 the runner. `LensOutput` is what one lens returns: `findings[]` and
 `observations[]`. `ReviewOutput` is what the synthesis pass returns: `summary`,
@@ -342,10 +415,10 @@ the API under `/api`. Handlers validate input with zod and return errors as
 
 | method | path | body / query | returns |
 |---|---|---|---|
-| GET | `/api/health` | | `{ ok, version, dockerImage, linear, repos }` |
+| GET | `/api/health` | | `{ ok, version, dockerImage, trackers, repos }` - tracker names only |
 | GET | `/api/repos` | | `{ repos: string[] }` |
 | GET | `/api/tickets/:key` | | `{ ticket, targets }` — preview before running |
-| POST | `/api/reviews` | `{ input, targets?, model? }` | `{ reviews }` — one row per target, status `queued` |
+| POST | `/api/reviews` | `{ input, targets?, model?, requirementsText? }` | `{ reviews }` — one row per target, status `queued` |
 | GET | `/api/reviews` | `?ticket=&repo=&branch=&limit=&offset=` | `{ reviews, total }`, newest first |
 | GET | `/api/reviews/:id` | | `{ review, requirements, findings, observations, logs }` |
 | GET | `/api/reviews/:id/report` | | `text/markdown` raw report |
@@ -353,6 +426,13 @@ the API under `/api`. Handlers validate input with zod and return errors as
 | POST | `/api/reviews/:id/cancel` | | `{ review }` |
 | DELETE | `/api/reviews/:id` | | `{ ok: true }` — deletes the row and the report file |
 | GET | `/api/reviews/:id/events` | | SSE stream |
+| GET | `/api/recipes` | | `{ enabled, dir, recipes, errors }` — invalid recipes are reported, not thrown |
+| GET | `/api/previews` | `?reviewId=&ticket=&recipe=&limit=&offset=` | `{ previews, total }`, newest first |
+| GET | `/api/previews/:id` | | `{ preview, logs }` |
+| POST | `/api/previews` | `{ reviewId?, ticket?, recipe?, roles?, dumpMode? }` | `{ preview }` — status `queued` |
+| POST | `/api/previews/:id/stop` | | `{ preview }` — runs `down` |
+| DELETE | `/api/previews/:id` | | `{ ok: true }` — stops it first, then deletes the row |
+| GET | `/api/previews/:id/events` | | SSE stream |
 
 ## Report writer (`src/reportWriter.ts`)
 
@@ -372,10 +452,13 @@ conclusion naming exactly what is still required before merge.
 Vite + React + TypeScript, dev server proxying `/api` to `PORT`. Plain CSS in
 `web/src/styles.css` — no UI framework, no CDN. Dark-first, compact.
 
-- **Home** — an input box and a Review button. When the input looks like a ticket
-  key it calls `GET /api/tickets/:key` first and shows the resolved ticket plus
-  the detected branches with checkboxes, then posts the chosen targets. Below is
-  the history table of all runs.
+- **Home** — an input box and a Review button. The placeholder follows what
+  `/api/health` reports: with no tracker configured it asks for a branch only.
+  When the input looks like a ticket key it calls `GET /api/tickets/:key` first
+  and shows the resolved ticket, a chip naming the tracker that answered, and
+  the detected branches with checkboxes, then posts the chosen targets. A
+  collapsible **Paste requirements instead** textarea sends `requirementsText`
+  and skips the ticket lookup. Below is the history table of all runs.
 - **Review detail** (`/review/:id`) — verdict banner, meta table, requirements
   table, findings grouped by severity, and a live log fed by SSE while the run is
   in progress. Actions: re-run, download report, copy report, delete.
@@ -385,8 +468,58 @@ Vite + React + TypeScript, dev server proxying `/api` to `PORT`. Plain CSS in
 Routing is a small hand-written history-based router; there is no react-router
 dependency.
 
+## Preview environments (`src/preview/`)
+
+A preview is the reviewed branches running as a clickable stack. The engine is
+product-agnostic: what to run lives in a **recipe** outside this repository
+(`PREVIEW_RECIPES_DIR`, `recipes/` by default, gitignored). One documented,
+product-neutral sample ships in `recipes.example/`. The whole feature is off
+until `PREVIEW_ENABLED` is set.
+
+| module | responsibility |
+|---|---|
+| `recipes.ts` | zod schema, loading, validation; errors name the field and the file |
+| `ports.ts` | host port allocation, verified by binding, held until the row records it |
+| `database.ts` | where the data comes from: `pg_dump` → newest file in `dumpDir` → clean |
+| `steps.ts` | runs one recipe command, streams its output, enforces timeouts, kills the process group |
+| `engine.ts` | lifecycle, worker pool, teardown, TTL reaper, orphan recovery |
+| `store.ts` | `previews` and `preview_logs` rows |
+| `events.ts` | preview SSE bus, mirroring `src/events.ts` |
+
+**Lifecycle.** `queued → preparing → starting → ready`, then `stopping →
+stopped`, or `failed` / `expired`. `preparing` resolves the roles (a repository
+with no branch for the ticket runs its base branch, recorded as `usedBase`),
+reuses the review's checkout when it is still on disk and otherwise fetches
+through the same Docker sandbox as a review, allocates the ports, resolves the
+database source, and runs `prepare`. `starting` runs `up` and then polls
+`health` until it exits 0 or `readyTimeoutSec` runs out. Previews beyond
+`PREVIEW_MAX_CONCURRENT` wait in the queue and report their position.
+
+**Database source.** `mode: "auto"` tries `pg_dump` against the configured live
+database first — after a five second TCP probe, so an unreachable host cannot
+hang a preview — then the newest non-empty file in `dumpDir`, then a clean
+install. The mode that actually happened is stored as `dump_mode` and handed to
+the steps as `DUMP_MODE`. Only `onFailure: "fail"` turns a missing dump into an
+error; nothing ever waits for a human.
+
+**Steps.** Commands come from a trusted local file and run through `/bin/sh`
+with `PREVIEW_DIR` as the working directory. No value is ever interpolated into
+a command string: checkouts, branches, ports, database coordinates and the dump
+are passed through the environment (`CHECKOUT_<ROLE>`, `BRANCH_<ROLE>`,
+`BASE_<ROLE>`, `PORT_<ID>`, `DB_*`, `DUMP_FILE`, `DUMP_MODE`), on top of the
+same scrubbed environment the reviewer gets. Each child gets its own process
+group, so a timeout or a stop kills the whole tree.
+
+**Teardown.** `down` runs on stop, on any failure, on timeout, on TTL expiry,
+and at server start for previews a crash left behind — it is idempotent, every
+command runs even if an earlier one failed, and it runs even when `prepare`
+died halfway. The context needed to tear a preview down later (environment and
+checkouts) is written to `<DATA_DIR>/previews/<id>/preview-context.json`. After
+teardown a reused review checkout is verified pristine with `assertPristine`;
+checkouts the preview fetched itself are removed.
+
 ## Non-goals
 
-- No pushing, committing, or commenting on GitHub or Linear.
+- No pushing, committing, or commenting on GitHub or any ticket tracker.
 - No editing of reviewed repositories.
 - No multi-user auth; the server is `127.0.0.1` only.

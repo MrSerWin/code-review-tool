@@ -229,6 +229,7 @@ function handleFailure(reviewId: number, err: unknown): void {
 function loadTicket(review: ReviewRow): TicketInfo | null {
   if (!review.ticket_key) return null;
   return {
+    provider: 'stored',
     key: review.ticket_key,
     title: review.ticket_title ?? '',
     url: review.ticket_url ?? '',

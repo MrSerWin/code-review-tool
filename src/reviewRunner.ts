@@ -219,7 +219,10 @@ function renderPreviousFindings(findings: PreviousFinding[]): string {
 }
 
 /** Env vars that must never reach the review process. */
-const FORBIDDEN_ENV = ['GH_TOKEN', 'GITHUB_TOKEN', 'REVIEW_GH_TOKEN', 'LINEAR_API_KEY'];
+const FORBIDDEN_ENV = [
+  'GH_TOKEN', 'GITHUB_TOKEN', 'REVIEW_GH_TOKEN',
+  'LINEAR_API_KEY', 'JIRA_API_TOKEN', 'AZURE_PAT', 'YOUTRACK_TOKEN',
+];
 // `USER` is required: the Claude CLI reads its credentials from the macOS
 // Keychain and cannot find them without it. The rest keep the CLI's own
 // runtime sane. None of these carry a secret.

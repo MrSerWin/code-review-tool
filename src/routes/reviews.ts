@@ -34,6 +34,8 @@ const createBody = z.object({
   input: z.string().min(1).max(512),
   targets: z.array(targetSchema).optional(),
   model: z.string().min(1).max(64).optional(),
+  // Requirements pasted by hand, used instead of a ticket.
+  requirementsText: z.string().min(1).max(20_000).optional(),
 });
 
 const listQuery = z.object({
@@ -50,9 +52,10 @@ function startRun(
   model: string | undefined,
 ): ReviewRow {
   const review = createReview({
-    ticket_key: ticket?.key ?? null,
-    ticket_title: ticket?.title ?? null,
-    ticket_url: ticket?.url ?? null,
+    // A manual ticket carries requirements but no key or URL.
+    ticket_key: ticket?.key || null,
+    ticket_title: ticket?.title || null,
+    ticket_url: ticket?.url || null,
     ticket_body: ticket?.body ?? null,
     repo: target.repo,
     branch: target.branch,
@@ -77,12 +80,12 @@ export async function reviewRoutes(app: FastifyInstance): Promise<void> {
   app.post('/api/reviews', async (req, reply) => {
     const parsed = createBody.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Invalid request body' });
-    const { input, targets, model } = parsed.data;
+    const { input, targets, model, requirementsText } = parsed.data;
 
     let ticket: TicketInfo | null = null;
     let chosen: ResolvedTarget[];
     try {
-      const resolved = await resolveTargets(input);
+      const resolved = await resolveTargets(input, { requirementsText });
       ticket = resolved.ticket;
       chosen = targets && targets.length > 0
         ? resolved.targets.filter((t) =>
@@ -152,6 +155,7 @@ export async function reviewRoutes(app: FastifyInstance): Promise<void> {
 
     const ticket: TicketInfo | null = prev.ticket_key
       ? ({
+          provider: 'stored',
           key: prev.ticket_key,
           title: prev.ticket_title ?? '',
           url: prev.ticket_url ?? '',
