@@ -10,11 +10,12 @@
   },
   "scripts": {
     "dev": "concurrently -n api,web -c cyan,magenta \"tsx watch src/server.ts\" \"npm --prefix web run dev\"",
-    "build": "tsc -p tsconfig.json && npm --prefix web run build",
+    "build": "tsc -p tsconfig.json && npm run build:assets && npm --prefix web run build",
     "start": "node dist/server.js",
     "docker:build": "docker build -f docker/Dockerfile.git -t code-review-tool-git:latest .",
     "review": "tsx src/cli.ts",
-    "setup": "npm install && npm --prefix web install && npm run docker:build"
+    "setup": "npm install && npm --prefix web install && npm run docker:build",
+    "build:assets": "node -e \"const{cpSync}=require('fs');cpSync('src/prompts','dist/prompts',{recursive:true})\""
   },
   "dependencies": {
     "@fastify/static": "^10.1.3",

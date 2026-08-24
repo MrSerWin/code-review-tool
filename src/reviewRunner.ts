@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
@@ -72,7 +73,13 @@ export const reviewOutputSchema = z.object({
   conclusion: z.string().nullish().transform((v) => v ?? ''),
 });
 
-const PROMPT_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'prompts');
+// Prompts sit beside the module in both layouts: src/prompts under tsx, and
+// dist/prompts after `npm run build:assets` copies them. The src fallback keeps
+// a dist built without that step working instead of failing every lens.
+const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
+const PROMPT_DIR = fs.existsSync(path.join(MODULE_DIR, 'prompts'))
+  ? path.join(MODULE_DIR, 'prompts')
+  : path.join(MODULE_DIR, '..', 'src', 'prompts');
 
 /** Every prompt file, so a caller can check them all. */
 export const PROMPT_FILES = [
