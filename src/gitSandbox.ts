@@ -122,7 +122,7 @@ export async function runInSandbox(args: string[], opts: SandboxOptions = {}): P
   });
 
   if (result.code !== 0 && !opts.allowFailure) {
-    throw new Error(`Sandbox command failed (${result.code}): git ${args.join(' ')}\n${result.stderr.trim()}`);
+    throw new Error(`Sandbox command failed (${result.code}): ${args.join(' ')}\n${result.stderr.trim()}`);
   }
   return result;
 }

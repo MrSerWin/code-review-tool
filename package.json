@@ -15,7 +15,8 @@
     "docker:build": "docker build -f docker/Dockerfile.git -t code-review-tool-git:latest .",
     "review": "tsx src/cli.ts",
     "setup": "npm install && npm --prefix web install && npm run docker:build",
-    "build:assets": "node -e \"const{cpSync}=require('fs');cpSync('src/prompts','dist/prompts',{recursive:true})\""
+    "build:assets": "node -e \"const{cpSync}=require('fs');cpSync('src/prompts','dist/prompts',{recursive:true})\"",
+    "test": "node --import tsx --test src/*.test.ts"
   },
   "dependencies": {
     "@fastify/static": "^10.1.3",

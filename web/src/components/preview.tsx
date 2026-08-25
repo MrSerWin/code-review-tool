@@ -103,7 +103,7 @@ export function RoleChips({ roles }: { roles: PreviewRole[] }) {
           className={`role-chip${r.usedBase ? ' role-base' : ''}`}
           title={
             r.usedBase
-              ? `${r.repo}: no branch for this ticket, running its base branch ${r.base}`
+              ? `${r.repo}: no ticket branch to run (never had one, or it is gone from the remote); running its base branch ${r.base}`
               : `${r.repo}: ${r.branch} (base ${r.base})`
           }
         >

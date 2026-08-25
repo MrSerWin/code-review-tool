@@ -2,8 +2,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { config } from '../config.js';
 import { getReview } from '../db.js';
-import { assertPristine, fetchCheckout, ghApi, sanitizeBranchForPath } from '../gitSandbox.js';
+import {
+  assertPristine, fetchCheckout, ghApi, lsRemoteHeads, sanitizeBranchForPath,
+} from '../gitSandbox.js';
 import { logger } from '../logger.js';
+import { sanitizeLogMessage } from '../logSanitize.js';
 import { resolveTargets } from '../resolver.js';
 import { buildChildEnv } from '../reviewRunner.js';
 import type {
@@ -328,6 +331,11 @@ async function prepareCheckouts(
       checkouts[role.role] = reused;
       continue;
     }
+    // Persisted as soon as it is decided: the row is what the API and the UI
+    // read, and a later step may fail before the loop ends.
+    if (await fallBackIfBranchGone(context, role)) {
+      updatePreview(context.previewId, { roles_json: JSON.stringify(roles) });
+    }
     log(context.previewId, 'info', `Fetching ${role.repo} (${role.branch}) in the git sandbox.`);
     const result = await fetchCheckout(
       { repo: role.repo, branch: role.branch, baseBranch: role.base, prNumber: null },
@@ -338,6 +346,51 @@ async function prepareCheckouts(
     checkouts[role.role] = result.dir;
   }
   return checkouts;
+}
+
+/**
+ * A branch that was merged and deleted on the remote must not sink a preview:
+ * the role falls back to its base branch, the same state a repo reaches when
+ * the ticket never touched it. Only a missing base branch is fatal.
+ *
+ * This is deliberately preview-only. `fetchCheckout` is shared with reviews and
+ * is left untouched, so a review of a vanished branch still fails loudly:
+ * reviewing the base branch instead would report on code the branch never had.
+ *
+ * Returns true when the role was rewritten.
+ */
+async function fallBackIfBranchGone(context: RunContext, role: PreviewRole): Promise<boolean> {
+  let heads: string[];
+  try {
+    heads = await lsRemoteHeads(role.repo);
+  } catch (err) {
+    // A listing failure is not proof the branch is gone; let the fetch decide.
+    log(
+      context.previewId,
+      'warn',
+      `Could not list the branches of ${role.repo} (${(err as Error).message}); trying ${role.branch} anyway.`,
+    );
+    return false;
+  }
+  if (heads.includes(role.branch)) return false;
+  if (role.branch === role.base) {
+    throw new Error(`The base branch ${role.base} no longer exists on the remote of ${role.repo}.`);
+  }
+  if (!heads.includes(role.base)) {
+    throw new Error(
+      `Branch ${role.branch} no longer exists on the remote of ${role.repo}, `
+        + `and neither does its base branch ${role.base}.`,
+    );
+  }
+  log(
+    context.previewId,
+    'warn',
+    `Branch ${role.branch} no longer exists on the remote of ${role.repo}; `
+      + `using the base branch ${role.base} instead.`,
+  );
+  role.branch = role.base;
+  role.usedBase = true;
+  return true;
 }
 
 /** The checkout a review left behind, when it is still on disk and matches the role. */
@@ -721,8 +774,9 @@ function publishStatus(previewId: number, status: PreviewStatus): void {
   publishPreview(previewId, { type: 'status', previewId, status });
 }
 
-function log(previewId: number, level: LogLevel, message: string): void {
+function log(previewId: number, level: LogLevel, rawMessage: string): void {
   const ts = new Date().toISOString();
+  const message = sanitizeLogMessage(rawMessage);
   try {
     addPreviewLog(previewId, level, message);
   } catch {

@@ -11,6 +11,7 @@ import {
 } from './db.js';
 import { config } from './config.js';
 import { publish } from './events.js';
+import { sanitizeLogMessage } from './logSanitize.js';
 import { assertPristine, ensureImage, fetchCheckout, pruneCheckout } from './gitSandbox.js';
 import { runReview, type PreviousFinding } from './reviewRunner.js';
 import { writeReport } from './reportWriter.js';
@@ -267,8 +268,9 @@ function finishRow(reviewId: number, patch: Partial<ReviewRow>): void {
   }
 }
 
-function log(reviewId: number, level: LogLevel, message: string): void {
+function log(reviewId: number, level: LogLevel, rawMessage: string): void {
   const ts = nowIso();
+  const message = sanitizeLogMessage(rawMessage);
   try {
     addLog(reviewId, level, message);
   } catch {
