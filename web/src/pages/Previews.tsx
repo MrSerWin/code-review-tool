@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { api } from '../api';
 import {
+  DUMP_CHOICES,
   DumpModeBadge,
   PREVIEW_LIVE,
   PreviewStatusPill,
@@ -11,7 +12,7 @@ import {
 } from '../components/preview';
 import { Card } from '../components/ui';
 import { Link } from '../router';
-import type { Preview, PreviewLogLine, RecipesPayload } from '../types';
+import type { DumpModeRequest, Preview, PreviewLogLine, RecipesPayload } from '../types';
 
 /** Lines of log shown inline when a row is expanded. */
 const TAIL = 25;
@@ -24,6 +25,11 @@ export default function Previews() {
   const [now, setNow] = useState(() => Date.now());
   const [openId, setOpenId] = useState<number | null>(null);
   const [openLogs, setOpenLogs] = useState<PreviewLogLine[]>([]);
+  // The start form: a ticket (or PR URL / repo#branch), which recipe to run, and what data to load.
+  const [ticket, setTicket] = useState('');
+  const [recipeName, setRecipeName] = useState('');
+  const [dumpMode, setDumpMode] = useState<DumpModeRequest>('auto');
+  const [starting, setStarting] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -104,6 +110,29 @@ export default function Previews() {
   };
 
   const disabled = recipes !== null && !recipes.enabled;
+  const canStart = recipes !== null && recipes.enabled && recipes.recipes.length > 0;
+
+  const start = async (e: FormEvent): Promise<void> => {
+    e.preventDefault();
+    // A single recipe needs no picking: run it implicitly.
+    const recipe = recipeName || recipes?.recipes[0]?.name;
+    if (!canStart || !recipe || !ticket.trim()) return;
+    setStarting(true);
+    setError(null);
+    try {
+      const { preview: created } = await api.createPreview({
+        ticket: ticket.trim(),
+        recipe,
+        ...(dumpMode === 'auto' ? {} : { dumpMode }),
+      });
+      await load();
+      await openRow(created.id);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setStarting(false);
+    }
+  };
 
   return (
     <div className="stack">
@@ -122,10 +151,56 @@ export default function Previews() {
         </p>
       ))}
 
+      {canStart && (
+        <Card title="Start a preview">
+          <form className="launcher" onSubmit={(e) => void start(e)}>
+            <input
+              className="launcher-input"
+              placeholder="ABC-123, PR URL, or repo#branch"
+              value={ticket}
+              spellCheck={false}
+              onChange={(e) => setTicket(e.target.value)}
+            />
+            {recipes.recipes.length > 1 && (
+              <select
+                className="mini-select"
+                value={recipeName || recipes.recipes[0].name}
+                onChange={(e) => setRecipeName(e.target.value)}
+                aria-label="Recipe to run"
+              >
+                {recipes.recipes.map((r) => (
+                  <option key={r.name} value={r.name}>
+                    {r.name}
+                  </option>
+                ))}
+              </select>
+            )}
+            <select
+              className="mini-select"
+              value={dumpMode}
+              onChange={(e) => setDumpMode(e.target.value as DumpModeRequest)}
+              aria-label="Database contents for the preview"
+            >
+              {DUMP_CHOICES.map((c) => (
+                <option key={c.value} value={c.value}>
+                  {c.label}
+                </option>
+              ))}
+            </select>
+            <button className="btn primary" type="submit" disabled={starting || !ticket.trim()}>
+              {starting ? 'Starting…' : 'Start preview'}
+            </button>
+          </form>
+          <p className="muted">
+            Branches are resolved from the ticket. A repo without a branch of its own runs its base branch.
+          </p>
+        </Card>
+      )}
+
       <Card>
         {previews.length === 0 ? (
           <p className="muted">
-            No previews yet. Start one from a review page: open a review and use the Preview card.
+            No previews yet. Start one with the form above, or from a review page&rsquo;s Preview card.
           </p>
         ) : (
           <div className="table-wrap">

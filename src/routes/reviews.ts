@@ -3,17 +3,20 @@ import path from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { config } from '../config.js';
+import { getReviewer, notInstalledMessage, REVIEWER_NAMES } from '../reviewers/index.js';
 import {
   createReview,
   deleteReview,
   getFindings,
   getLogs,
   getObservations,
+  getPreviousRun,
   getRequirements,
   getReview,
   listReviews,
   updateReview,
 } from '../db.js';
+import { compareFindings, toComparable } from '../findingCompare.js';
 import { subscribe } from '../events.js';
 import { cancelReview, enqueueReview } from '../queue.js';
 import { resolveTargets } from '../resolver.js';
@@ -33,6 +36,7 @@ const targetSchema = z.object({
 const createBody = z.object({
   input: z.string().min(1).max(512),
   targets: z.array(targetSchema).optional(),
+  reviewer: z.enum(REVIEWER_NAMES).optional(),
   model: z.string().min(1).max(64).optional(),
   // Requirements pasted by hand, used instead of a ticket.
   requirementsText: z.string().min(1).max(20_000).optional(),
@@ -42,6 +46,7 @@ const listQuery = z.object({
   ticket: z.string().optional(),
   repo: z.string().optional(),
   branch: z.string().optional(),
+  q: z.string().min(1).max(200).optional(),
   limit: z.coerce.number().int().min(1).max(500).optional(),
   offset: z.coerce.number().int().min(0).optional(),
 });
@@ -49,8 +54,13 @@ const listQuery = z.object({
 function startRun(
   target: ResolvedTarget,
   ticket: TicketInfo | null,
+  reviewerName: string | undefined,
   model: string | undefined,
 ): ReviewRow {
+  const reviewer = getReviewer(reviewerName);
+  // A missing CLI is a configuration problem, not a failed review: refuse it
+  // before a row is created and queued.
+  if (!reviewer.isAvailable()) throw new Error(notInstalledMessage(reviewer));
   const review = createReview({
     // A manual ticket carries requirements but no key or URL.
     ticket_key: ticket?.key || null,
@@ -62,7 +72,8 @@ function startRun(
     base_branch: target.baseBranch,
     pr_number: target.prNumber ?? null,
     status: 'queued',
-    model: model ?? config.REVIEW_MODEL,
+    reviewer: reviewer.name,
+    model: model ?? reviewer.defaultModel,
   });
   enqueueReview(review.id);
   return review;
@@ -80,7 +91,7 @@ export async function reviewRoutes(app: FastifyInstance): Promise<void> {
   app.post('/api/reviews', async (req, reply) => {
     const parsed = createBody.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Invalid request body' });
-    const { input, targets, model, requirementsText } = parsed.data;
+    const { input, targets, reviewer, model, requirementsText } = parsed.data;
 
     let ticket: TicketInfo | null = null;
     let chosen: ResolvedTarget[];
@@ -104,7 +115,7 @@ export async function reviewRoutes(app: FastifyInstance): Promise<void> {
     if (chosen.length === 0) return reply.code(400).send({ error: 'No targets to review' });
 
     try {
-      const reviews = chosen.map((t) => startRun(t, ticket, model));
+      const reviews = chosen.map((t) => startRun(t, ticket, reviewer, model));
       return reply.code(201).send({ reviews });
     } catch (err) {
       return reply.code(400).send({ error: (err as Error).message });
@@ -123,12 +134,27 @@ export async function reviewRoutes(app: FastifyInstance): Promise<void> {
     if (!parsed.success) return reply.code(400).send({ error: 'Invalid review id' });
     const review = getReview(parsed.data.id);
     if (!review) return reply.code(404).send({ error: 'Review not found' });
+
+    const findings = getFindings(review.id);
+    const previous = getPreviousRun(review.repo, review.branch, review.run_index);
+    const comparison = previous
+      ? {
+          previousRunId: previous.id,
+          previousRunIndex: previous.run_index,
+          ...compareFindings(
+            getFindings(previous.id).map(toComparable),
+            findings.map(toComparable),
+          ),
+        }
+      : null;
+
     return {
       review,
       requirements: getRequirements(review.id),
-      findings: getFindings(review.id),
+      findings,
       observations: getObservations(review.id),
       logs: getLogs(review.id),
+      comparison,
     };
   });
 
@@ -167,16 +193,22 @@ export async function reviewRoutes(app: FastifyInstance): Promise<void> {
         } satisfies TicketInfo)
       : null;
 
-    const review = startRun(
-      {
-        repo: prev.repo,
-        branch: prev.branch,
-        baseBranch: prev.base_branch,
-        prNumber: prev.pr_number ?? null,
-      },
-      ticket,
-      prev.model ?? undefined,
-    );
+    let review: ReviewRow;
+    try {
+      review = startRun(
+        {
+          repo: prev.repo,
+          branch: prev.branch,
+          baseBranch: prev.base_branch,
+          prNumber: prev.pr_number ?? null,
+        },
+        ticket,
+        prev.reviewer ?? undefined,
+        prev.model ?? undefined,
+      );
+    } catch (err) {
+      return reply.code(400).send({ error: (err as Error).message });
+    }
     return reply.code(201).send({ review });
   });
 

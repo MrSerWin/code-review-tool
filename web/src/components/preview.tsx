@@ -1,4 +1,12 @@
-import type { DumpMode, Preview, PreviewRole, PreviewStatus } from '../types';
+import type { DumpMode, DumpModeRequest, Preview, PreviewRole, PreviewStatus } from '../types';
+
+/** Database contents offered when starting a preview, shared by every start form. */
+export const DUMP_CHOICES: { value: DumpModeRequest; label: string }[] = [
+  { value: 'auto', label: 'data: auto' },
+  { value: 'pg_dump', label: 'data: fresh dump' },
+  { value: 'dump-dir', label: 'data: stored dump' },
+  { value: 'clean', label: 'data: clean install' },
+];
 
 /** Statuses in which the preview is still working towards being clickable. */
 export const PREVIEW_ACTIVE = new Set<PreviewStatus>([

@@ -91,6 +91,7 @@ export interface ReviewRow {
   requirements_total: number | null;
   blocking_count: number | null;
   report_path: string | null;
+  reviewer: string | null;
   model: string | null;
   error: string | null;
   files_changed: number | null;

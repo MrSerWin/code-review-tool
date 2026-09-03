@@ -20,8 +20,12 @@ you.
    links and any branch whose name contains the ticket key are collected.
 2. **Fetch.** Each branch is cloned inside the Docker sandbox, together with its
    base branch. The checkout's remote and credentials are then stripped.
-3. **Review.** The `claude` CLI runs against the checkout with edit tools
-   disabled. It restates the ticket as a requirement list, reads the diff and
+3. **Review.** A reviewer CLI runs against the checkout with edit tools
+   disabled. Choose **Claude Code** (`claude`), **Cursor Agent**
+   (`cursor-agent`), **OpenAI Codex** (`codex`), or the **Grok CLI** (`grok`),
+   and a model from that CLI's own list. Each runs five parallel lens passes
+   plus a synthesis pass.
+   The reviewer restates the ticket as a requirement list, reads the diff and
    the surrounding code, honours the reviewed repository's own `CLAUDE.md` /
    `AGENTS.md` conventions, and returns a structured JSON verdict.
 4. **Report.** The verdict, requirement checklist, and findings are stored in
@@ -31,7 +35,15 @@ you.
 
 - Docker, running. The git sandbox image is built from `docker/Dockerfile.git`.
 - Node 20 or newer.
-- The `claude` CLI, installed and already logged in.
+- At least one reviewer CLI, installed and authenticated:
+  - **Claude Code** — the `claude` CLI, logged in.
+  - **Cursor Agent** — the `cursor-agent` CLI (or `cursor agent`), logged in via
+    `cursor agent login` or `CURSOR_API_KEY`.
+  - **OpenAI Codex** — the `codex` CLI, logged in via `codex login`.
+  - **Grok** — the `grok` CLI, logged in via `grok login`.
+
+  A CLI that is not installed is shown as such and cannot be selected; the
+  others keep working.
 - Optionally, credentials for a ticket tracker (see below).
 - A GitHub token with read access (`repo` scope) to the repositories you want to
   review. Use a dedicated read-only token, not your everyday personal one.
@@ -53,7 +65,15 @@ npm run setup          # installs both workspaces and builds the sandbox image
 | `PORT` | no | `5178` | API port, bound to `127.0.0.1` |
 | `DATA_DIR` | no | `<repo>/data` | Where the database, checkouts, and reports live |
 | `CLAUDE_BIN` | no | `claude` | Path to the Claude Code CLI |
-| `REVIEW_MODEL` | no | `opus` | Model passed to `claude --model` |
+| `REVIEW_MODEL` | no | `opus` | Default model when the reviewer is Claude |
+| `DEFAULT_REVIEWER` | no | `claude` | Default reviewer: `claude`, `cursor`, `codex`, or `grok` |
+| `CURSOR_BIN` | no | `cursor-agent` | Path to the Cursor Agent CLI |
+| `CURSOR_REVIEW_MODEL` | no | `auto` | Default model when the reviewer is Cursor |
+| `CURSOR_API_KEY` | no | — | Optional Cursor API key (otherwise uses CLI login) |
+| `CODEX_BIN` | no | `codex` | Path to the OpenAI Codex CLI |
+| `CODEX_REVIEW_MODEL` | no | `gpt-5.5` | Default model when the reviewer is Codex |
+| `GROK_BIN` | no | `grok` | Path to the Grok CLI |
+| `GROK_REVIEW_MODEL` | no | `grok-4.6` | Default model when the reviewer is Grok |
 | `REVIEW_TIMEOUT_MS` | no | `1800000` | Hard timeout for one review process (each lens and the synthesis pass) |
 | `REVIEW_CONCURRENCY` | no | `2` | How many reviews run at once. Each review fans out to 5 lens processes plus a synthesis pass, so the process ceiling is this value * 6 |
 | `DOCKER_BIN` | no | `docker` | Path to the Docker CLI |
@@ -61,6 +81,40 @@ npm run setup          # installs both workspaces and builds the sandbox image
 
 `GITHUB_ORG` and `ALLOWED_REPOS` have no defaults; the server refuses to start
 without them.
+
+### Reviewers
+
+Four agent CLIs can drive a review. They are interchangeable: the same prompts,
+the same five lenses, the same JSON verdict.
+
+| reviewer | CLI | what makes the run read-only |
+|---|---|---|
+| `claude` | `claude` | `--allowed-tools` limited to `Read`/`Grep`/`Glob` and read-only `git` commands; `Edit`, `Write`, `MultiEdit`, `NotebookEdit`, `WebFetch`, `WebSearch`, `Task` explicitly disallowed |
+| `cursor` | `cursor-agent` | `--mode plan --sandbox enabled` |
+| `codex` | `codex exec` | `-s read-only` (the sandbox refuses every write and every network call), plus `--ephemeral` so the run leaves no session behind |
+| `grok` | `grok` | `--permission-mode plan --disable-web-search --no-subagents`, plus `--disallowed-tools` removing every write, scheduler, sub-agent, image, workflow, and ask-the-user tool |
+
+On top of that, all four get a scrubbed environment and a checkout with no
+remote, and the checkout is verified unchanged after every run.
+
+**Models.** Each reviewer has its own model list and its own default
+(`REVIEW_MODEL`, `CURSOR_REVIEW_MODEL`, `CODEX_REVIEW_MODEL`,
+`GROK_REVIEW_MODEL`). The list is asked of the CLI where it can answer —
+`cursor-agent --list-models`, `grok models`, and Codex's own
+`~/.codex/models_cache.json` — and is a short static list for Claude Code,
+which has no such command. The lists are cached for ten minutes per process,
+and the model field always stays free text: any id the CLI accepts works, listed
+or not.
+
+From the terminal:
+
+```bash
+npm run review -- --list-models         # every reviewer, availability, models
+npm run review -- --list-models codex   # just one of them
+```
+
+`GET /api/reviewers` returns the same thing to the UI. `GET /api/health` reports
+the reviewers without their model lists, so it stays cheap.
 
 ### Ticket trackers
 
@@ -180,11 +234,14 @@ The whole `data/` directory is gitignored and local only.
 - **The checkout cannot push.** After the fetch, `origin` is removed and
   `.git/config` is rewritten without any remote or credential helper. The
   checkout the reviewer sees has no way back to GitHub.
-- **The reviewer has no write tools and no tokens.** The `claude` process runs
-  with `Edit`, `Write`, `MultiEdit`, `NotebookEdit`, `WebFetch`, `WebSearch`,
-  and `Task` disabled, and with `GH_TOKEN`, `GITHUB_TOKEN`, `REVIEW_GH_TOKEN`,
-  and every tracker token removed from its environment. After each run the checkout
-  is verified to be unchanged; a modified checkout fails the review.
+- **The reviewer has no write tools and no tokens.** Claude runs with
+  `Edit`, `Write`, `MultiEdit`, `NotebookEdit`, `WebFetch`, `WebSearch`, and
+  `Task` disabled. Cursor runs in `--mode plan` with `--sandbox enabled`, Codex
+  in its `read-only` sandbox, and Grok in `--permission-mode plan` with every
+  write tool removed (see [Reviewers](#reviewers)). All four
+  get a scrubbed environment with `GH_TOKEN`, `GITHUB_TOKEN`, `REVIEW_GH_TOKEN`,
+  and every tracker token removed. After each run the checkout is verified to be
+  unchanged; a modified checkout fails the review.
 - **The allowlist bounds what can be fetched at all.** Only
   `https://github.com/$GITHUB_ORG/<repo>` for a repo in `ALLOWED_REPOS` is
   accepted, both in the Node process and again in the container entrypoint,

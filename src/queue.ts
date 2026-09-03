@@ -35,8 +35,8 @@ const running = new Map<number, Job>();
 let workers = 0;
 
 /**
- * How many reviews run at once. Each review fans out to four lens processes
- * plus one synthesis process, so the real process ceiling is this times four.
+ * How many reviews run at once. Each review fans out to five lens processes
+ * plus one synthesis process, so the real process ceiling is this times six.
  */
 const CONCURRENCY = config.REVIEW_CONCURRENCY;
 
@@ -166,7 +166,7 @@ async function processReview(reviewId: number, signal: AbortSignal): Promise<voi
     checkout,
     ticket,
     (level: LogLevel, message: string) => log(reviewId, level, message),
-    { previousFindings, signal, model: review.model ?? undefined },
+    { previousFindings, signal, model: review.model ?? undefined, reviewer: review.reviewer ?? undefined },
   );
   throwIfCancelled(signal);
 

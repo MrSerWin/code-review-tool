@@ -6,6 +6,7 @@ import fastifyStatic from '@fastify/static';
 import Fastify from 'fastify';
 import { ALLOWED_REPOS, config } from './config.js';
 import { activeTrackerNames } from './trackers/index.js';
+import { listReviewers, listReviewersWithModels } from './reviewers/index.js';
 import { ensureImage } from './gitSandbox.js';
 import { logger } from './logger.js';
 import { recoverInterrupted } from './queue.js';
@@ -35,8 +36,17 @@ export async function buildServer() {
     dockerImage: config.GIT_IMAGE,
     // Names only: which trackers are usable, never a credential.
     trackers: activeTrackerNames(),
+    reviewers: listReviewers(),
+    defaultReviewer: config.defaultReviewer,
     repos: ALLOWED_REPOS.length,
     previews: previewsSummary(),
+  }));
+
+  // The full reviewer list, models included. Model lists are cached per
+  // process, so only the first call may start a short CLI helper.
+  app.get('/api/reviewers', async () => ({
+    reviewers: await listReviewersWithModels(),
+    defaultReviewer: config.defaultReviewer,
   }));
 
   await app.register(repoRoutes);

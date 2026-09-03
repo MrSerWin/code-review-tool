@@ -2,13 +2,33 @@ import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { api } from '../api';
 import { Card, StatusPill, VerdictBadge, fmtTime } from '../components/ui';
 import { Link, navigate } from '../router';
-import type { ResolvedTarget, Review, TicketInfo } from '../types';
+import type { Health, ResolvedTarget, Review, ReviewerInfo, TicketInfo } from '../types';
 
 const TICKET_RE = /^(?:[a-z]+:)?[a-z][a-z0-9_]*-\d+$/i;
 /** A GitHub issue reference, the one ticket shape that is always available. */
 const ISSUE_RE = /^(?:github:)?[\w.-]+\/[\w.-]+#\d+$/i;
 const ACTIVE = new Set(['queued', 'fetching', 'reviewing']);
 const keyOf = (t: ResolvedTarget): string => `${t.repo}#${t.branch}`;
+
+const REVIEWER_KEY = 'crt.reviewer';
+const modelKey = (reviewer: string): string => `crt.model.${reviewer}`;
+
+/** localStorage can be missing or throw (private mode, blocked storage); never let it break the page. */
+function readStored(key: string): string | null {
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeStored(key: string, value: string): void {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    /* storage unavailable — remembering is a convenience, not a requirement */
+  }
+}
 
 export default function Home() {
   const [input, setInput] = useState('');
@@ -18,7 +38,11 @@ export default function Home() {
   const [targets, setTargets] = useState<ResolvedTarget[]>([]);
   const [picked, setPicked] = useState<string[]>([]);
   const [history, setHistory] = useState<Review[]>([]);
+  const [historyQuery, setHistoryQuery] = useState('');
   const [trackers, setTrackers] = useState<string[] | null>(null);
+  const [reviewers, setReviewers] = useState<ReviewerInfo[]>([]);
+  const [reviewer, setReviewer] = useState('claude');
+  const [model, setModel] = useState('');
   const [requirements, setRequirements] = useState('');
   const [manualOpen, setManualOpen] = useState(false);
 
@@ -39,12 +63,13 @@ export default function Home() {
 
   const loadHistory = useCallback(async () => {
     try {
-      const { reviews } = await api.listReviews({ limit: 60 });
+      const q = historyQuery.trim();
+      const { reviews } = await api.listReviews({ limit: 60, ...(q ? { q } : {}) });
       setHistory(reviews);
     } catch (err) {
       setError((err as Error).message);
     }
-  }, []);
+  }, [historyQuery]);
 
   useEffect(() => {
     void loadHistory();
@@ -53,9 +78,49 @@ export default function Home() {
   useEffect(() => {
     api
       .health()
-      .then((h) => setTrackers(h.trackers ?? []))
+      .then((h: Health) => setTrackers(h.trackers ?? []))
       .catch(() => setTrackers(null));
   }, []);
+
+  useEffect(() => {
+    api
+      .reviewers()
+      .then(({ reviewers: list, defaultReviewer }) => {
+        const all = list ?? [];
+        setReviewers(all);
+
+        // A remembered reviewer only counts while the server still offers it and its CLI is installed.
+        const remembered = readStored(REVIEWER_KEY);
+        const usable = (name: string | null): ReviewerInfo | undefined =>
+          all.find((r) => r.name === name && r.available);
+        const chosen =
+          usable(remembered) ??
+          usable(defaultReviewer) ??
+          all.find((r) => r.available) ??
+          all.find((r) => r.name === defaultReviewer);
+
+        const name = chosen?.name ?? defaultReviewer ?? 'claude';
+        setReviewer(name);
+        setModel(readStored(modelKey(name)) ?? chosen?.defaultModel ?? '');
+      })
+      .catch(() => setReviewers([]));
+  }, []);
+
+  const onReviewerChange = (name: string): void => {
+    setReviewer(name);
+    writeStored(REVIEWER_KEY, name);
+    const info = reviewers.find((r) => r.name === name);
+    setModel(readStored(modelKey(name)) ?? info?.defaultModel ?? '');
+  };
+
+  const onModelChange = (value: string): void => {
+    setModel(value);
+    writeStored(modelKey(reviewer), value);
+  };
+
+  const selected = reviewers.find((r) => r.name === reviewer);
+  const reviewerLabel = (name: string): string =>
+    reviewers.find((r) => r.name === name)?.label ?? name;
 
   useEffect(() => {
     if (!history.some((r) => ACTIVE.has(r.status))) return;
@@ -90,9 +155,11 @@ export default function Home() {
         input: value,
         ...(chosen ? { targets: chosen } : {}),
         ...(manualText ? { requirementsText: manualText } : {}),
+        reviewer,
+        ...(model.trim() ? { model: model.trim() } : {}),
       });
       if (reviews.length === 1) navigate(`/review/${reviews[0]!.id}`);
-      else if (reviews[0]?.ticket_key) navigate(`/ticket/${reviews[0].ticket_key}`);
+      else if (reviews[0]?.ticket_key) navigate(`/ticket/${encodeURIComponent(reviews[0].ticket_key)}`);
       else await loadHistory();
     } catch (err) {
       setError((err as Error).message);
@@ -137,6 +204,41 @@ export default function Home() {
           {busy ? 'Working…' : isTicketInput ? 'Find branches' : 'Review'}
         </button>
       </form>
+
+      <div className="reviewer-row">
+        <label className="reviewer-field">
+          <span className="muted">Reviewer</span>
+          <select
+            className="reviewer-select"
+            value={reviewer}
+            onChange={(e) => onReviewerChange(e.target.value)}
+          >
+            {reviewers.map((r) => (
+              <option key={r.name} value={r.name} disabled={!r.available}>
+                {r.available ? r.label : `${r.label} (not installed)`}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="reviewer-field reviewer-model">
+          <span className="muted">Model</span>
+          <input
+            className="reviewer-input mono"
+            value={model}
+            spellCheck={false}
+            list={`models-${reviewer}`}
+            placeholder={selected?.defaultModel ?? ''}
+            onChange={(e) => onModelChange(e.target.value)}
+          />
+          <datalist id={`models-${reviewer}`}>
+            {(selected?.models ?? []).map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.label}
+              </option>
+            ))}
+          </datalist>
+        </label>
+      </div>
 
       <div className="manual">
         <button
@@ -226,7 +328,18 @@ export default function Home() {
         </Card>
       )}
 
-      <Card title="History">
+      <Card
+        title="History"
+        actions={
+          <input
+            className="history-search mono"
+            placeholder="Filter ticket, repo, branch…"
+            value={historyQuery}
+            spellCheck={false}
+            onChange={(e) => setHistoryQuery(e.target.value)}
+          />
+        }
+      >
         {history.length === 0 ? (
           <p className="muted">No reviews yet.</p>
         ) : (
@@ -237,6 +350,7 @@ export default function Home() {
                   <th>Ticket</th>
                   <th>Repo</th>
                   <th>Branch</th>
+                  <th>Reviewer</th>
                   <th>Run</th>
                   <th>Verdict</th>
                   <th>Status</th>
@@ -248,7 +362,7 @@ export default function Home() {
                   <tr key={r.id} className="row-link" onClick={() => navigate(`/review/${r.id}`)}>
                     <td onClick={(e) => e.stopPropagation()}>
                       {r.ticket_key ? (
-                        <Link to={`/ticket/${r.ticket_key}`} className="mono">
+                        <Link to={`/ticket/${encodeURIComponent(r.ticket_key)}`} className="mono">
                           {r.ticket_key}
                         </Link>
                       ) : (
@@ -257,6 +371,7 @@ export default function Home() {
                     </td>
                     <td>{r.repo}</td>
                     <td className="mono truncate">{r.branch}</td>
+                    <td>{r.reviewer ? reviewerLabel(r.reviewer) : '—'}</td>
                     <td className="mono">#{r.run_index}</td>
                     <td>
                       <VerdictBadge verdict={r.verdict} />

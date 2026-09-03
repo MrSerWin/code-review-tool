@@ -2,13 +2,17 @@ import path from 'node:path';
 import { config } from './config.js';
 import * as db from './db.js';
 import { enqueueReview, recoverInterrupted } from './queue.js';
+import {
+  getReviewer, listReviewersWithModels, notInstalledMessage, REVIEWER_NAMES,
+} from './reviewers/index.js';
 import { resolveTargets } from './resolver.js';
 import type { ResolvedTarget, TicketInfo } from './types.js';
 
 const HELP = `code-review-tool — run a read-only code review from the terminal.
 
 Usage:
-  tsx src/cli.ts <input> [--model <name>] [--quiet] [--requirements <text>]
+  tsx src/cli.ts <input> [--reviewer <name>] [--model <name>] [--quiet] [--requirements <text>]
+  tsx src/cli.ts --list-models [reviewer]
   tsx src/cli.ts --help
 
 Input can be:
@@ -19,7 +23,14 @@ Input can be:
   my-service#feature/abc-123-example               repo#branch
 
 Options:
-  --model <name>   review model (default: ${config.REVIEW_MODEL})
+  --reviewer <name>
+                   one of: ${REVIEWER_NAMES.join(', ')} — Claude Code,
+                   Cursor Agent, OpenAI Codex, and the Grok CLI;
+                   default: ${config.defaultReviewer}
+  --model <name>   model for the chosen reviewer (default depends on reviewer)
+  --list-models [reviewer]
+                   list the reviewers, whether their CLI is installed, and the
+                   models each one offers, then exit
   --requirements <text>
                    review against these requirements instead of a ticket
   --quiet          only print the final result and report paths
@@ -39,6 +50,8 @@ The reviewed code is never modified.`;
 
 interface Args {
   input: string;
+  listModels?: string | null;
+  reviewer?: string;
   model?: string;
   requirementsText?: string;
   quiet: boolean;
@@ -50,12 +63,21 @@ function parseArgs(argv: string[]): Args | null {
     const arg = argv[i]!;
     if (arg === '-h' || arg === '--help') return null;
     if (arg === '--quiet') { args.quiet = true; continue; }
+    if (arg === '--list-models') {
+      // The optional value is a reviewer name, never another option.
+      const next = argv[i + 1];
+      args.listModels = next && !next.startsWith('-') ? next : null;
+      if (args.listModels) i += 1;
+      continue;
+    }
+    if (arg === '--reviewer') { args.reviewer = argv[i + 1]; i += 1; continue; }
     if (arg === '--model') { args.model = argv[i + 1]; i += 1; continue; }
     if (arg === '--requirements') { args.requirementsText = argv[i + 1]; i += 1; continue; }
     if (arg.startsWith('-')) throw new Error(`Unknown option: ${arg}`);
     if (args.input) throw new Error('Only one input is supported.');
     args.input = arg;
   }
+  if (args.listModels !== undefined) return args;
   if (!args.input) return null;
   return args;
 }
@@ -72,6 +94,20 @@ async function main(): Promise<number> {
   if (!args) {
     console.log(HELP);
     return process.argv.length > 2 ? 0 : 2;
+  }
+
+  if (args.listModels !== undefined) return printModels(args.listModels);
+
+  let reviewer;
+  try {
+    reviewer = getReviewer(args.reviewer);
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    return 2;
+  }
+  if (!reviewer.isAvailable()) {
+    console.error(`${notInstalledMessage(reviewer)}. Install it, or pick another --reviewer.`);
+    return 2;
   }
 
   recoverInterrupted();
@@ -107,7 +143,8 @@ async function main(): Promise<number> {
       branch: target.branch,
       base_branch: target.baseBranch,
       pr_number: target.prNumber,
-      model: args.model ?? config.REVIEW_MODEL,
+      reviewer: reviewer.name,
+      model: args.model ?? reviewer.defaultModel,
     });
     ids.push(review.id);
     enqueueReview(review.id);
@@ -135,6 +172,30 @@ async function main(): Promise<number> {
     }
   }
   return bad > 0 || failed ? 1 : 0;
+}
+
+/** Print every reviewer, whether its CLI is installed, and the models it offers. */
+async function printModels(only: string | null): Promise<number> {
+  if (only !== null) {
+    try {
+      getReviewer(only);
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      return 2;
+    }
+  }
+  const reviewers = await listReviewersWithModels();
+  for (const r of reviewers) {
+    if (only !== null && r.name !== only.toLowerCase()) continue;
+    const state = r.available ? '' : ' — not installed';
+    const isDefault = r.name === config.defaultReviewer ? ' (default reviewer)' : '';
+    console.log(`${r.name} — ${r.label} [${r.bin}]${state}${isDefault}`);
+    console.log(`  default model: ${r.defaultModel}`);
+    if (r.models.length === 0) console.log('  models: (none reported)');
+    else for (const m of r.models) console.log(`    ${m.id}${m.label && m.label !== m.id ? ` — ${m.label}` : ''}`);
+    console.log('');
+  }
+  return 0;
 }
 
 /** Poll the log table until every review reaches a terminal status. */

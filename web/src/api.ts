@@ -6,6 +6,7 @@ import type {
   RecipesPayload,
   Review,
   ReviewDetailPayload,
+  ReviewersPayload,
   ResolvedTarget,
   TicketInfo,
 } from './types';
@@ -30,12 +31,14 @@ async function req<T>(url: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   health: () => req<Health>('/api/health'),
+  reviewers: () => req<ReviewersPayload>('/api/reviewers'),
   repos: () => req<{ repos: string[] }>('/api/repos'),
   ticket: (key: string) =>
     req<{ ticket: TicketInfo; targets: ResolvedTarget[] }>(`/api/tickets/${encodeURIComponent(key)}`),
   createReviews: (body: {
     input: string;
     targets?: ResolvedTarget[];
+    reviewer?: string;
     model?: string;
     requirementsText?: string;
   }) =>

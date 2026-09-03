@@ -16,7 +16,9 @@ export default function App() {
   }, []);
 
   const review = /^\/review\/(\d+)$/.exec(path);
-  const ticket = /^\/ticket\/([A-Za-z]+-\d+)$/.exec(path);
+  // Ticket keys are not always ABC-123: a GitHub issue key looks like
+  // owner/repo#610, so the segment is decoded rather than pattern-matched.
+  const ticket = /^\/ticket\/(.+)$/.exec(path);
   const previews = path === '/previews';
   const previewsOn = health?.previews?.enabled ?? false;
   const previewsRunning = health?.previews?.running ?? 0;
@@ -58,11 +60,22 @@ export default function App() {
         ) : review ? (
           <ReviewDetail id={Number(review[1])} />
         ) : ticket ? (
-          <TicketView ticketKey={ticket[1]!.toUpperCase()} />
+          <TicketView ticketKey={decodeTicketKey(ticket[1]!)} />
         ) : (
           <Home />
         )}
       </main>
     </div>
   );
+}
+
+/** Only ABC-123 style keys are case-insensitive; anything else is used verbatim. */
+function decodeTicketKey(raw: string): string {
+  let key = raw;
+  try {
+    key = decodeURIComponent(raw);
+  } catch {
+    // A malformed escape stays as typed rather than blanking the page.
+  }
+  return /^[A-Za-z]+-\d+$/.test(key) ? key.toUpperCase() : key;
 }

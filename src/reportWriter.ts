@@ -1,13 +1,14 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { config } from './config.js';
+import { listReviewers } from './reviewers/index.js';
 import type { CheckoutResult, ReviewOutput, ReviewRow, Severity, TicketInfo } from './types.js';
 
 /** Minimal shape the report needs from a `reviews` row. */
 export type ReportableReview = Pick<
   ReviewRow,
   | 'id' | 'repo' | 'branch' | 'base_branch' | 'run_index'
-  | 'head_sha' | 'base_sha' | 'model' | 'ticket_key' | 'ticket_title' | 'ticket_url'
+  | 'head_sha' | 'base_sha' | 'reviewer' | 'model' | 'ticket_key' | 'ticket_title' | 'ticket_url'
 >;
 
 const VERDICT_BANNER: Record<string, string> = {
@@ -78,7 +79,8 @@ export function renderReport(
     `| Diff | ${checkout.filesChanged} files, +${checkout.additions} / -${checkout.deletions} |`,
   );
   lines.push(
-    `| Run | #${review.run_index} · ${humanStamp(now)} UTC · model ${review.model ?? 'unknown'} |`,
+    `| Run | #${review.run_index} · ${humanStamp(now)} UTC · ` +
+      `${reviewerLabel(review.reviewer)} · model ${review.model ?? 'unknown'} |`,
   );
   lines.push('');
 
@@ -165,6 +167,12 @@ function cell(value: string | null | undefined): string {
 
 function shortSha(sha: string | null | undefined): string {
   return sha ? sha.slice(0, 7) : 'unknown';
+}
+
+function reviewerLabel(reviewer: string | null | undefined): string {
+  if (!reviewer) return 'unknown reviewer';
+  // An old row can name a reviewer that no longer exists; show it verbatim.
+  return listReviewers().find((r) => r.name === reviewer)?.label ?? reviewer;
 }
 
 function stamp(date: Date): string {

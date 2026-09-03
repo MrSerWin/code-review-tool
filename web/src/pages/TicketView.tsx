@@ -48,7 +48,7 @@ export default function TicketView({ ticketKey }: { ticketKey: string }) {
         <p className="muted">{title}</p>
         {url && (
           <a className="btn ghost" href={url} target="_blank" rel="noreferrer">
-            Open in Linear
+            Open ticket
           </a>
         )}
       </header>

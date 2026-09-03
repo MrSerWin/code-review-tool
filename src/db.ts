@@ -34,6 +34,7 @@ const MIGRATIONS: string[] = [
      requirements_total INTEGER,
      blocking_count INTEGER,
      report_path TEXT,
+     reviewer TEXT,
      model TEXT,
      error TEXT,
      files_changed INTEGER,
@@ -126,8 +127,14 @@ const MIGRATIONS: string[] = [
 export function migrate(): void {
   const run = db.transaction(() => {
     for (const sql of MIGRATIONS) db.prepare(sql).run();
+    ensureColumn('reviews', 'reviewer', `ALTER TABLE reviews ADD COLUMN reviewer TEXT`);
   });
   run();
+}
+
+function ensureColumn(table: string, column: string, ddl: string): void {
+  const cols = db.pragma(`table_info(${table})`) as { name: string }[];
+  if (!cols.some((c) => c.name === column)) db.exec(ddl);
 }
 
 migrate();
@@ -135,7 +142,7 @@ migrate();
 const REVIEW_COLUMNS = [
   'ticket_key', 'ticket_title', 'ticket_url', 'ticket_body', 'repo', 'branch', 'base_branch',
   'head_sha', 'base_sha', 'pr_number', 'run_index', 'status', 'verdict', 'can_merge', 'summary',
-  'requirements_met', 'requirements_total', 'blocking_count', 'report_path', 'model', 'error',
+  'requirements_met', 'requirements_total', 'blocking_count', 'report_path', 'reviewer', 'model', 'error',
   'files_changed', 'additions', 'deletions', 'created_at', 'started_at', 'finished_at',
 ] as const satisfies readonly (keyof ReviewRow)[];
 
@@ -158,7 +165,7 @@ export function createReview(input: CreateReviewInput): ReviewRow {
     status: input.status ?? 'queued',
     verdict: null, can_merge: null, summary: null,
     requirements_met: null, requirements_total: null, blocking_count: null,
-    report_path: null, model: null, error: null,
+    report_path: null, reviewer: null, model: null, error: null,
     files_changed: null, additions: null, deletions: null,
     created_at: input.created_at ?? new Date().toISOString(),
     started_at: null, finished_at: null,
@@ -199,6 +206,8 @@ export interface ListReviewsFilter {
   ticket?: string;
   repo?: string;
   branch?: string;
+  /** Case-insensitive substring match across ticket key, title, repo, and branch. */
+  q?: string;
   limit?: number;
   offset?: number;
 }
@@ -209,6 +218,12 @@ export function listReviews(filter: ListReviewsFilter = {}): { reviews: ReviewRo
   if (filter.ticket) { where.push('ticket_key = @ticket'); params.ticket = filter.ticket; }
   if (filter.repo) { where.push('repo = @repo'); params.repo = filter.repo; }
   if (filter.branch) { where.push('branch = @branch'); params.branch = filter.branch; }
+  if (filter.q) {
+    where.push(
+      `(ticket_key LIKE @q OR ticket_title LIKE @q OR repo LIKE @q OR branch LIKE @q)`,
+    );
+    params.q = `%${filter.q}%`;
+  }
   const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
   const total = db.prepare(`SELECT COUNT(*) AS n FROM reviews ${clause}`).get(params) as { n: number };

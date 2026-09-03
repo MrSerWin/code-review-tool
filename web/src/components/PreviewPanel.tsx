@@ -10,6 +10,7 @@ import type {
   RecipesPayload,
 } from '../types';
 import {
+  DUMP_CHOICES,
   DumpModeBadge,
   DumpModeNote,
   PhaseTrack,
@@ -21,13 +22,6 @@ import {
   fmtExpiry,
 } from './preview';
 import { Card, fmtTime } from './ui';
-
-const DUMP_CHOICES: { value: DumpModeRequest; label: string }[] = [
-  { value: 'auto', label: 'data: auto' },
-  { value: 'pg_dump', label: 'data: fresh dump' },
-  { value: 'dump-dir', label: 'data: stored dump' },
-  { value: 'clean', label: 'data: clean install' },
-];
 
 /** How many log lines a failed preview shows without the user asking. */
 const FAILURE_TAIL = 20;

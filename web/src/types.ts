@@ -44,6 +44,7 @@ export interface Review {
   requirements_total: number | null;
   blocking_count: number | null;
   report_path: string | null;
+  reviewer: string | null;
   model: string | null;
   error: string | null;
   files_changed: number | null;
@@ -104,6 +105,24 @@ export interface ReviewDetailPayload {
   findings: Finding[];
   observations: Observation[];
   logs: LogLine[];
+  comparison: RunComparison | null;
+}
+
+/** How this run's findings differ from the previous run of the same branch. */
+export interface RunComparison {
+  previousRunId: number;
+  previousRunIndex: number;
+  resolved: ComparedFinding[];
+  new: ComparedFinding[];
+  persistent: ComparedFinding[];
+}
+
+export interface ComparedFinding {
+  severity: Severity;
+  title: string;
+  file: string | null;
+  line: number | null;
+  problem: string;
 }
 
 export interface Health {
@@ -112,8 +131,33 @@ export interface Health {
   dockerImage: string;
   /** Names of the trackers that are configured; never any credential. */
   trackers: string[];
+  reviewers: ReviewerInfo[];
+  defaultReviewer: string;
   repos: number;
   previews?: PreviewsSummary;
+}
+
+/** One model a reviewer CLI can be pointed at. */
+export interface ModelInfo {
+  id: string;
+  label: string;
+}
+
+export interface ReviewerInfo {
+  name: string;
+  label: string;
+  defaultModel: string;
+  bin: string;
+  /** Whether the reviewer's CLI was found on the server. */
+  available: boolean;
+  /** Only served by /api/reviewers; /api/health omits it to stay cheap. */
+  models?: ModelInfo[];
+}
+
+/** Response of GET /api/reviewers. */
+export interface ReviewersPayload {
+  reviewers: ReviewerInfo[];
+  defaultReviewer: string;
 }
 
 export interface PreviewsSummary {

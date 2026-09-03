@@ -5,6 +5,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { config } from './config.js';
+import { getReviewer } from './reviewers/index.js';
+import { parseAnthropicStreamLine } from './reviewers/anthropicStream.js';
+import type { ReviewerDefinition } from './reviewers/types.js';
 import { LENS_NAMES } from './types.js';
 import type {
   CheckoutResult, LensName, LensOutput, OnLog, ReviewOutput, ReviewRow, TicketInfo,
@@ -21,12 +24,13 @@ export interface PreviousFinding {
 /** Minimal shape the runner needs from a `reviews` row. */
 export type RunnableReview = Pick<
   ReviewRow,
-  'id' | 'repo' | 'branch' | 'model' | 'ticket_key' | 'ticket_title' | 'ticket_url' | 'ticket_body'
+  'id' | 'repo' | 'branch' | 'reviewer' | 'model' | 'ticket_key' | 'ticket_title' | 'ticket_url' | 'ticket_body'
 >;
 
 export interface RunReviewOptions {
   previousFindings?: PreviousFinding[];
   signal?: AbortSignal;
+  reviewer?: string;
   model?: string;
   timeoutMs?: number;
 }
@@ -226,41 +230,16 @@ function renderPreviousFindings(findings: PreviousFinding[]): string {
 }
 
 /** Env vars that must never reach the review process. */
-const FORBIDDEN_ENV = [
-  'GH_TOKEN', 'GITHUB_TOKEN', 'REVIEW_GH_TOKEN',
-  'LINEAR_API_KEY', 'JIRA_API_TOKEN', 'AZURE_PAT', 'YOUTRACK_TOKEN',
-];
-// `USER` is required: the Claude CLI reads its credentials from the macOS
-// Keychain and cannot find them without it. The rest keep the CLI's own
-// runtime sane. None of these carry a secret.
-const PASSTHROUGH_ENV = [
-  'PATH', 'HOME', 'SHELL', 'LANG', 'LC_ALL', 'TERM',
-  'USER', 'LOGNAME', 'TMPDIR', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME',
-];
+export { FORBIDDEN_ENV, PASSTHROUGH_ENV } from './reviewers/shared.js';
 
+/** @deprecated Use reviewers/claude.ts via getReviewer('claude'). */
 export function buildChildEnv(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {};
-  for (const key of PASSTHROUGH_ENV) {
-    const value = process.env[key];
-    if (value !== undefined) env[key] = value;
-  }
-  for (const key of FORBIDDEN_ENV) delete env[key];
-  return env;
+  return getReviewer('claude').buildChildEnv();
 }
 
+/** @deprecated Use reviewers/claude.ts via getReviewer('claude'). */
 export function buildClaudeArgs(prompt: string, model: string, dir: string): string[] {
-  return [
-    '-p', prompt,
-    '--model', model,
-    '--output-format', 'stream-json',
-    '--verbose',
-    '--permission-mode', 'acceptEdits',
-    '--allowed-tools', 'Read', 'Grep', 'Glob',
-    'Bash(git diff:*)', 'Bash(git log:*)', 'Bash(git show:*)', 'Bash(git status:*)',
-    '--disallowed-tools', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit',
-    'WebFetch', 'WebSearch', 'Task',
-    '--add-dir', dir,
-  ];
+  return getReviewer('claude').buildArgs(prompt, model, dir);
 }
 
 export interface LensResult {
@@ -271,12 +250,13 @@ export interface LensResult {
 
 interface PassOptions {
   dir: string;
+  reviewer: ReviewerDefinition;
   model: string;
   timeoutMs: number;
   signal: AbortSignal | undefined;
 }
 
-/** Run one `claude -p` pass and parse its JSON block, retrying once. */
+/** Run one review pass and parse its JSON block, retrying once. */
 async function runPass<T>(
   label: string,
   basePrompt: string,
@@ -291,7 +271,7 @@ async function runPass<T>(
     const prompt = attempt === 1 ? basePrompt : correctivePrompt(basePrompt, lastError);
     if (attempt === 2) onLog('warn', `${label}: output was not valid JSON. Retrying once.`);
 
-    const raw = await spawnClaude(prompt, opts.model, opts.dir, opts.timeoutMs, onLog, opts.signal);
+    const raw = await spawnReviewer(prompt, opts, onLog);
     lastRaw = raw;
 
     const json = extractJson(raw);
@@ -366,14 +346,21 @@ export async function runReview(
     checkout,
     previousFindings: opts.previousFindings ?? [],
   };
+  const reviewer = getReviewer(opts.reviewer ?? review.reviewer);
+  const model = opts.model ?? review.model ?? reviewer.defaultModel;
   const passOpts: PassOptions = {
     dir: checkout.dir,
-    model: opts.model ?? review.model ?? config.REVIEW_MODEL,
+    reviewer,
+    model,
     timeoutMs: opts.timeoutMs ?? config.REVIEW_TIMEOUT_MS,
     signal: opts.signal,
   };
 
-  onLog('info', `Running ${LENS_NAMES.length} review lenses in parallel: ${LENS_NAMES.join(', ')}.`);
+  onLog(
+    'info',
+    `Reviewer: ${reviewer.label} (${reviewer.bin}, model ${model}). ` +
+      `Running ${LENS_NAMES.length} lenses in parallel: ${LENS_NAMES.join(', ')}.`,
+  );
   const lensResults = await runLenses(vars, onLog, passOpts);
   if (lensResults.every((r) => r.output === null)) {
     throw new Error(
@@ -429,23 +416,21 @@ function normalize(output: ReviewOutput): ReviewOutput {
   return { ...output, can_merge: canMerge, verdict };
 }
 
-function spawnClaude(
+function spawnReviewer(
   prompt: string,
-  model: string,
-  dir: string,
-  timeoutMs: number,
+  opts: PassOptions,
   onLog: OnLog,
-  signal: AbortSignal | undefined,
 ): Promise<string> {
+  const { reviewer, model, dir, timeoutMs, signal } = opts;
   return new Promise<string>((resolve, reject) => {
     if (signal?.aborted) {
       reject(new Error('Review cancelled'));
       return;
     }
-    const args = buildClaudeArgs(prompt, model, dir);
-    const child = spawn(config.CLAUDE_BIN, args, {
+    const args = reviewer.buildArgs(prompt, model, dir);
+    const child = spawn(reviewer.bin, args, {
       cwd: dir,
-      env: buildChildEnv(),
+      env: reviewer.buildChildEnv(),
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: true, // own process group, so we can kill the whole tree
     });
@@ -493,7 +478,7 @@ function spawnClaude(
         stdoutBuf = stdoutBuf.slice(nl + 1);
         nl = stdoutBuf.indexOf('\n');
         if (!line) continue;
-        const handled = handleStreamLine(line, onLog);
+        const handled = reviewer.parseStreamLine(line, onLog);
         if (handled.result !== undefined) {
           result = handled.result;
           resultIsError = handled.isError === true;
@@ -506,13 +491,13 @@ function spawnClaude(
       stderrTail = (stderrTail + chunk).slice(-4000);
     });
 
-    child.on('error', (err) => finish(new Error(`Failed to start ${config.CLAUDE_BIN}: ${err.message}`)));
+    child.on('error', (err) => finish(new Error(`Failed to start ${reviewer.bin}: ${err.message}`)));
 
     child.on('close', (code) => {
       // Flush a trailing line without a newline.
       const tail = stdoutBuf.trim();
       if (tail) {
-        const handled = handleStreamLine(tail, onLog);
+        const handled = reviewer.parseStreamLine(tail, onLog);
         if (handled.result !== undefined) {
           result = handled.result;
           resultIsError = handled.isError === true;
@@ -527,67 +512,19 @@ function spawnClaude(
         finish(new Error(`The review model reported an error: ${String(result).slice(0, 2000)}`));
         return;
       }
-      finish(new Error(`claude exited with code ${code ?? 'null'}${stderrTail ? `: ${stderrTail.trim()}` : ''}`));
+      const hint = reviewer.describeFailure(stderrTail, code);
+      const detail = `${reviewer.bin} exited with code ${code ?? 'null'}${stderrTail ? `: ${stderrTail.trim()}` : ''}`;
+      finish(new Error(hint ? `${hint}\n${detail}` : detail));
     });
   });
 }
 
-interface StreamLineResult {
-  result?: string;
-  isError?: boolean;
-}
-
-const MAX_LOG_CHARS = 600;
-
-/** Parse one stream-json line, forward progress, and surface the final result. */
-export function handleStreamLine(line: string, onLog: OnLog): StreamLineResult {
-  let event: unknown;
-  try {
-    event = JSON.parse(line);
-  } catch {
-    return {};
-  }
-  if (typeof event !== 'object' || event === null) return {};
-  const e = event as Record<string, any>;
-
-  switch (e.type) {
-    case 'system':
-      if (e.subtype === 'init') onLog('info', `Reviewer started (model ${e.model ?? 'default'})`);
-      return {};
-    case 'assistant': {
-      const content = e.message?.content;
-      if (!Array.isArray(content)) return {};
-      for (const block of content) {
-        if (block?.type === 'text' && typeof block.text === 'string') {
-          const text = block.text.trim();
-          if (text) onLog('info', truncate(text, MAX_LOG_CHARS));
-        } else if (block?.type === 'tool_use') {
-          onLog('info', `tool: ${block.name}${describeToolInput(block.input)}`);
-        }
-      }
-      return {};
-    }
-    case 'result': {
-      if (typeof e.result === 'string') {
-        return { result: e.result, isError: e.is_error === true || e.subtype !== 'success' };
-      }
-      return { result: '', isError: true };
-    }
-    default:
-      return {};
-  }
-}
-
-function describeToolInput(input: unknown): string {
-  if (typeof input !== 'object' || input === null) return '';
-  const i = input as Record<string, unknown>;
-  const hint = i.file_path ?? i.path ?? i.pattern ?? i.command;
-  return typeof hint === 'string' ? ` ${truncate(hint, 160)}` : '';
-}
-
-function truncate(text: string, max: number): string {
-  return text.length > max ? `${text.slice(0, max)}…` : text;
-}
+/**
+ * @deprecated Kept as an alias of the Anthropic-style parser, which Claude
+ * Code, Cursor Agent, and the Grok CLI all share. New code should call
+ * `reviewer.parseStreamLine`.
+ */
+export const handleStreamLine = parseAnthropicStreamLine;
 
 /**
  * Take the last ```json fenced block; fall back to the last balanced {...}.

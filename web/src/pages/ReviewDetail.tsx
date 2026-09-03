@@ -15,6 +15,7 @@ import type {
   LogLine,
   Observation,
   ReviewDetailPayload,
+  RunComparison,
   Severity,
   SseEvent,
 } from '../types';
@@ -77,6 +78,8 @@ export default function ReviewDetail({ id }: { id: number }) {
   const [error, setError] = useState<string | null>(null);
   const [live, setLive] = useState<LogLine[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
+  // name -> label, so the run details can name the reviewer the way the picker does.
+  const [reviewerLabels, setReviewerLabels] = useState<Record<string, string>>({});
   const logEndRef = useRef<HTMLDivElement | null>(null);
 
   const load = useCallback(async () => {
@@ -93,6 +96,17 @@ export default function ReviewDetail({ id }: { id: number }) {
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    // Labels only, so the cheap health payload is enough: /api/reviewers
+    // would also ask every CLI for its model list.
+    api
+      .health()
+      .then(({ reviewers }) => {
+        setReviewerLabels(Object.fromEntries((reviewers ?? []).map((r) => [r.name, r.label])));
+      })
+      .catch(() => setReviewerLabels({}));
+  }, []);
 
   useEffect(() => {
     const source = new EventSource(api.eventsUrl(id));
@@ -137,7 +151,7 @@ export default function ReviewDetail({ id }: { id: number }) {
   if (error) return <p className="error-line">{error}</p>;
   if (!data) return <p className="muted">Loading…</p>;
 
-  const { review, requirements, findings } = data;
+  const { review, requirements, findings, comparison } = data;
   const observations = data.observations ?? [];
   const running = ACTIVE.has(review.status);
   const finished = review.status === 'done';
@@ -230,7 +244,7 @@ export default function ReviewDetail({ id }: { id: number }) {
             <dd>
               {review.ticket_key ? (
                 <>
-                  <Link to={`/ticket/${review.ticket_key}`} className="mono">
+                  <Link to={`/ticket/${encodeURIComponent(review.ticket_key)}`} className="mono">
                     {review.ticket_key}
                   </Link>{' '}
                   <span className="muted">{review.ticket_title}</span>
@@ -256,6 +270,10 @@ export default function ReviewDetail({ id }: { id: number }) {
             <dt>Requirements</dt>
             <dd className="mono">
               {review.requirements_met ?? 0}/{review.requirements_total ?? 0} met
+            </dd>
+            <dt>Reviewer</dt>
+            <dd>
+              {review.reviewer ? (reviewerLabels[review.reviewer] ?? review.reviewer) : '—'}
             </dd>
             <dt>Model</dt>
             <dd className="mono">{review.model ?? '—'}</dd>
@@ -284,6 +302,12 @@ export default function ReviewDetail({ id }: { id: number }) {
       </div>
 
       <PreviewPanel reviewId={review.id} repo={review.repo} branch={review.branch} />
+
+      {comparison && finished && (
+        <Card title={`Changes since run #${comparison.previousRunIndex}`}>
+          <RunComparisonView comparison={comparison} />
+        </Card>
+      )}
 
       <Card title="Ticket requirements">
         {requirements.length === 0 ? (
@@ -364,6 +388,68 @@ export default function ReviewDetail({ id }: { id: number }) {
           </div>
         )}
       </Card>
+    </div>
+  );
+}
+
+function RunComparisonView({ comparison }: { comparison: RunComparison }) {
+  const { resolved, new: added, persistent } = comparison;
+  if (resolved.length === 0 && added.length === 0 && persistent.length === 0) {
+    return <p className="muted">No findings in either run.</p>;
+  }
+  return (
+    <div className="comparison">
+      {resolved.length > 0 && (
+        <ComparisonGroup
+          label="Resolved"
+          tone="resolved"
+          items={resolved}
+          emptyNote="Nothing from the previous run was cleared."
+        />
+      )}
+      {added.length > 0 && (
+        <ComparisonGroup label="New" tone="new" items={added} />
+      )}
+      {persistent.length > 0 && (
+        <ComparisonGroup label="Still open" tone="persistent" items={persistent} />
+      )}
+    </div>
+  );
+}
+
+function ComparisonGroup({
+  label,
+  tone,
+  items,
+  emptyNote,
+}: {
+  label: string;
+  tone: 'resolved' | 'new' | 'persistent';
+  items: RunComparison['resolved'];
+  emptyNote?: string;
+}) {
+  if (items.length === 0) {
+    return emptyNote ? <p className="muted">{emptyNote}</p> : null;
+  }
+  return (
+    <div className={`comparison-group comparison-${tone}`}>
+      <h3 className="group-head">
+        {label} · {items.length}
+      </h3>
+      <ul className="comparison-list">
+        {items.map((item) => {
+          const loc = item.file
+            ? `${item.file}${item.line !== null ? `:${item.line}` : ''}`
+            : null;
+          return (
+            <li key={`${item.severity}|${loc ?? ''}|${item.title}`}>
+              <SeverityTag severity={item.severity} />
+              <span className="comparison-title">{item.title}</span>
+              {loc && <span className="mono muted comparison-loc">{loc}</span>}
+            </li>
+          );
+        })}
+      </ul>
     </div>
   );
 }

@@ -2,6 +2,9 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import dotenv from 'dotenv';
 import { z } from 'zod';
+// Names only, from a module that imports nothing of ours: the reviewer
+// registry imports this file, so it must never be imported back from here.
+import { REVIEWER_NAMES } from './reviewers/types.js';
 
 // src/config.ts -> <root>/src, dist/config.js -> <root>/dist; the project root is one level up in both.
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -70,9 +73,17 @@ const schema = z.object({
   DATA_DIR: z.string().min(1).default(path.join(projectRoot, 'data')),
   CLAUDE_BIN: z.string().min(1).default('claude'),
   REVIEW_MODEL: z.string().min(1).default('opus'),
+  DEFAULT_REVIEWER: z.enum(REVIEWER_NAMES).default('claude'),
+  CURSOR_BIN: z.string().min(1).default('cursor-agent'),
+  CURSOR_REVIEW_MODEL: z.string().min(1).default('auto'),
+  CURSOR_API_KEY: optionalSecret,
+  CODEX_BIN: z.string().min(1).default('codex'),
+  CODEX_REVIEW_MODEL: z.string().min(1).default('gpt-5.5'),
+  GROK_BIN: z.string().min(1).default('grok'),
+  GROK_REVIEW_MODEL: z.string().min(1).default('grok-4.6'),
   REVIEW_TIMEOUT_MS: z.coerce.number().int().positive().default(1_800_000),
   // How many reviews (branches) run at once. The lens fan-out inside one
-  // review is always 4 wide, so the process ceiling is this value * 4.
+  // review is five lenses plus synthesis, so the process ceiling is this * 6.
   REVIEW_CONCURRENCY: z.coerce.number().int().positive().default(2),
   DOCKER_BIN: z.string().min(1).default('docker'),
   GIT_IMAGE: z.string().min(1).default('code-review-tool-git:latest'),
@@ -105,6 +116,14 @@ export const config = Object.freeze({
   dataDir,
   claudeBin: parsed.data.CLAUDE_BIN,
   reviewModel: parsed.data.REVIEW_MODEL,
+  defaultReviewer: parsed.data.DEFAULT_REVIEWER,
+  cursorBin: parsed.data.CURSOR_BIN,
+  cursorReviewModel: parsed.data.CURSOR_REVIEW_MODEL,
+  cursorApiKey: parsed.data.CURSOR_API_KEY,
+  codexBin: parsed.data.CODEX_BIN,
+  codexReviewModel: parsed.data.CODEX_REVIEW_MODEL,
+  grokBin: parsed.data.GROK_BIN,
+  grokReviewModel: parsed.data.GROK_REVIEW_MODEL,
   reviewTimeoutMs: parsed.data.REVIEW_TIMEOUT_MS,
   reviewConcurrency: parsed.data.REVIEW_CONCURRENCY,
   dockerBin: parsed.data.DOCKER_BIN,
