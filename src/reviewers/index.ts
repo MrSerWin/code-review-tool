@@ -34,6 +34,27 @@ export function notInstalledMessage(reviewer: ReviewerDefinition): string {
   return `${reviewer.label} is not installed: ${reviewer.bin} not found on PATH`;
 }
 
+/**
+ * Which reviewer and model a re-run uses. An explicit choice wins; otherwise
+ * the previous run's reviewer carries over. The previous model only carries
+ * over while the reviewer stays the same: a model id belongs to one CLI, so
+ * switching reviewer without naming a model falls back to that reviewer's
+ * default (e.g. "opus" must never be handed to codex).
+ */
+export function resolveRerunChoice(
+  previous: { reviewer: string | null; model: string | null },
+  override: { reviewer?: string; model?: string } = {},
+): { reviewer: ReviewerDefinition; model: string } {
+  const reviewer = getReviewer(override.reviewer ?? previous.reviewer);
+  if (override.model) return { reviewer, model: override.model };
+  const previousName = (previous.reviewer ?? config.defaultReviewer).toLowerCase();
+  const sameReviewer = previousName === reviewer.name;
+  return {
+    reviewer,
+    model: sameReviewer && previous.model ? previous.model : reviewer.defaultModel,
+  };
+}
+
 export interface ReviewerSummary {
   name: ReviewerName;
   label: string;

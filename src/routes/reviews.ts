@@ -3,7 +3,12 @@ import path from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { config } from '../config.js';
-import { getReviewer, notInstalledMessage, REVIEWER_NAMES } from '../reviewers/index.js';
+import {
+  getReviewer,
+  notInstalledMessage,
+  resolveRerunChoice,
+  REVIEWER_NAMES,
+} from '../reviewers/index.js';
 import {
   createReview,
   deleteReview,
@@ -40,6 +45,12 @@ const createBody = z.object({
   model: z.string().min(1).max(64).optional(),
   // Requirements pasted by hand, used instead of a ticket.
   requirementsText: z.string().min(1).max(20_000).optional(),
+});
+
+// Optional overrides for a re-run; an absent or empty body keeps the old run's choice.
+const rerunBody = z.object({
+  reviewer: z.enum(REVIEWER_NAMES).optional(),
+  model: z.string().min(1).max(64).optional(),
 });
 
 const listQuery = z.object({
@@ -193,8 +204,12 @@ export async function reviewRoutes(app: FastifyInstance): Promise<void> {
         } satisfies TicketInfo)
       : null;
 
+    const body = rerunBody.safeParse(req.body ?? {});
+    if (!body.success) return reply.code(400).send({ error: 'Invalid request body' });
+
     let review: ReviewRow;
     try {
+      const choice = resolveRerunChoice(prev, body.data);
       review = startRun(
         {
           repo: prev.repo,
@@ -203,8 +218,8 @@ export async function reviewRoutes(app: FastifyInstance): Promise<void> {
           prNumber: prev.pr_number ?? null,
         },
         ticket,
-        prev.reviewer ?? undefined,
-        prev.model ?? undefined,
+        choice.reviewer.name,
+        choice.model,
       );
     } catch (err) {
       return reply.code(400).send({ error: (err as Error).message });

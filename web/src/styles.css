@@ -577,6 +577,10 @@ table.grid tr:last-child td { border-bottom: none; }
 }
 .mini-select:focus { outline: none; border-color: var(--accent); }
 
+/* Re-run picker in the review banner: reviewer + model + button. */
+.rerun-group { display: inline-flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+.rerun-model { width: 9rem; }
+
 .preview-intro p:last-child { margin-bottom: 0; }
 .preview-body { display: flex; flex-direction: column; gap: var(--space-3); }
 .preview-head { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; font-size: var(--fs-sm); }

@@ -55,7 +55,11 @@ export const api = {
     if (!res.ok) throw new Error('Report is not available yet');
     return res.text();
   },
-  rerun: (id: number) => req<{ review: Review }>(`/api/reviews/${id}/rerun`, { method: 'POST' }),
+  rerun: (id: number, overrides: { reviewer?: string; model?: string } = {}) =>
+    req<{ review: Review }>(`/api/reviews/${id}/rerun`, {
+      method: 'POST',
+      body: JSON.stringify(overrides),
+    }),
   cancel: (id: number) => req<{ review: Review }>(`/api/reviews/${id}/cancel`, { method: 'POST' }),
   remove: (id: number) => req<{ ok: true }>(`/api/reviews/${id}`, { method: 'DELETE' }),
   eventsUrl: (id: number) => `/api/reviews/${id}/events`,

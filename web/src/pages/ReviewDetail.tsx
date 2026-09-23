@@ -15,6 +15,7 @@ import type {
   LogLine,
   Observation,
   ReviewDetailPayload,
+  ReviewerInfo,
   RunComparison,
   Severity,
   SseEvent,
@@ -78,8 +79,11 @@ export default function ReviewDetail({ id }: { id: number }) {
   const [error, setError] = useState<string | null>(null);
   const [live, setLive] = useState<LogLine[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
-  // name -> label, so the run details can name the reviewer the way the picker does.
-  const [reviewerLabels, setReviewerLabels] = useState<Record<string, string>>({});
+  // Labels for the run details, plus models and availability for the re-run picker.
+  const [reviewers, setReviewers] = useState<ReviewerInfo[]>([]);
+  // The re-run picker; prefilled from this review once it loads.
+  const [rerunReviewer, setRerunReviewer] = useState('');
+  const [rerunModel, setRerunModel] = useState('');
   const logEndRef = useRef<HTMLDivElement | null>(null);
 
   const load = useCallback(async () => {
@@ -98,15 +102,20 @@ export default function ReviewDetail({ id }: { id: number }) {
   }, [load]);
 
   useEffect(() => {
-    // Labels only, so the cheap health payload is enough: /api/reviewers
-    // would also ask every CLI for its model list.
+    // One fetch serves the reviewer label and the re-run picker's models.
     api
-      .health()
-      .then(({ reviewers }) => {
-        setReviewerLabels(Object.fromEntries((reviewers ?? []).map((r) => [r.name, r.label])));
-      })
-      .catch(() => setReviewerLabels({}));
+      .reviewers()
+      .then(({ reviewers: list }) => setReviewers(list ?? []))
+      .catch(() => setReviewers([]));
   }, []);
+
+  const loadedReviewer = data?.review.reviewer ?? '';
+  const loadedModel = data?.review.model ?? '';
+  useEffect(() => {
+    // Prefill (and re-prefill on navigating to another review) with this run's choice.
+    setRerunReviewer(loadedReviewer);
+    setRerunModel(loadedModel);
+  }, [id, loadedReviewer, loadedModel]);
 
   useEffect(() => {
     const source = new EventSource(api.eventsUrl(id));
@@ -156,10 +165,21 @@ export default function ReviewDetail({ id }: { id: number }) {
   const running = ACTIVE.has(review.status);
   const finished = review.status === 'done';
   const unmet = requirements.filter((r) => r.status === 'missing' || r.status === 'partial');
+  const reviewerLabel = (name: string): string => reviewers.find((r) => r.name === name)?.label ?? name;
+  const rerunInfo = reviewers.find((r) => r.name === rerunReviewer);
+
+  const onRerunReviewerChange = (name: string): void => {
+    setRerunReviewer(name);
+    // A model id belongs to one CLI: switching reviewer starts from its default.
+    setRerunModel(reviewers.find((r) => r.name === name)?.defaultModel ?? '');
+  };
 
   const rerun = async (): Promise<void> => {
     try {
-      const { review: next } = await api.rerun(review.id);
+      const { review: next } = await api.rerun(review.id, {
+        ...(rerunReviewer ? { reviewer: rerunReviewer } : {}),
+        ...(rerunModel.trim() ? { model: rerunModel.trim() } : {}),
+      });
       navigate(`/review/${next.id}`);
     } catch (err) {
       setNotice((err as Error).message);
@@ -218,9 +238,45 @@ export default function ReviewDetail({ id }: { id: number }) {
               Cancel
             </button>
           ) : (
-            <button className="btn" type="button" onClick={() => void rerun()}>
-              Re-run
-            </button>
+            <span className="rerun-group">
+              {reviewers.length > 0 && (
+                <>
+                  <select
+                    className="mini-select"
+                    aria-label="Reviewer for the re-run"
+                    value={rerunReviewer}
+                    onChange={(e) => onRerunReviewerChange(e.target.value)}
+                  >
+                    {/* A stored reviewer the server no longer offers still shows as chosen. */}
+                    {!rerunInfo && <option value={rerunReviewer}>{rerunReviewer || 'Default'}</option>}
+                    {reviewers.map((r) => (
+                      <option key={r.name} value={r.name} disabled={!r.available}>
+                        {r.available ? r.label : `${r.label} (not installed)`}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    className="mini-select mono rerun-model"
+                    aria-label="Model for the re-run"
+                    value={rerunModel}
+                    spellCheck={false}
+                    list={`rerun-models-${rerunReviewer}`}
+                    placeholder={rerunInfo?.defaultModel ?? 'model'}
+                    onChange={(e) => setRerunModel(e.target.value)}
+                  />
+                  <datalist id={`rerun-models-${rerunReviewer}`}>
+                    {(rerunInfo?.models ?? []).map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.label}
+                      </option>
+                    ))}
+                  </datalist>
+                </>
+              )}
+              <button className="btn" type="button" onClick={() => void rerun()}>
+                Re-run
+              </button>
+            </span>
           )}
           <a className="btn" href={api.reportUrl(review.id)} download={`review-${review.id}.md`}>
             Download
@@ -273,7 +329,7 @@ export default function ReviewDetail({ id }: { id: number }) {
             </dd>
             <dt>Reviewer</dt>
             <dd>
-              {review.reviewer ? (reviewerLabels[review.reviewer] ?? review.reviewer) : '—'}
+              {review.reviewer ? reviewerLabel(review.reviewer) : '—'}
             </dd>
             <dt>Model</dt>
             <dd className="mono">{review.model ?? '—'}</dd>

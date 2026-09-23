@@ -10,7 +10,7 @@ import { codexReviewer, parseCodexModelsCache } from './reviewers/codex.js';
 import { parseCodexStreamLine } from './reviewers/codexStream.js';
 import { cursorReviewer, parseCursorModels } from './reviewers/cursor.js';
 import { grokReviewer, GROK_DISALLOWED_TOOLS, parseGrokModels } from './reviewers/grok.js';
-import { getReviewer, REVIEWER_NAMES } from './reviewers/index.js';
+import { getReviewer, resolveRerunChoice, REVIEWER_NAMES } from './reviewers/index.js';
 import type { OnLog } from './types.js';
 
 const SRC_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -252,4 +252,35 @@ test('config and routes derive their reviewer enum from REVIEWER_NAMES', () => {
   const routes = readFileSync(path.join(SRC_DIR, 'routes', 'reviews.ts'), 'utf8');
   assert.match(config, /DEFAULT_REVIEWER: z\.enum\(REVIEWER_NAMES\)/);
   assert.match(routes, /reviewer: z\.enum\(REVIEWER_NAMES\)/);
+});
+
+// --- re-run choice -------------------------------------------------------
+
+test('re-run with no override keeps the previous reviewer and model', () => {
+  const choice = resolveRerunChoice({ reviewer: 'claude', model: 'haiku' });
+  assert.equal(choice.reviewer.name, 'claude');
+  assert.equal(choice.model, 'haiku');
+});
+
+test('re-run on another reviewer drops the previous model for its default', () => {
+  const choice = resolveRerunChoice({ reviewer: 'claude', model: 'opus' }, { reviewer: 'codex' });
+  assert.equal(choice.reviewer.name, 'codex');
+  assert.equal(choice.model, codexReviewer.defaultModel);
+});
+
+test('re-run with an explicit model uses it, with or without a reviewer switch', () => {
+  assert.equal(resolveRerunChoice({ reviewer: 'claude', model: 'opus' }, { model: 'sonnet' }).model, 'sonnet');
+  const switched = resolveRerunChoice({ reviewer: 'claude', model: 'opus' }, { reviewer: 'grok', model: 'grok-x' });
+  assert.equal(switched.reviewer.name, 'grok');
+  assert.equal(switched.model, 'grok-x');
+});
+
+test('re-run naming the same reviewer keeps the previous model', () => {
+  const choice = resolveRerunChoice({ reviewer: 'cursor', model: 'gpt-5' }, { reviewer: 'cursor' });
+  assert.equal(choice.model, 'gpt-5');
+});
+
+test('re-run of a row without a stored model falls back to the default model', () => {
+  const choice = resolveRerunChoice({ reviewer: 'codex', model: null });
+  assert.equal(choice.model, codexReviewer.defaultModel);
 });
