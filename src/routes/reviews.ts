@@ -45,6 +45,10 @@ const createBody = z.object({
   model: z.string().min(1).max(64).optional(),
   // Requirements pasted by hand, used instead of a ticket.
   requirementsText: z.string().min(1).max(20_000).optional(),
+  // local:<repo>#<branch> only: review the clone's uncommitted changes too.
+  includeWorkingTree: z.boolean().optional(),
+  // local:<repo>#<branch> only: the branch to diff against; absent → the detected parent.
+  baseBranch: z.string().min(1).max(255).optional(),
 });
 
 // Optional overrides for a re-run; an absent or empty body keeps the old run's choice.
@@ -82,6 +86,9 @@ function startRun(
     branch: target.branch,
     base_branch: target.baseBranch,
     pr_number: target.prNumber ?? null,
+    source: target.source ?? 'github',
+    working_tree: target.source === 'local' && target.includeWorkingTree ? 1 : 0,
+    base_reason: target.source === 'local' ? target.baseReason ?? null : null,
     status: 'queued',
     reviewer: reviewer.name,
     model: model ?? reviewer.defaultModel,
@@ -102,12 +109,12 @@ export async function reviewRoutes(app: FastifyInstance): Promise<void> {
   app.post('/api/reviews', async (req, reply) => {
     const parsed = createBody.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Invalid request body' });
-    const { input, targets, reviewer, model, requirementsText } = parsed.data;
+    const { input, targets, reviewer, model, requirementsText, includeWorkingTree, baseBranch } = parsed.data;
 
     let ticket: TicketInfo | null = null;
     let chosen: ResolvedTarget[];
     try {
-      const resolved = await resolveTargets(input, { requirementsText });
+      const resolved = await resolveTargets(input, { requirementsText, includeWorkingTree, baseBranch });
       ticket = resolved.ticket;
       chosen = targets && targets.length > 0
         ? resolved.targets.filter((t) =>
@@ -216,6 +223,11 @@ export async function reviewRoutes(app: FastifyInstance): Promise<void> {
           branch: prev.branch,
           baseBranch: prev.base_branch,
           prNumber: prev.pr_number ?? null,
+          // A local re-run reads the clone again, so new commits are picked up.
+          source: prev.source === 'local' ? 'local' : 'github',
+          includeWorkingTree: prev.source === 'local' && prev.working_tree === 1,
+          // The stored base is kept as-is (it may have been chosen by hand); never re-detected.
+          ...(prev.source === 'local' && prev.base_reason ? { baseReason: prev.base_reason } : {}),
         },
         ticket,
         choice.reviewer.name,

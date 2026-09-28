@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { api } from '../api';
 import { Card, StatusPill, VerdictBadge, fmtTime } from '../components/ui';
 import { Link, navigate } from '../router';
-import type { Health, ResolvedTarget, Review, ReviewerInfo, TicketInfo } from '../types';
+import type { Health, LocalRepo, ResolvedTarget, Review, ReviewerInfo, TicketInfo } from '../types';
 
 const TICKET_RE = /^(?:[a-z]+:)?[a-z][a-z0-9_]*-\d+$/i;
 /** A GitHub issue reference, the one ticket shape that is always available. */
@@ -11,6 +11,8 @@ const ACTIVE = new Set(['queued', 'fetching', 'reviewing']);
 const keyOf = (t: ResolvedTarget): string => `${t.repo}#${t.branch}`;
 
 const REVIEWER_KEY = 'crt.reviewer';
+const MODE_KEY = 'crt.mode';
+type Mode = 'github' | 'local';
 const modelKey = (reviewer: string): string => `crt.model.${reviewer}`;
 
 /** localStorage can be missing or throw (private mode, blocked storage); never let it break the page. */
@@ -45,6 +47,130 @@ export default function Home() {
   const [model, setModel] = useState('');
   const [requirements, setRequirements] = useState('');
   const [manualOpen, setManualOpen] = useState(false);
+  const [mode, setMode] = useState<Mode>(() => (readStored(MODE_KEY) === 'local' ? 'local' : 'github'));
+  const [localRepos, setLocalRepos] = useState<LocalRepo[] | null>(null);
+  const [localError, setLocalError] = useState<string | null>(null);
+  const [localRepo, setLocalRepo] = useState('');
+  const [localBranch, setLocalBranch] = useState('');
+  const [includeWorkingTree, setIncludeWorkingTree] = useState(false);
+  const [localBase, setLocalBase] = useState('');
+  /** Where the Base field's value came from; 'custom' once the user types in it. */
+  const [baseKind, setBaseKind] = useState<'parent' | 'default' | 'custom' | null>(null);
+  const baseTouched = useRef(false);
+
+  const loadLocalRepos = useCallback(async () => {
+    try {
+      const { repos, unavailable } = await api.localRepos();
+      setLocalRepos(repos);
+      setLocalError(
+        repos.length === 0
+          ? unavailable.length
+            ? unavailable.map((u) => `${u.repo}: ${u.reason}`).join(' · ')
+            : 'No local clones configured. Set LOCAL_REPOS_DIR in .env.'
+          : null,
+      );
+      setLocalRepo((prev) => (repos.some((r) => r.repo === prev) ? prev : repos[0]?.repo ?? ''));
+    } catch (err) {
+      setLocalRepos([]);
+      setLocalError((err as Error).message);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (mode === 'local') void loadLocalRepos();
+  }, [mode, loadLocalRepos]);
+
+  const chosenRepo = localRepos?.find((r) => r.repo === localRepo);
+  const branchRepoRef = useRef<string | null>(null);
+  // The branch list is refreshed on every visit; keep the pick while it still exists.
+  useEffect(() => {
+    if (!chosenRepo) return;
+    // A typed name is kept as-is (the server checks it exists); only a switch to
+    // another repo resets the field to that clone's checked-out branch.
+    setLocalBranch((prev) =>
+      prev && chosenRepo.repo === branchRepoRef.current
+        ? prev
+        : chosenRepo.currentBranch ?? chosenRepo.branches[0]?.name ?? '');
+    branchRepoRef.current = chosenRepo.repo;
+  }, [chosenRepo]);
+
+  // A new branch (or repo) hands the Base field back to detection.
+  useEffect(() => {
+    baseTouched.current = false;
+  }, [localRepo, localBranch]);
+
+  const branchKnown = Boolean(chosenRepo?.branches.some((b) => b.name === localBranch.trim()));
+  const defaultBase = chosenRepo?.baseBranch ?? '';
+  // Prefill Base with the detected parent of an existing branch, debounced, unless the
+  // user has edited Base since the branch last changed.
+  useEffect(() => {
+    if (mode !== 'local' || !localRepo) return;
+    const branch = localBranch.trim();
+    if (!branchKnown) {
+      if (!baseTouched.current) {
+        setLocalBase(defaultBase);
+        setBaseKind(defaultBase ? 'default' : null);
+      }
+      return;
+    }
+    let stale = false;
+    const timer = window.setTimeout(() => {
+      api
+        .localParent(localRepo, branch)
+        .then((parent) => {
+          if (stale || baseTouched.current) return;
+          setLocalBase(parent.base);
+          setBaseKind(parent.reason === 'default' ? 'default' : 'parent');
+        })
+        .catch(() => {
+          if (stale || baseTouched.current) return;
+          setLocalBase(defaultBase);
+          setBaseKind(defaultBase ? 'default' : null);
+        });
+    }, 300);
+    return () => {
+      stale = true;
+      window.clearTimeout(timer);
+    };
+  }, [mode, localRepo, localBranch, branchKnown, defaultBase]);
+
+  const baseOptions = chosenRepo
+    ? [
+        ...(defaultBase && !chosenRepo.branches.some((b) => b.name === defaultBase) ? [defaultBase] : []),
+        ...chosenRepo.branches.map((b) => b.name),
+      ].filter((name) => name !== localBranch.trim())
+    : [];
+  const baseLabel = !localBase.trim()
+    ? 'Base · detected on start'
+    : baseKind === 'parent'
+      ? 'Base · detected parent'
+      : baseKind === 'default'
+        ? 'Base · default'
+        : 'Base · custom';
+
+  const canIncludeTree = Boolean(
+    chosenRepo && chosenRepo.dirty && localBranch && localBranch === chosenRepo.currentBranch,
+  );
+  useEffect(() => {
+    if (!canIncludeTree) setIncludeWorkingTree(false);
+  }, [canIncludeTree]);
+
+  const switchMode = (next: Mode): void => {
+    setMode(next);
+    writeStored(MODE_KEY, next);
+    setError(null);
+  };
+
+  const branchLabel = (repo: LocalRepo, name: string): string => {
+    const b = repo.branches.find((x) => x.name === name);
+    const marks: string[] = [];
+    if (name === repo.currentBranch) marks.push(repo.dirty ? 'current, dirty' : 'current');
+    if (b && !b.upstream) marks.push('unpushed');
+    else if (b?.ahead) marks.push(`ahead ${b.ahead}`);
+    else if (b?.unpushed) marks.push('upstream gone');
+    if (b && b.upstream && b.behind) marks.push(`behind ${b.behind}`);
+    return marks.length ? `${name} (${marks.join(', ')})` : name;
+  };
 
   // GitHub Issues need no extra credentials, so they are always available; a
   // key like ABC-123 only means something when another tracker is configured.
@@ -146,7 +272,7 @@ export default function Home() {
   };
 
   const run = async (chosen?: ResolvedTarget[]): Promise<void> => {
-    const value = input.trim();
+    const value = mode === 'local' ? localInput() : input.trim();
     if (!value) return;
     setError(null);
     setBusy(true);
@@ -157,6 +283,8 @@ export default function Home() {
         ...(manualText ? { requirementsText: manualText } : {}),
         reviewer,
         ...(model.trim() ? { model: model.trim() } : {}),
+        ...(mode === 'local' && includeWorkingTree ? { includeWorkingTree: true } : {}),
+        ...(mode === 'local' && localBase.trim() ? { baseBranch: localBase.trim() } : {}),
       });
       if (reviews.length === 1) navigate(`/review/${reviews[0]!.id}`);
       else if (reviews[0]?.ticket_key) navigate(`/ticket/${encodeURIComponent(reviews[0].ticket_key)}`);
@@ -168,8 +296,16 @@ export default function Home() {
     }
   };
 
+  function localInput(): string {
+    return localRepo && localBranch.trim() ? `local:${localRepo}#${localBranch.trim()}` : '';
+  }
+
   const submit = async (e: FormEvent): Promise<void> => {
     e.preventDefault();
+    if (mode === 'local') {
+      await run();
+      return;
+    }
     // A ticket always resolves to its branches first; the review is started from the
     // card, so the top button never silently launches anything.
     if (isTicketInput) await resolve();
@@ -189,6 +325,108 @@ export default function Home() {
 
   return (
     <div className="stack">
+      <div className="mode-switch" role="group" aria-label="Source">
+        {(['github', 'local'] as const).map((m) => (
+          <button
+            key={m}
+            type="button"
+            className={`btn${mode === m ? ' primary' : ' ghost'}`}
+            aria-pressed={mode === m}
+            onClick={() => switchMode(m)}
+          >
+            {m === 'github' ? 'GitHub' : 'Local'}
+          </button>
+        ))}
+      </div>
+
+      {mode === 'local' ? (
+        <form className="reviewer-row" onSubmit={(e) => void submit(e)}>
+          <label className="reviewer-field">
+            <span className="muted">Repository</span>
+            <select
+              className="reviewer-select"
+              value={localRepo}
+              onChange={(e) => setLocalRepo(e.target.value)}
+              disabled={!localRepos?.length}
+            >
+              {(localRepos ?? []).map((r) => (
+                <option key={r.repo} value={r.repo}>
+                  {r.repo}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="reviewer-field reviewer-model">
+            <span className="muted">Branch</span>
+            <input
+              className="reviewer-input mono"
+              list={`local-branches-${localRepo}`}
+              value={localBranch}
+              placeholder="Type or pick a branch"
+              spellCheck={false}
+              autoComplete="off"
+              onChange={(e) => setLocalBranch(e.target.value)}
+              onFocus={(e) => e.currentTarget.select()}
+              disabled={!chosenRepo}
+            />
+            <datalist id={`local-branches-${localRepo}`}>
+              {(chosenRepo?.branches ?? []).map((b) => (
+                <option key={b.name} value={b.name}>
+                  {branchLabel(chosenRepo!, b.name)} — {b.lastCommit.subject}
+                </option>
+              ))}
+            </datalist>
+          </label>
+          <label className="reviewer-field reviewer-model">
+            <span className="muted">{baseLabel}</span>
+            <input
+              className="reviewer-input mono"
+              list={`local-bases-${localRepo}`}
+              value={localBase}
+              placeholder={defaultBase || 'Base branch'}
+              spellCheck={false}
+              autoComplete="off"
+              onChange={(e) => {
+                baseTouched.current = true;
+                setLocalBase(e.target.value);
+                setBaseKind('custom');
+              }}
+              onFocus={(e) => e.currentTarget.select()}
+              disabled={!chosenRepo}
+            />
+            <datalist id={`local-bases-${localRepo}`}>
+              {baseOptions.map((name) => (
+                <option key={name} value={name}>
+                  {name === defaultBase ? `${name} (default)` : branchLabel(chosenRepo!, name)}
+                </option>
+              ))}
+            </datalist>
+          </label>
+          <label
+            className="local-check"
+            aria-disabled={!canIncludeTree}
+            title={
+              canIncludeTree
+                ? 'Review staged, unstaged and untracked changes too'
+                : 'Only for the checked-out branch with uncommitted changes'
+            }
+          >
+            <input
+              type="checkbox"
+              checked={includeWorkingTree}
+              disabled={!canIncludeTree}
+              onChange={(e) => setIncludeWorkingTree(e.target.checked)}
+            />
+            Include uncommitted changes
+          </label>
+          <button className="btn ghost" type="button" onClick={() => void loadLocalRepos()} disabled={busy}>
+            Refresh
+          </button>
+          <button className="btn" type="submit" disabled={busy || !localRepo || !localBranch.trim()}>
+            {busy ? 'Working…' : 'Review'}
+          </button>
+        </form>
+      ) : (
       <form className="launcher" onSubmit={(e) => void submit(e)}>
         <input
           className="launcher-input"
@@ -204,6 +442,8 @@ export default function Home() {
           {busy ? 'Working…' : isTicketInput ? 'Find branches' : 'Review'}
         </button>
       </form>
+      )}
+      {mode === 'local' && localError && <p className="muted manual-hint">{localError}</p>}
 
       <div className="reviewer-row">
         <label className="reviewer-field">
@@ -369,7 +609,15 @@ export default function Home() {
                         <span className="muted">—</span>
                       )}
                     </td>
-                    <td>{r.repo}</td>
+                    <td>
+                      {r.repo}
+                      {r.source === 'local' && (
+                        <>
+                          {' '}
+                          <span className="tag local">local</span>
+                        </>
+                      )}
+                    </td>
                     <td className="mono truncate">{r.branch}</td>
                     <td>{r.reviewer ? reviewerLabel(r.reviewer) : '—'}</td>
                     <td className="mono">#{r.run_index}</td>

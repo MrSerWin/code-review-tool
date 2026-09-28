@@ -12,6 +12,7 @@ const HELP = `code-review-tool — run a read-only code review from the terminal
 
 Usage:
   tsx src/cli.ts <input> [--reviewer <name>] [--model <name>] [--quiet] [--requirements <text>]
+                         [--working-tree] [--base <branch>]
   tsx src/cli.ts --list-models [reviewer]
   tsx src/cli.ts --help
 
@@ -21,6 +22,9 @@ Input can be:
   https://github.com/<org>/<repo>/pull/12          a pull request URL
   https://github.com/<org>/<repo>/tree/<branch>    a branch URL
   my-service#feature/abc-123-example               repo#branch
+  local:my-service#feature/abc-123-example         a branch of the local clone, pushed or not
+  local:my-service                                 the local clone's checked-out branch
+                                                   (needs LOCAL_REPOS_DIR or LOCAL_REPOS)
 
 Options:
   --reviewer <name>
@@ -33,6 +37,11 @@ Options:
                    models each one offers, then exit
   --requirements <text>
                    review against these requirements instead of a ticket
+  --working-tree   local inputs only: also review the clone's uncommitted and
+                   untracked changes (the branch must be the checked-out one)
+  --base <branch>  local inputs only: the branch to diff against; default: the
+                   branch's detected parent (for stacked branches), else the
+                   repository's default branch
   --quiet          only print the final result and report paths
   -h, --help       show this help
 
@@ -54,15 +63,18 @@ interface Args {
   reviewer?: string;
   model?: string;
   requirementsText?: string;
+  baseBranch?: string;
+  workingTree: boolean;
   quiet: boolean;
 }
 
 function parseArgs(argv: string[]): Args | null {
-  const args: Args = { input: '', quiet: false };
+  const args: Args = { input: '', quiet: false, workingTree: false };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]!;
     if (arg === '-h' || arg === '--help') return null;
     if (arg === '--quiet') { args.quiet = true; continue; }
+    if (arg === '--working-tree') { args.workingTree = true; continue; }
     if (arg === '--list-models') {
       // The optional value is a reviewer name, never another option.
       const next = argv[i + 1];
@@ -73,6 +85,13 @@ function parseArgs(argv: string[]): Args | null {
     if (arg === '--reviewer') { args.reviewer = argv[i + 1]; i += 1; continue; }
     if (arg === '--model') { args.model = argv[i + 1]; i += 1; continue; }
     if (arg === '--requirements') { args.requirementsText = argv[i + 1]; i += 1; continue; }
+    if (arg === '--base') {
+      const value = argv[i + 1];
+      if (!value || value.startsWith('-')) throw new Error('--base needs a branch name.');
+      args.baseBranch = value;
+      i += 1;
+      continue;
+    }
     if (arg.startsWith('-')) throw new Error(`Unknown option: ${arg}`);
     if (args.input) throw new Error('Only one input is supported.');
     args.input = arg;
@@ -114,7 +133,11 @@ async function main(): Promise<number> {
 
   let resolved: { ticket: TicketInfo | null; targets: ResolvedTarget[] };
   try {
-    resolved = await resolveTargets(args.input, { requirementsText: args.requirementsText });
+    resolved = await resolveTargets(args.input, {
+      requirementsText: args.requirementsText,
+      includeWorkingTree: args.workingTree,
+      baseBranch: args.baseBranch,
+    });
   } catch (err) {
     console.error(`Could not resolve "${args.input}": ${err instanceof Error ? err.message : String(err)}`);
     return 2;
@@ -129,7 +152,13 @@ async function main(): Promise<number> {
     console.log(`Ticket (${resolved.ticket.provider}): ${label} — ${resolved.ticket.title}`);
   }
   console.log(`Branches to review (${resolved.targets.length}):`);
-  for (const t of resolved.targets) console.log(`  - ${t.repo}#${t.branch} (base ${t.baseBranch})`);
+  for (const t of resolved.targets) {
+    const where = t.source === 'local'
+      ? `, local clone${t.includeWorkingTree ? ' + uncommitted changes' : ''}`
+      : '';
+    console.log(`  - ${t.repo}#${t.branch} (base ${t.baseBranch}${where})`);
+    if (t.source === 'local') console.log(`    Base: ${t.baseBranch} (${describeBaseReason(t)})`);
+  }
   console.log('');
 
   const ids: number[] = [];
@@ -143,6 +172,9 @@ async function main(): Promise<number> {
       branch: target.branch,
       base_branch: target.baseBranch,
       pr_number: target.prNumber,
+      source: target.source ?? 'github',
+      working_tree: target.source === 'local' && target.includeWorkingTree ? 1 : 0,
+      base_reason: target.source === 'local' ? target.baseReason ?? null : null,
       reviewer: reviewer.name,
       model: args.model ?? reviewer.defaultModel,
     });
@@ -172,6 +204,15 @@ async function main(): Promise<number> {
     }
   }
   return bad > 0 || failed ? 1 : 0;
+}
+
+function describeBaseReason(t: ResolvedTarget): string {
+  const commits = t.baseDistance !== undefined
+    ? `, ${t.baseDistance} commit${t.baseDistance === 1 ? '' : 's'}`
+    : '';
+  if (t.baseReason === 'chosen') return 'chosen with --base';
+  if (t.baseReason === 'parent') return `detected parent${commits}`;
+  return `default branch${commits}`;
 }
 
 /** Print every reviewer, whether its CLI is installed, and the models it offers. */

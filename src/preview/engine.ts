@@ -73,6 +73,12 @@ export async function requestPreview(request: CreatePreviewRequest): Promise<Pre
   const recipe = pickRecipe(request.recipe);
   const review = request.reviewId !== undefined ? getReview(request.reviewId) : undefined;
   if (request.reviewId !== undefined && !review) throw new Error(`Review ${request.reviewId} not found`);
+  if (review?.source === 'local') {
+    // A preview fetches its branches from GitHub; an unpushed branch is not there.
+    throw new Error(
+      'Previews are not available for local (unpushed) reviews. Push the branch and preview it from a GitHub review.',
+    );
+  }
 
   const ticketKey = request.ticket?.trim() || review?.ticket_key || null;
   const roles = await resolveRoles(recipe, { review, ticketKey, overrides: request.roles });

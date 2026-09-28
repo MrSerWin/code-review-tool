@@ -35,6 +35,11 @@ export interface Review {
   head_sha: string | null;
   base_sha: string | null;
   pr_number: number | null;
+  /** 'local' when the branch was read from a local clone (possibly unpushed). */
+  source?: 'github' | 'local';
+  working_tree?: number;
+  /** Local reviews: how base_branch was picked. */
+  base_reason?: 'parent' | 'chosen' | 'default' | null;
   run_index: number;
   status: ReviewStatus;
   verdict: Verdict | null;
@@ -263,3 +268,34 @@ export type SseEvent =
   | { type: 'log'; reviewId: number; level?: string; message?: string; ts?: string }
   | { type: 'status'; reviewId: number; status: ReviewStatus }
   | { type: 'done'; reviewId: number; status?: ReviewStatus };
+
+export interface LocalBranch {
+  name: string;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  unpushed: boolean;
+  lastCommit: { sha: string; subject: string; date: string };
+}
+
+export interface LocalRepo {
+  repo: string;
+  path: string;
+  currentBranch: string | null;
+  baseBranch: string | null;
+  dirty: boolean;
+  branches: LocalBranch[];
+}
+
+export interface LocalParent {
+  branch: string;
+  base: string;
+  reason: 'ancestor' | 'fork-point' | 'default';
+  distance: number;
+  defaultBase: string;
+}
+
+export interface LocalReposPayload {
+  repos: LocalRepo[];
+  unavailable: { repo: string; reason: string }[];
+}

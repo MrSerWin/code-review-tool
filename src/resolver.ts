@@ -1,5 +1,6 @@
 import { ALLOWED_REPOS, assertAllowedRepo, config } from './config.js';
 import { ghApi, lsRemoteHeads } from './gitSandbox.js';
+import { parseLocalInput, resolveLocalTarget } from './localRepos.js';
 import { logger } from './logger.js';
 import { parsePrUrls } from './prLinks.js';
 import { activeTrackerNames, getTicket, looksLikeTicket } from './trackers/index.js';
@@ -113,6 +114,10 @@ function manualTicket(text: string): TicketInfo {
 export interface ResolveOptions {
   /** Requirements typed by the user; replaces the ticket lookup entirely. */
   requirementsText?: string;
+  /** Local inputs only: include the clone's uncommitted changes. */
+  includeWorkingTree?: boolean;
+  /** Local inputs only: the base branch; absent → the detected parent. */
+  baseBranch?: string;
 }
 
 export async function resolveTargets(
@@ -124,6 +129,22 @@ export async function resolveTargets(
 
   const manual = options.requirementsText?.trim() ? manualTicket(options.requirementsText) : null;
   const org = config.GITHUB_ORG;
+
+  // local:<repo>[#<branch>] — a branch of a local clone, pushed or not.
+  const local = parseLocalInput(raw);
+  if (local) {
+    const target = await resolveLocalTarget(local, {
+      includeWorkingTree: options.includeWorkingTree,
+      baseBranch: options.baseBranch,
+    });
+    return { ticket: manual ?? (await ticketFromBranchName(target.branch)), targets: [target] };
+  }
+  if (options.includeWorkingTree) {
+    throw new Error('Uncommitted changes can only be included for a local input: local:<repo>#<branch>.');
+  }
+  if (options.baseBranch?.trim()) {
+    throw new Error('A base branch can only be chosen for a local input: local:<repo>#<branch>.');
+  }
 
   // Pasted requirements replace the tracker, so the input only has to name a branch.
   if (!manual && looksLikeTicket(raw)) {

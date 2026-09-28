@@ -9,7 +9,13 @@ export type ReportableReview = Pick<
   ReviewRow,
   | 'id' | 'repo' | 'branch' | 'base_branch' | 'run_index'
   | 'head_sha' | 'base_sha' | 'reviewer' | 'model' | 'ticket_key' | 'ticket_title' | 'ticket_url'
->;
+> & Partial<Pick<ReviewRow, 'source' | 'working_tree' | 'base_reason'>>;
+
+const BASE_REASON_LABEL: Record<string, string> = {
+  parent: 'detected parent',
+  chosen: 'chosen',
+  default: 'default',
+};
 
 const VERDICT_BANNER: Record<string, string> = {
   approve: 'APPROVED — safe to merge',
@@ -25,6 +31,16 @@ const REQ_ICON: Record<string, string> = {
 };
 
 const SEVERITY_ORDER: Severity[] = ['blocker', 'major', 'minor', 'nit'];
+
+function sourceCell(review: ReportableReview, checkout: CheckoutResult): string {
+  const snapshot = checkout.workingTreeSnapshot;
+  const tree = !review.working_tree
+    ? 'working-tree changes not included'
+    : snapshot
+      ? `working-tree changes included (${snapshot.files} file(s), snapshot ${shortSha(snapshot.sha)})`
+      : 'working-tree changes requested, but the tree was clean';
+  return `local clone (unpushed) · ${tree}`;
+}
 
 export function sanitizeSegment(value: string): string {
   return value.replace(/\//g, '__').replace(/[^A-Za-z0-9._-]/g, '-');
@@ -71,10 +87,14 @@ export function renderReport(
   lines.push('| | |', '|---|---|');
   lines.push(`| Ticket | ${ticketCell(review, ticket)} |`);
   lines.push(`| Repository | ${review.repo} |`);
+  if (review.source === 'local') lines.push(`| Source | ${sourceCell(review, checkout)} |`);
   lines.push(
     `| Branch | ${review.branch} (head ${shortSha(checkout.headSha ?? review.head_sha)}, ` +
       `base ${review.base_branch} ${shortSha(checkout.baseSha ?? review.base_sha)}) |`,
   );
+  if (review.base_reason) {
+    lines.push(`| Base | ${review.base_branch} (${BASE_REASON_LABEL[review.base_reason] ?? review.base_reason}) |`);
+  }
   lines.push(
     `| Diff | ${checkout.filesChanged} files, +${checkout.additions} / -${checkout.deletions} |`,
   );

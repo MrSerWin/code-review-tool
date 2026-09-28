@@ -123,7 +123,15 @@ async function processReview(reviewId: number, signal: AbortSignal): Promise<voi
   if (review.status === 'cancelled') return;
 
   updateReview(reviewId, { status: 'fetching', started_at: nowIso(), error: null });
-  log(reviewId, 'info', `Fetching ${review.repo}#${review.branch} in the git sandbox.`);
+  const local = review.source === 'local';
+  log(
+    reviewId,
+    'info',
+    local
+      ? `Fetching ${review.repo}#${review.branch} from the local clone (unpushed)` +
+          `${review.working_tree ? ', with uncommitted changes' : ''} in the git sandbox.`
+      : `Fetching ${review.repo}#${review.branch} in the git sandbox.`,
+  );
   status(reviewId, 'fetching');
 
   const target: ResolvedTarget = {
@@ -131,6 +139,9 @@ async function processReview(reviewId: number, signal: AbortSignal): Promise<voi
     branch: review.branch,
     baseBranch: review.base_branch,
     prNumber: review.pr_number ?? null,
+    source: local ? 'local' : 'github',
+    includeWorkingTree: local && review.working_tree === 1,
+    ...(local && review.base_reason ? { baseReason: review.base_reason } : {}),
   };
 
   await ensureImage();

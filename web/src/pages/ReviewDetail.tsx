@@ -312,6 +312,20 @@ export default function ReviewDetail({ id }: { id: number }) {
             <dt>Branch</dt>
             <dd className="mono">
               {review.branch} <span className="muted">→ {review.base_branch}</span>
+              {review.base_reason && (
+                <span className="muted">
+                  {' '}
+                  ({review.base_reason === 'parent' ? 'detected parent' : review.base_reason})
+                </span>
+              )}
+              {review.source === 'local' && (
+                <>
+                  {' '}
+                  <span className="tag local" title="Read from the local clone; may not be pushed yet">
+                    local{review.working_tree ? ' + uncommitted' : ''}
+                  </span>
+                </>
+              )}
             </dd>
             <dt>Commits</dt>
             <dd className="mono">
@@ -357,7 +371,10 @@ export default function ReviewDetail({ id }: { id: number }) {
         </Card>
       </div>
 
-      <PreviewPanel reviewId={review.id} repo={review.repo} branch={review.branch} />
+      {/* Previews fetch from GitHub, where an unpushed branch does not exist. */}
+      {review.source !== 'local' && (
+        <PreviewPanel reviewId={review.id} repo={review.repo} branch={review.branch} />
+      )}
 
       {comparison && finished && (
         <Card title={`Changes since run #${comparison.previousRunIndex}`}>

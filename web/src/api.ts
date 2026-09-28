@@ -1,6 +1,8 @@
 import type {
   DumpModeRequest,
   Health,
+  LocalParent,
+  LocalReposPayload,
   Preview,
   PreviewDetailPayload,
   RecipesPayload,
@@ -33,6 +35,11 @@ export const api = {
   health: () => req<Health>('/api/health'),
   reviewers: () => req<ReviewersPayload>('/api/reviewers'),
   repos: () => req<{ repos: string[] }>('/api/repos'),
+  localRepos: () => req<LocalReposPayload>('/api/local-repos'),
+  localParent: (repo: string, branch: string) =>
+    req<LocalParent>(
+      `/api/local-repos/${encodeURIComponent(repo)}/parent?branch=${encodeURIComponent(branch)}`,
+    ),
   ticket: (key: string) =>
     req<{ ticket: TicketInfo; targets: ResolvedTarget[] }>(`/api/tickets/${encodeURIComponent(key)}`),
   createReviews: (body: {
@@ -41,6 +48,8 @@ export const api = {
     reviewer?: string;
     model?: string;
     requirementsText?: string;
+    includeWorkingTree?: boolean;
+    baseBranch?: string;
   }) =>
     req<{ reviews: Review[] }>('/api/reviews', { method: 'POST', body: JSON.stringify(body) }),
   listReviews: (params: Record<string, string | number | undefined> = {}) => {

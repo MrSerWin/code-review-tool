@@ -1,7 +1,7 @@
 # code-review-tool
 
 A local, read-only code-review tool. Give it a ticket key, a GitHub pull request
-URL, or `repo#branch`. It resolves the matching branches, fetches them into an
+URL, `repo#branch`, or `local:repo#branch` for a branch that is not pushed yet. It resolves the matching branches, fetches them into an
 isolated Docker sandbox, runs a Claude Code review against the ticket
 requirements, stores the run in SQLite, and writes a Markdown report.
 
@@ -20,6 +20,8 @@ you.
    links and any branch whose name contains the ticket key are collected.
 2. **Fetch.** Each branch is cloned inside the Docker sandbox, together with its
    base branch. The checkout's remote and credentials are then stripped.
+   A `local:` target is copied from your clone instead (read-only mount); its
+   base is the branch's detected parent (see below) or the default branch.
 3. **Review.** A reviewer CLI runs against the checkout with edit tools
    disabled. Choose **Claude Code** (`claude`), **Cursor Agent**
    (`cursor-agent`), **OpenAI Codex** (`codex`), or the **Grok CLI** (`grok`),
@@ -78,6 +80,8 @@ npm run setup          # installs both workspaces and builds the sandbox image
 | `REVIEW_CONCURRENCY` | no | `2` | How many reviews run at once. Each review fans out to 5 lens processes plus a synthesis pass, so the process ceiling is this value * 6 |
 | `DOCKER_BIN` | no | `docker` | Path to the Docker CLI |
 | `GIT_IMAGE` | no | `code-review-tool-git:latest` | Sandbox image tag |
+| `LOCAL_REPOS_DIR` | no | — | Directory holding local clones named like the `ALLOWED_REPOS` entries; enables [local reviews](#reviewing-a-local-unpushed-branch) |
+| `LOCAL_REPOS` | no | — | Per-repo clone paths overriding `LOCAL_REPOS_DIR`: `name=/abs/path,other=/abs/path` |
 
 `GITHUB_ORG` and `ALLOWED_REPOS` have no defaults; the server refuses to start
 without them.
@@ -147,6 +151,53 @@ the terminal it is `--requirements`:
 ```bash
 npm run review my-service#feature/example --requirements "Reject expired tokens on refresh."
 ```
+
+### Reviewing a local (unpushed) branch
+
+Review a branch before you push it. Point `LOCAL_REPOS_DIR` at the directory
+holding your clones (each named exactly like its `ALLOWED_REPOS` entry), or name
+single clones in `LOCAL_REPOS`:
+
+```bash
+echo 'LOCAL_REPOS_DIR=/home/me/code' >> .env
+npm run review -- local:my-service#feature/abc-123-example
+npm run review -- local:my-service --working-tree   # checked-out branch + uncommitted changes
+npm run review -- local:my-service#feat/b --base feat/a   # diff against an explicit base
+```
+
+- `local:<repo>#<branch>` reviews a local branch, pushed or not;
+  `local:<repo>` reviews the clone's checked-out branch.
+- The base defaults to the branch's **detected parent**, so a stacked branch
+  (`main` → `feat/a` → `feat/b`) is reviewed for its own changes only. The
+  closest branch whose tip the reviewed branch contains wins (ties go to the
+  non-default branch); if none does, a branch the reviewed one forked from
+  and which has moved on since is used; otherwise the repository's default
+  branch (`origin/HEAD`, else `origin/main`/`master`, else `main`/`master`).
+  Branches already merged into the default branch never count, and a branch
+  the reflog shows was cut *from* the reviewed one is never taken for its
+  parent. `--base <branch>` (UI: the **Base** field) overrides it.
+  `GET /api/local-repos/<repo>/parent?branch=<name>` shows what was detected.
+- A default-branch base is fetched fresh from GitHub inside the sandbox, so the
+  diff is measured against the base as it is now; if GitHub cannot be reached,
+  the clone's own `origin/<base>` is used and the log says so. Any other base
+  may be unpushed, so it is copied from the clone (its local branch, else its
+  `origin/<base>`).
+- A re-run keeps the stored base; it is not detected again.
+- `--working-tree` (UI: **Include uncommitted changes**) adds staged,
+  unstaged, and untracked (non-ignored) files as one synthetic
+  "working tree snapshot" commit on top of the branch, so the reviewer sees
+  them as part of the change. It only works for the checked-out branch.
+  Untracked symlinks and files over 5 MB (50 MB in total) are skipped, with a
+  warning in the log.
+- A re-run reads the clone again, so commits made since are picked up.
+- The report says `Source: local clone (unpushed)`, the base and how it was
+  picked (`detected parent`, `chosen`, or `default`), and whether working-tree
+  changes were included; `head` is the branch tip in the clone.
+- In the UI, switch the launcher to **Local**: pick a repository and a branch
+  (the current one first, unpushed and ahead/behind marked). The **Base**
+  field is prefilled with the detected parent and can be changed.
+  `GET /api/local-repos` returns the same data.
+- Previews are not available for local reviews: a preview fetches from GitHub.
 
 ## Usage
 
@@ -242,6 +293,18 @@ The whole `data/` directory is gitignored and local only.
   get a scrubbed environment with `GH_TOKEN`, `GITHUB_TOKEN`, `REVIEW_GH_TOKEN`,
   and every tracker token removed. After each run the checkout is verified to be
   unchanged; a modified checkout fails the review.
+- **A local clone is only ever read.** For `local:` reviews the host runs only
+  read-only git commands in your clone (`rev-parse`, `symbolic-ref`,
+  `for-each-ref`, `merge-base`, `rev-list`, `log --walk-reflogs`, `status`,
+  `diff`, `ls-files`), via `execFile` with
+  `GIT_OPTIONAL_LOCKS=0` so not even the index is refreshed. The review
+  checkout is made inside the Docker sandbox, where the clone is bind-mounted
+  **read-only** at `/src` and copied with `git clone --no-local` (a real object
+  copy: no hardlinks, no alternates). The base branch is fetched (from GitHub,
+  or from the read-only mount) into that copy, never into your clone; the copy then loses its remotes like
+  any other checkout. Nothing is fetched, checked out, committed, or configured
+  in your clone. Only `<LOCAL_REPOS_DIR>/<allowed name>` (or an explicit
+  `LOCAL_REPOS` entry for an allowed name) is ever read.
 - **The allowlist bounds what can be fetched at all.** Only
   `https://github.com/$GITHUB_ORG/<repo>` for a repo in `ALLOWED_REPOS` is
   accepted, both in the Node process and again in the container entrypoint,

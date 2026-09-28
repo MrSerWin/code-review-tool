@@ -128,6 +128,9 @@ export function migrate(): void {
   const run = db.transaction(() => {
     for (const sql of MIGRATIONS) db.prepare(sql).run();
     ensureColumn('reviews', 'reviewer', `ALTER TABLE reviews ADD COLUMN reviewer TEXT`);
+    ensureColumn('reviews', 'source', `ALTER TABLE reviews ADD COLUMN source TEXT NOT NULL DEFAULT 'github'`);
+    ensureColumn('reviews', 'working_tree', `ALTER TABLE reviews ADD COLUMN working_tree INTEGER NOT NULL DEFAULT 0`);
+    ensureColumn('reviews', 'base_reason', `ALTER TABLE reviews ADD COLUMN base_reason TEXT`);
   });
   run();
 }
@@ -144,6 +147,7 @@ const REVIEW_COLUMNS = [
   'head_sha', 'base_sha', 'pr_number', 'run_index', 'status', 'verdict', 'can_merge', 'summary',
   'requirements_met', 'requirements_total', 'blocking_count', 'report_path', 'reviewer', 'model', 'error',
   'files_changed', 'additions', 'deletions', 'created_at', 'started_at', 'finished_at',
+  'source', 'working_tree', 'base_reason',
 ] as const satisfies readonly (keyof ReviewRow)[];
 
 type ReviewColumn = (typeof REVIEW_COLUMNS)[number];
@@ -169,6 +173,7 @@ export function createReview(input: CreateReviewInput): ReviewRow {
     files_changed: null, additions: null, deletions: null,
     created_at: input.created_at ?? new Date().toISOString(),
     started_at: null, finished_at: null,
+    source: 'github', working_tree: 0, base_reason: null,
   };
   for (const column of REVIEW_COLUMNS) {
     const value = (input as Record<string, unknown>)[column];

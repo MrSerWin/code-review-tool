@@ -16,14 +16,30 @@ export interface TicketInfo {
   attachmentUrls: string[];
 }
 
+/** Where the reviewed branch comes from: GitHub, or a local clone (unpushed work). */
+export type ReviewSource = 'github' | 'local';
+
+/** How the base of a local review was picked: the detected parent, picked by the user, or the default branch. */
+export type BaseReason = 'parent' | 'chosen' | 'default';
+
 export interface ResolvedTarget {
   repo: string; branch: string; baseBranch: string; prNumber: number | null;
+  /** Absent means 'github'. */
+  source?: ReviewSource;
+  /** Local targets only: apply the clone's uncommitted changes on top of the branch. */
+  includeWorkingTree?: boolean;
+  /** Local targets: how `baseBranch` was picked. */
+  baseReason?: BaseReason;
+  /** Local targets with a detected base: commits of the branch the base lacks. */
+  baseDistance?: number;
 }
 
 export interface CheckoutResult {
   dir: string; headSha: string; baseSha: string;
   filesChanged: number; additions: number; deletions: number;
   changedFiles: string[];
+  /** Local targets: a synthetic commit holding the uncommitted changes, when one was added. */
+  workingTreeSnapshot?: { sha: string; files: number } | null;
 }
 
 /**
@@ -82,6 +98,11 @@ export interface ReviewRow {
   head_sha: string | null;
   base_sha: string | null;
   pr_number: number | null;
+  source: ReviewSource;
+  /** 1 when the clone's uncommitted changes were requested (local reviews only). */
+  working_tree: number;
+  /** Local reviews: how base_branch was picked; null for GitHub reviews and older rows. */
+  base_reason: BaseReason | null;
   run_index: number;
   status: ReviewStatus;
   verdict: Verdict | null;

@@ -87,6 +87,11 @@ const schema = z.object({
   REVIEW_CONCURRENCY: z.coerce.number().int().positive().default(2),
   DOCKER_BIN: z.string().min(1).default('docker'),
   GIT_IMAGE: z.string().min(1).default('code-review-tool-git:latest'),
+  // --- local (unpushed) reviews; off unless a local clone is configured ---
+  // A directory whose children are clones named exactly like ALLOWED_REPOS.
+  LOCAL_REPOS_DIR: optionalSecret,
+  // Per-repo overrides: "name=/abs/path,other=/abs/path".
+  LOCAL_REPOS: optionalSecret,
   // --- preview environments; off unless PREVIEW_ENABLED is set ---
   PREVIEW_ENABLED: envFlag,
   PREVIEW_RECIPES_DIR: z.string().min(1).default(path.join(projectRoot, 'recipes')),
