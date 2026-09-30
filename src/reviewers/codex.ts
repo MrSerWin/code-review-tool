@@ -62,12 +62,17 @@ export const codexReviewer: ReviewerDefinition = {
     // `-s read-only` is what makes the run read-only: the sandbox refuses every
     // write and every network call. `--ephemeral` keeps the run out of the
     // CLI's session history, `--skip-git-repo-check` allows a bare checkout.
+    // `--ignore-user-config` skips `$CODEX_HOME/config.toml`, and with it every
+    // `[mcp_servers]` entry (this tool's own code-review server included) and
+    // plugin; authentication still comes from CODEX_HOME. The user's default
+    // model and reasoning effort are skipped too: `-m` names the model.
     return [
       'exec',
       '--json',
       '-s', 'read-only',
       '--ephemeral',
       '--skip-git-repo-check',
+      '--ignore-user-config',
       '-C', dir,
       '-m', model,
       prompt,

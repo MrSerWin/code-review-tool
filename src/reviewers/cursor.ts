@@ -38,6 +38,10 @@ export const cursorReviewer: ReviewerDefinition = {
     return buildBaseChildEnv(extra);
   },
   buildArgs(prompt: string, model: string, dir: string): string[] {
+    // No `--approve-mcps`: in --print mode an MCP server only loads once it is
+    // approved for the workspace, and every review runs in a fresh checkout
+    // directory nobody has approved anything for. So no MCP server (this tool's
+    // own code-review server included) is available to the run.
     return [
       '--print',
       '--trust',

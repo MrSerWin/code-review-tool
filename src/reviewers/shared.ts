@@ -17,6 +17,15 @@ export const PASSTHROUGH_ENV = [
   'USER', 'LOGNAME', 'TMPDIR', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME',
 ] as const;
 
+/**
+ * Marks a process as a reviewer spawned by this tool. The code-review MCP server
+ * (src/mcp.ts) refuses to start, re-run, or cancel reviews when it sees it, so a
+ * review can never drive the tool that runs it. Not every CLI forwards its
+ * environment to the MCP servers it starts, which is why each reviewer's argv
+ * also keeps user MCP servers out of the run.
+ */
+export const REVIEWER_MARKER_ENV = 'CODE_REVIEW_TOOL_REVIEWER';
+
 export function buildBaseChildEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...extra };
   for (const key of PASSTHROUGH_ENV) {
@@ -24,6 +33,7 @@ export function buildBaseChildEnv(extra: Record<string, string> = {}): NodeJS.Pr
     if (value !== undefined) env[key] = value;
   }
   for (const key of FORBIDDEN_ENV) delete env[key];
+  env[REVIEWER_MARKER_ENV] = '1';
   return env;
 }
 

@@ -27,11 +27,32 @@ export const GROK_DISALLOWED_TOOLS = [
   'scheduler_list',
   'workflow',
   'ask_user_question',
+  // MCP tools are only reachable through these two dispatchers. Grok has no
+  // flag to skip MCP servers for one run, and it loads the ones configured for
+  // Claude Code and Cursor too (this tool's own code-review server included),
+  // so the dispatchers go: no review can call an MCP tool.
+  'search_tool',
+  'use_tool',
 ] as const;
+
+/** Permission deny rules: every MCP tool, whatever server it comes from. */
+export const GROK_DENY_RULES = ['mcp__*'] as const;
+
+/**
+ * Stop Grok from importing the MCP servers configured for Claude Code, Cursor,
+ * and the organization. `grok inspect` honours these; headless runs of Grok
+ * 1.0.13 were seen to connect the Claude-sourced servers anyway, which is why
+ * the dispatcher tools and the deny rule above are what actually guard a run.
+ */
+export const GROK_MCP_OFF_ENV: Record<string, string> = {
+  GROK_CLAUDE_MCPS_ENABLED: 'false',
+  GROK_CURSOR_MCPS_ENABLED: 'false',
+  GROK_MANAGED_MCPS_ENABLED: 'false',
+};
 
 /** Used when `grok models` cannot be reached. */
 export const GROK_FALLBACK_MODELS: ModelInfo[] = [
-  { id: 'grok-4.6', label: 'grok-4.6 (default)' },
+  { id: 'grok-4.7', label: 'grok-4.7 (default)' },
   { id: 'grok-4.5', label: 'grok-4.5' },
 ];
 
@@ -56,10 +77,12 @@ export const grokReviewer: ReviewerDefinition = {
   label: 'Grok CLI',
   defaultModel: config.grokReviewModel,
   bin: config.grokBin,
-  buildChildEnv: () => buildBaseChildEnv(),
+  buildChildEnv: () => buildBaseChildEnv(GROK_MCP_OFF_ENV),
   buildArgs(prompt: string, model: string, dir: string): string[] {
     // `--permission-mode plan` plus the disallowed-tools list is what keeps the
     // run read-only; web search is off so the review only sees the checkout.
+    // The MCP dispatchers are disallowed and every MCP tool is denied, so no
+    // MCP server can be used from a review.
     return [
       '-p', prompt,
       '--output-format', 'streaming-messages-json',
@@ -69,6 +92,7 @@ export const grokReviewer: ReviewerDefinition = {
       '--no-subagents',
       '--model', model,
       '--disallowed-tools', GROK_DISALLOWED_TOOLS.join(','),
+      ...GROK_DENY_RULES.flatMap((rule) => ['--deny', rule]),
     ];
   },
   parseStreamLine: parseAnthropicStreamLine,

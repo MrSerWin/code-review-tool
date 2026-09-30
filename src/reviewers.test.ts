@@ -11,6 +11,7 @@ import { parseCodexStreamLine } from './reviewers/codexStream.js';
 import { cursorReviewer, parseCursorModels } from './reviewers/cursor.js';
 import { grokReviewer, GROK_DISALLOWED_TOOLS, parseGrokModels } from './reviewers/grok.js';
 import { getReviewer, resolveRerunChoice, REVIEWER_NAMES } from './reviewers/index.js';
+import { REVIEWER_MARKER_ENV } from './reviewers/shared.js';
 import type { OnLog } from './types.js';
 
 const SRC_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -32,6 +33,13 @@ test('claude reviewer keeps read-only tool restrictions', () => {
   assert.equal(args[args.indexOf('--model') + 1], 'opus');
 });
 
+test('claude reviewer loads no MCP server', () => {
+  const args = claudeReviewer.buildArgs('review this', 'opus', '/tmp/checkout');
+  assert.ok(args.includes('--strict-mcp-config'));
+  // --strict-mcp-config only keeps servers named by --mcp-config, so none may be named.
+  assert.ok(!args.includes('--mcp-config'));
+});
+
 test('cursor reviewer runs in plan mode with sandbox', () => {
   const args = cursorReviewer.buildArgs('review this', 'auto', '/tmp/checkout');
   assert.ok(args.includes('--print'));
@@ -41,6 +49,8 @@ test('cursor reviewer runs in plan mode with sandbox', () => {
   assert.ok(args.includes('enabled'));
   assert.equal(args[args.indexOf('--workspace') + 1], '/tmp/checkout');
   assert.equal(args.at(-1), 'review this');
+  // MCP servers load in --print mode only when approved; the run never approves any.
+  assert.ok(!args.includes('--approve-mcps'));
 });
 
 test('codex reviewer runs read-only, with the prompt last', () => {
@@ -54,8 +64,15 @@ test('codex reviewer runs read-only, with the prompt last', () => {
   assert.equal(args.at(-1), 'review this');
 });
 
+test('codex reviewer skips the user config and with it every MCP server', () => {
+  const args = codexReviewer.buildArgs('review this', 'gpt-5.5', '/tmp/checkout');
+  assert.ok(args.includes('--ignore-user-config'));
+  // An option after the prompt would be read as part of it.
+  assert.ok(args.indexOf('--ignore-user-config') < args.length - 1);
+});
+
 test('grok reviewer runs in plan mode with write tools disallowed', () => {
-  const args = grokReviewer.buildArgs('review this', 'grok-4.6', '/tmp/checkout');
+  const args = grokReviewer.buildArgs('review this', 'grok-4.7', '/tmp/checkout');
   assert.equal(args[args.indexOf('-p') + 1], 'review this');
   assert.equal(args[args.indexOf('--output-format') + 1], 'streaming-messages-json');
   assert.equal(args[args.indexOf('--permission-mode') + 1], 'plan');
@@ -69,11 +86,28 @@ test('grok reviewer runs in plan mode with write tools disallowed', () => {
   assert.deepEqual(disallowed, [...GROK_DISALLOWED_TOOLS]);
 });
 
+test('grok reviewer cannot reach any MCP tool', () => {
+  const args = grokReviewer.buildArgs('review this', 'grok-4.7', '/tmp/checkout');
+  const disallowed = (args[args.indexOf('--disallowed-tools') + 1] ?? '').split(',');
+  assert.ok(disallowed.includes('search_tool'), 'the MCP discovery tool must be disallowed');
+  assert.ok(disallowed.includes('use_tool'), 'the MCP call dispatcher must be disallowed');
+  assert.equal(args[args.indexOf('--deny') + 1], 'mcp__*');
+  const env = grokReviewer.buildChildEnv();
+  assert.equal(env.GROK_CLAUDE_MCPS_ENABLED, 'false');
+  assert.equal(env.GROK_CURSOR_MCPS_ENABLED, 'false');
+});
+
+test('every reviewer process is marked as a reviewer for the MCP guard', () => {
+  for (const name of REVIEWER_NAMES) {
+    assert.equal(getReviewer(name).buildChildEnv()[REVIEWER_MARKER_ENV], '1', `${name} must carry the marker`);
+  }
+});
+
 // --- the Anthropic-style stream (claude, cursor, grok) -------------------
 
 test('anthropic parser logs the init event, text, and tool calls', () => {
   const { log, lines } = recorder();
-  parseAnthropicStreamLine(JSON.stringify({ type: 'system', subtype: 'init', model: 'grok-4.6' }), log);
+  parseAnthropicStreamLine(JSON.stringify({ type: 'system', subtype: 'init', model: 'grok-4.7' }), log);
   parseAnthropicStreamLine(JSON.stringify({
     type: 'assistant',
     message: {
@@ -84,7 +118,7 @@ test('anthropic parser logs the init event, text, and tool calls', () => {
       ],
     },
   }), log);
-  assert.ok(lines[0]?.includes('model grok-4.6'));
+  assert.ok(lines[0]?.includes('model grok-4.7'));
   assert.ok(lines.some((l) => l.includes('looking at the diff')));
   assert.ok(lines.some((l) => l === 'info: tool: read_file add.js'));
   // Thinking is never logged.
@@ -175,16 +209,16 @@ test('cursor model list parser reads "id - Label" lines only', () => {
 
 const GROK_MODELS_TEXT = `You are logged in with grok.com.
 
-Default model: grok-4.6
+Default model: grok-4.7
 
 Available models:
-  * grok-4.6 (default)
+  * grok-4.7 (default)
   - grok-4.5`;
 
 test('grok model list parser marks the default model', () => {
   const models = parseGrokModels(GROK_MODELS_TEXT);
   assert.deepEqual(models, [
-    { id: 'grok-4.6', label: 'grok-4.6 (default)' },
+    { id: 'grok-4.7', label: 'grok-4.7 (default)' },
     { id: 'grok-4.5', label: 'grok-4.5' },
   ]);
 });

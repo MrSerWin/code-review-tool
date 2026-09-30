@@ -80,7 +80,7 @@ const schema = z.object({
   CODEX_BIN: z.string().min(1).default('codex'),
   CODEX_REVIEW_MODEL: z.string().min(1).default('gpt-5.5'),
   GROK_BIN: z.string().min(1).default('grok'),
-  GROK_REVIEW_MODEL: z.string().min(1).default('grok-4.6'),
+  GROK_REVIEW_MODEL: z.string().min(1).default('grok-4.7'),
   REVIEW_TIMEOUT_MS: z.coerce.number().int().positive().default(1_800_000),
   // How many reviews (branches) run at once. The lens fan-out inside one
   // review is five lenses plus synthesis, so the process ceiling is this * 6.

@@ -75,7 +75,7 @@ npm run setup          # installs both workspaces and builds the sandbox image
 | `CODEX_BIN` | no | `codex` | Path to the OpenAI Codex CLI |
 | `CODEX_REVIEW_MODEL` | no | `gpt-5.5` | Default model when the reviewer is Codex |
 | `GROK_BIN` | no | `grok` | Path to the Grok CLI |
-| `GROK_REVIEW_MODEL` | no | `grok-4.6` | Default model when the reviewer is Grok |
+| `GROK_REVIEW_MODEL` | no | `grok-4.7` | Default model when the reviewer is Grok |
 | `REVIEW_TIMEOUT_MS` | no | `1800000` | Hard timeout for one review process (each lens and the synthesis pass) |
 | `REVIEW_CONCURRENCY` | no | `2` | How many reviews run at once. Each review fans out to 5 lens processes plus a synthesis pass, so the process ceiling is this value * 6 |
 | `DOCKER_BIN` | no | `docker` | Path to the Docker CLI |
@@ -93,13 +93,14 @@ the same five lenses, the same JSON verdict.
 
 | reviewer | CLI | what makes the run read-only |
 |---|---|---|
-| `claude` | `claude` | `--allowed-tools` limited to `Read`/`Grep`/`Glob` and read-only `git` commands; `Edit`, `Write`, `MultiEdit`, `NotebookEdit`, `WebFetch`, `WebSearch`, `Task` explicitly disallowed |
-| `cursor` | `cursor-agent` | `--mode plan --sandbox enabled` |
-| `codex` | `codex exec` | `-s read-only` (the sandbox refuses every write and every network call), plus `--ephemeral` so the run leaves no session behind |
-| `grok` | `grok` | `--permission-mode plan --disable-web-search --no-subagents`, plus `--disallowed-tools` removing every write, scheduler, sub-agent, image, workflow, and ask-the-user tool |
+| `claude` | `claude` | `--allowed-tools` limited to `Read`/`Grep`/`Glob` and read-only `git` commands; `Edit`, `Write`, `MultiEdit`, `NotebookEdit`, `WebFetch`, `WebSearch`, `Task` explicitly disallowed; `--strict-mcp-config` loads no MCP server |
+| `cursor` | `cursor-agent` | `--mode plan --sandbox enabled`; no `--approve-mcps`, so no MCP server loads |
+| `codex` | `codex exec` | `-s read-only` (the sandbox refuses every write and every network call), plus `--ephemeral` so the run leaves no session behind, and `--ignore-user-config` so no MCP server, plugin, or personal default (reasoning effort, notify hook) from `~/.codex/config.toml` applies; login still works |
+| `grok` | `grok` | `--permission-mode plan --disable-web-search --no-subagents`, plus `--disallowed-tools` removing every write, scheduler, sub-agent, image, workflow, ask-the-user, and MCP dispatcher (`search_tool`, `use_tool`) tool, and `--deny 'mcp__*'` |
 
 On top of that, all four get a scrubbed environment and a checkout with no
-remote, and the checkout is verified unchanged after every run.
+remote, the checkout is verified unchanged after every run, and no MCP server is
+reachable from a run (see [Use from other agents](#use-from-other-agents-mcp)).
 
 **Models.** Each reviewer has its own model list and its own default
 (`REVIEW_MODEL`, `CURSOR_REVIEW_MODEL`, `CODEX_REVIEW_MODEL`,
@@ -229,6 +230,83 @@ npm run review https://github.com/my-org/my-service/pull/12
 
 The CLI streams progress, prints the report path, and exits `0` only when every
 review says the branch can be merged.
+
+## Use from other agents (MCP)
+
+`dist/mcp.js` is a stdio [MCP](https://modelcontextprotocol.io) server, so a
+coding agent (Claude Code, OpenAI Codex, Cursor, Grok, or any other MCP client)
+can start reviews and follow them. It is a thin client of the HTTP API: the API
+server must be running (`npm start`, or your service manager), and the MCP
+process itself holds no token and reads no `.env`. It talks to
+`CODE_REVIEW_API_URL`, default `http://127.0.0.1:5178`; when the API is down,
+every tool returns an error saying so.
+
+| tool | what it does |
+|---|---|
+| `list_reviewers` | reviewer CLIs, whether each is installed, default model, model ids |
+| `list_local_repos` | local clones: repo name, path, checked-out branch, dirty state, branches with unpushed / ahead / behind |
+| `detect_base` | the base a local branch would be diffed against (detected parent or default branch) |
+| `start_review` | start a review of a ticket key, PR URL, `repo#branch`, or `local:repo#branch`; a ticket with several branches starts one review per branch (narrow it with `targets`) |
+| `get_review` | status and, once done, verdict, `can_merge`, requirements met/total, severity counts, findings (capped) |
+| `wait_for_review` | poll until the review finishes or `timeoutSec` (default 50) passes; returns `finished`, call again while it is `false` |
+| `get_report` | the Markdown report of a finished review (truncated past `maxChars`) |
+| `list_reviews` | recent reviews, filterable by text, repo, ticket, or status |
+| `cancel_review` | cancel a queued or running review |
+| `rerun_review` | run a review again, optionally with another reviewer or model |
+
+A review takes minutes, so the usual flow is `start_review`, then
+`wait_for_review` in a loop, then `get_review` or `get_report`.
+
+Build first (`npm run build`), then register the server. Use an absolute path to
+`node` if the agent is a GUI app that does not see your shell's `PATH` (nvm).
+
+**Claude Code**
+
+```bash
+claude mcp add --scope user code-review -- node <path-to-repo>/dist/mcp.js
+```
+
+**OpenAI Codex** — `~/.codex/config.toml` (or `codex mcp add code-review -- node <path-to-repo>/dist/mcp.js`,
+then add the timeouts):
+
+```toml
+[mcp_servers.code-review]
+command = "node"
+args = ["<path-to-repo>/dist/mcp.js"]
+startup_timeout_sec = 20
+# wait_for_review blocks for up to its timeoutSec (default 50 s).
+tool_timeout_sec = 120
+```
+
+**Cursor** — `~/.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "code-review": {
+      "command": "node",
+      "args": ["<path-to-repo>/dist/mcp.js"]
+    }
+  }
+}
+```
+
+**Grok CLI**
+
+```bash
+grok mcp add code-review -- node <path-to-repo>/dist/mcp.js
+```
+
+Grok also picks up servers registered for Claude Code and Cursor.
+
+**Reviews cannot use it.** The reviewer CLIs are the same agents, so every
+review run keeps MCP servers out: Claude Code runs with `--strict-mcp-config`
+(and no `--mcp-config`), Codex with `--ignore-user-config`, Cursor Agent without
+`--approve-mcps` in a checkout no server was ever approved for, and Grok with its
+MCP dispatcher tools (`search_tool`, `use_tool`) disallowed and every MCP tool
+denied (`--deny 'mcp__*'`). As a second line of defence each reviewer process
+gets `CODE_REVIEW_TOOL_REVIEWER=1`, and the MCP server refuses `start_review`,
+`rerun_review`, and `cancel_review` when it sees it.
 
 ## Preview environments (optional)
 

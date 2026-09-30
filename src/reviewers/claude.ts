@@ -32,6 +32,10 @@ export const claudeReviewer: ReviewerDefinition = {
       '--disallowed-tools', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit',
       'WebFetch', 'WebSearch', 'Task',
       '--add-dir', dir,
+      // No --mcp-config is passed, so this loads no MCP server at all: not the
+      // user's (including this tool's own code-review server), not a plugin's,
+      // and not a `.mcp.json` shipped in the reviewed repository.
+      '--strict-mcp-config',
     ];
   },
   parseStreamLine: parseAnthropicStreamLine,
