@@ -1,6 +1,6 @@
 import { useEffect, useState, type MouseEvent, type ReactNode } from 'react';
 
-const NAV_EVENT = 'cytreview:navigate';
+const NAV_EVENT = 'crt:navigate';
 
 export function navigate(to: string): void {
   if (to === window.location.pathname + window.location.search) return;
