@@ -8,10 +8,21 @@ import type {
   RecipesPayload,
   Review,
   ReviewDetailPayload,
+  ReviewGroupsPayload,
   ReviewersPayload,
   ResolvedTarget,
   TicketInfo,
 } from './types';
+
+type Params = Record<string, string | number | undefined>;
+
+/** `path?k=v&...`, leaving out absent and empty values. */
+function withQuery(path: string, params: Params): string {
+  const qs = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== '') qs.set(k, String(v));
+  const q = qs.toString();
+  return q ? `${path}?${q}` : path;
+}
 
 async function req<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, {
@@ -52,12 +63,10 @@ export const api = {
     baseBranch?: string;
   }) =>
     req<{ reviews: Review[] }>('/api/reviews', { method: 'POST', body: JSON.stringify(body) }),
-  listReviews: (params: Record<string, string | number | undefined> = {}) => {
-    const qs = new URLSearchParams();
-    for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== '') qs.set(k, String(v));
-    const q = qs.toString();
-    return req<{ reviews: Review[]; total: number }>(`/api/reviews${q ? `?${q}` : ''}`);
-  },
+  listReviews: (params: Params = {}) =>
+    req<{ reviews: Review[]; total: number }>(withQuery('/api/reviews', params)),
+  /** The history grouped by ticket: `q`, `status` (active | failed | done), `limit`, `offset`. */
+  reviewGroups: (params: Params = {}) => req<ReviewGroupsPayload>(withQuery('/api/review-groups', params)),
   review: (id: number) => req<ReviewDetailPayload>(`/api/reviews/${id}`),
   report: async (id: number) => {
     const res = await fetch(`/api/reviews/${id}/report`);
@@ -75,12 +84,8 @@ export const api = {
   reportUrl: (id: number) => `/api/reviews/${id}/report`,
 
   recipes: () => req<RecipesPayload>('/api/recipes'),
-  listPreviews: (params: Record<string, string | number | undefined> = {}) => {
-    const qs = new URLSearchParams();
-    for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== '') qs.set(k, String(v));
-    const q = qs.toString();
-    return req<{ previews: Preview[]; total: number }>(`/api/previews${q ? `?${q}` : ''}`);
-  },
+  listPreviews: (params: Params = {}) =>
+    req<{ previews: Preview[]; total: number }>(withQuery('/api/previews', params)),
   preview: (id: number) => req<PreviewDetailPayload>(`/api/previews/${id}`),
   createPreview: (body: {
     reviewId?: number;

@@ -6,13 +6,26 @@ import type { Review } from '../types';
 
 const ACTIVE = new Set(['queued', 'fetching', 'reviewing']);
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** `# ABC-123: Add export` -> `Add export`, as the history shows it. */
+function cleanTitle(title: string, key: string): string {
+  const text = title.trim().replace(/^#+\s*/, '');
+  const leadingKey = new RegExp(`^\\[?${escapeRegExp(key)}\\]?(?![A-Za-z0-9])\\s*[:\\-–—]?\\s*`, 'i');
+  return text.replace(leadingKey, '').trim();
+}
+
 export default function TicketView({ ticketKey }: { ticketKey: string }) {
   const [reviews, setReviews] = useState<Review[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const { reviews: rows } = await api.listReviews({ ticket: ticketKey, limit: 200 });
+      // By group, not ticket_key: runs with pasted requirements whose branch name
+      // carries the key belong here too, and so does a plain repo#branch group.
+      const { reviews: rows } = await api.listReviews({ group: ticketKey, limit: 200 });
       setReviews(rows);
     } catch (err) {
       setError((err as Error).message);
@@ -38,8 +51,10 @@ export default function TicketView({ ticketKey }: { ticketKey: string }) {
     if (list) list.push(r);
     else groups.set(key, [r]);
   }
-  const title = reviews[0]?.ticket_title ?? '';
-  const url = reviews[0]?.ticket_url ?? null;
+  // Rows are newest first: the newest non-empty title and link win.
+  const rawTitle = reviews.find((r) => r.ticket_title?.trim())?.ticket_title ?? '';
+  const title = rawTitle ? cleanTitle(rawTitle, ticketKey) : '';
+  const url = reviews.find((r) => r.ticket_url?.trim())?.ticket_url ?? null;
 
   return (
     <div className="stack">

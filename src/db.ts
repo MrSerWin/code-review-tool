@@ -2,8 +2,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { config } from './config.js';
+import { cleanGroupTitle, groupKeyFor } from './groupKey.js';
 import type {
-  FindingRow, LogLevel, LogRow, ObservationRow, RequirementRow, ReviewOutput, ReviewRow,
+  FindingRow, GroupStatusFilter, LogLevel, LogRow, ObservationRow, RequirementRow, ReviewGroup,
+  ReviewGroupBranch, ReviewOutput, ReviewRow,
 } from './types.js';
 
 fs.mkdirSync(config.DATA_DIR, { recursive: true });
@@ -131,8 +133,36 @@ export function migrate(): void {
     ensureColumn('reviews', 'source', `ALTER TABLE reviews ADD COLUMN source TEXT NOT NULL DEFAULT 'github'`);
     ensureColumn('reviews', 'working_tree', `ALTER TABLE reviews ADD COLUMN working_tree INTEGER NOT NULL DEFAULT 0`);
     ensureColumn('reviews', 'base_reason', `ALTER TABLE reviews ADD COLUMN base_reason TEXT`);
+    ensureColumn('reviews', 'group_key', `ALTER TABLE reviews ADD COLUMN group_key TEXT`);
+    // After ensureColumn: on an older database the column only exists from here on.
+    db.prepare(`CREATE INDEX IF NOT EXISTS idx_reviews_group ON reviews(group_key, created_at)`).run();
+    syncGroupKeys();
   });
   run();
+}
+
+/**
+ * group_key is derived from ticket_key, repo, and branch. Rows written before
+ * the column existed (NULL) get theirs here, and a change to the derivation
+ * rules reaches old rows on the next start. Only rows whose key differs are
+ * written, so a second call changes nothing. Returns how many rows changed.
+ */
+export function syncGroupKeys(): number {
+  const rows = db
+    .prepare(`SELECT id, ticket_key, repo, branch, group_key FROM reviews`)
+    .all() as Pick<ReviewRow, 'id' | 'ticket_key' | 'repo' | 'branch' | 'group_key'>[];
+  const update = db.prepare(`UPDATE reviews SET group_key = ? WHERE id = ?`);
+  let changed = 0;
+  const apply = db.transaction(() => {
+    for (const row of rows) {
+      const key = groupKeyFor(row);
+      if (key === row.group_key) continue;
+      update.run(key, row.id);
+      changed += 1;
+    }
+  });
+  apply();
+  return changed;
 }
 
 function ensureColumn(table: string, column: string, ddl: string): void {
@@ -147,8 +177,11 @@ const REVIEW_COLUMNS = [
   'head_sha', 'base_sha', 'pr_number', 'run_index', 'status', 'verdict', 'can_merge', 'summary',
   'requirements_met', 'requirements_total', 'blocking_count', 'report_path', 'reviewer', 'model', 'error',
   'files_changed', 'additions', 'deletions', 'created_at', 'started_at', 'finished_at',
-  'source', 'working_tree', 'base_reason',
+  'source', 'working_tree', 'base_reason', 'group_key',
 ] as const satisfies readonly (keyof ReviewRow)[];
+
+/** Columns group_key is derived from; changing one of them re-derives it. */
+const GROUP_KEY_SOURCES = new Set<string>(['ticket_key', 'repo', 'branch']);
 
 type ReviewColumn = (typeof REVIEW_COLUMNS)[number];
 
@@ -173,12 +206,18 @@ export function createReview(input: CreateReviewInput): ReviewRow {
     files_changed: null, additions: null, deletions: null,
     created_at: input.created_at ?? new Date().toISOString(),
     started_at: null, finished_at: null,
-    source: 'github', working_tree: 0, base_reason: null,
+    source: 'github', working_tree: 0, base_reason: null, group_key: null,
   };
   for (const column of REVIEW_COLUMNS) {
     const value = (input as Record<string, unknown>)[column];
     if (value !== undefined) row[column] = value;
   }
+  // Always derived, never taken from the input.
+  row.group_key = groupKeyFor({
+    ticket_key: row.ticket_key as string | null,
+    repo: row.repo as string,
+    branch: row.branch as string,
+  });
 
   const info = db
     .prepare(
@@ -198,20 +237,38 @@ export function getReview(id: number): ReviewRow | undefined {
 
 export function updateReview(id: number, patch: Partial<ReviewRow>): void {
   const entries = Object.entries(patch).filter(
-    ([key, value]) => key !== 'id' && value !== undefined && (REVIEW_COLUMNS as readonly string[]).includes(key),
+    ([key, value]) =>
+      key !== 'id' && key !== 'group_key' && value !== undefined &&
+      (REVIEW_COLUMNS as readonly string[]).includes(key),
   );
   if (entries.length === 0) return;
   const assignments = entries.map(([key]) => `${key} = @${key}`).join(', ');
   const params: Record<string, unknown> = { id };
   for (const [key, value] of entries) params[key] = value;
   db.prepare(`UPDATE reviews SET ${assignments} WHERE id = @id`).run(params);
+
+  if (entries.some(([key]) => GROUP_KEY_SOURCES.has(key))) {
+    const row = getReview(id);
+    if (row) db.prepare(`UPDATE reviews SET group_key = ? WHERE id = ?`).run(groupKeyFor(row), id);
+  }
 }
+
+/** A case-insensitive substring pattern for `LIKE @q ESCAPE '\'`, with % and _ taken literally. */
+function likePattern(text: string): string {
+  return `%${text.replace(/[\\%_]/g, '\\$&')}%`;
+}
+
+/** The free-text filter shared by the run list and the group list. */
+const Q_MATCH = `(ticket_key LIKE @q ESCAPE '\\' OR ticket_title LIKE @q ESCAPE '\\'
+  OR repo LIKE @q ESCAPE '\\' OR branch LIKE @q ESCAPE '\\' OR group_key LIKE @q ESCAPE '\\')`;
 
 export interface ListReviewsFilter {
   ticket?: string;
   repo?: string;
   branch?: string;
-  /** Case-insensitive substring match across ticket key, title, repo, and branch. */
+  /** Exact group key: every run the history groups together. */
+  group?: string;
+  /** Case-insensitive substring match across ticket key, title, repo, branch, and group key. */
   q?: string;
   limit?: number;
   offset?: number;
@@ -223,11 +280,10 @@ export function listReviews(filter: ListReviewsFilter = {}): { reviews: ReviewRo
   if (filter.ticket) { where.push('ticket_key = @ticket'); params.ticket = filter.ticket; }
   if (filter.repo) { where.push('repo = @repo'); params.repo = filter.repo; }
   if (filter.branch) { where.push('branch = @branch'); params.branch = filter.branch; }
+  if (filter.group) { where.push('group_key = @group'); params.group = filter.group; }
   if (filter.q) {
-    where.push(
-      `(ticket_key LIKE @q OR ticket_title LIKE @q OR repo LIKE @q OR branch LIKE @q)`,
-    );
-    params.q = `%${filter.q}%`;
+    where.push(Q_MATCH);
+    params.q = likePattern(filter.q);
   }
   const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
@@ -237,6 +293,151 @@ export function listReviews(filter: ListReviewsFilter = {}): { reviews: ReviewRo
     .all({ ...params, limit: filter.limit ?? 50, offset: filter.offset ?? 0 }) as ReviewRow[];
 
   return { reviews, total: total.n };
+}
+
+export interface ListGroupsFilter {
+  /** Keeps groups with at least one run matching, as in `listReviews`. */
+  q?: string;
+  status?: GroupStatusFilter;
+  limit?: number;
+  offset?: number;
+}
+
+/**
+ * What a status filter keeps, judged per group. "Head" = the latest run of a
+ * repo/branch. `active`: some run is queued, fetching, or reviewing. `failed`:
+ * some head failed. `done`: nothing is running or failed, and at least one
+ * head has a verdict to read.
+ */
+const GROUP_STATUS_WHERE: Record<GroupStatusFilter, string> = {
+  active: 'active_count > 0',
+  failed: 'failed_heads > 0',
+  done: 'active_count = 0 AND failed_heads = 0 AND done_heads > 0',
+};
+
+const ACTIVE_SQL = `status IN ('queued', 'fetching', 'reviewing')`;
+
+interface GroupAggregateRow {
+  key: string;
+  last_activity: string;
+  run_count: number;
+  active_count: number;
+  is_fallback: number;
+  title: string | null;
+  ticket_url: string | null;
+}
+
+type BranchHeadRow = ReviewGroupBranch['latest'] & Pick<ReviewRow, 'group_key' | 'repo' | 'branch' | 'source'>;
+
+/**
+ * The review history grouped by `group_key`, most recently active group first,
+ * with the latest run of every repo/branch in each group. Everything is
+ * aggregated in SQL; only the page's groups have their branches and titles read.
+ */
+export function listReviewGroups(filter: ListGroupsFilter = {}): { groups: ReviewGroup[]; total: number } {
+  const params: Record<string, unknown> = {};
+  const scope = ['group_key IS NOT NULL'];
+  if (filter.q) {
+    scope.push(`group_key IN (SELECT group_key FROM reviews WHERE ${Q_MATCH})`);
+    params.q = likePattern(filter.q);
+  }
+  const statusWhere = filter.status ? `WHERE ${GROUP_STATUS_WHERE[filter.status]}` : '';
+
+  const matched = `
+    WITH scoped AS (
+      SELECT id, group_key, repo, branch, status, created_at FROM reviews WHERE ${scope.join(' AND ')}
+    ),
+    heads AS (
+      SELECT group_key, status,
+             ROW_NUMBER() OVER (PARTITION BY group_key, repo, branch ORDER BY created_at DESC, id DESC) AS rn
+      FROM scoped
+    ),
+    head_counts AS (
+      SELECT group_key, SUM(status = 'failed') AS failed_heads, SUM(status = 'done') AS done_heads
+      FROM heads WHERE rn = 1 GROUP BY group_key
+    ),
+    grouped AS (
+      SELECT group_key AS key,
+             MAX(created_at) AS last_activity,
+             MAX(id) AS last_id,
+             COUNT(*) AS run_count,
+             SUM(${ACTIVE_SQL}) AS active_count,
+             -- Only the repo#branch fallback equals a row's own repo#branch.
+             MAX(group_key = repo || '#' || branch) AS is_fallback
+      FROM scoped GROUP BY group_key
+    ),
+    matched AS (
+      SELECT g.*, h.failed_heads, h.done_heads
+      FROM grouped g JOIN head_counts h ON h.group_key = g.key
+      ${statusWhere}
+    )`;
+
+  const total = db.prepare(`${matched} SELECT COUNT(*) AS n FROM matched`).get(params) as { n: number };
+
+  const rows = db
+    .prepare(
+      `${matched}
+       SELECT p.key, p.last_activity, p.run_count, p.active_count, p.is_fallback,
+              (SELECT t.ticket_title FROM reviews t
+                WHERE t.group_key = p.key AND TRIM(COALESCE(t.ticket_title, '')) <> ''
+                ORDER BY t.created_at DESC, t.id DESC LIMIT 1) AS title,
+              (SELECT t.ticket_url FROM reviews t
+                WHERE t.group_key = p.key AND TRIM(COALESCE(t.ticket_url, '')) <> ''
+                ORDER BY t.created_at DESC, t.id DESC LIMIT 1) AS ticket_url
+       FROM (SELECT * FROM matched ORDER BY last_activity DESC, last_id DESC LIMIT @limit OFFSET @offset) p
+       ORDER BY p.last_activity DESC, p.last_id DESC`,
+    )
+    .all({ ...params, limit: filter.limit ?? 20, offset: filter.offset ?? 0 }) as GroupAggregateRow[];
+
+  if (rows.length === 0) return { groups: [], total: total.n };
+
+  const heads = db
+    .prepare(
+      `SELECT group_key, repo, branch, source, id, run_index, status, verdict, can_merge, reviewer, model, created_at
+       FROM (
+         SELECT r.*, ROW_NUMBER() OVER (
+                  PARTITION BY group_key, repo, branch ORDER BY created_at DESC, id DESC) AS rn
+         FROM reviews r WHERE group_key IN (${rows.map(() => '?').join(', ')})
+       )
+       WHERE rn = 1
+       ORDER BY created_at DESC, id DESC`,
+    )
+    .all(...rows.map((r) => r.key)) as BranchHeadRow[];
+
+  const branchesByGroup = new Map<string, ReviewGroupBranch[]>();
+  for (const head of heads) {
+    const list = branchesByGroup.get(head.group_key as string) ?? [];
+    list.push({
+      repo: head.repo,
+      branch: head.branch,
+      source: head.source,
+      latest: {
+        id: head.id,
+        run_index: head.run_index,
+        status: head.status,
+        verdict: head.verdict,
+        can_merge: head.can_merge,
+        reviewer: head.reviewer,
+        model: head.model,
+        created_at: head.created_at,
+      },
+    });
+    branchesByGroup.set(head.group_key as string, list);
+  }
+
+  return {
+    total: total.n,
+    groups: rows.map((row) => ({
+      key: row.key,
+      title: cleanGroupTitle(row.title, row.key),
+      ticketUrl: row.ticket_url?.trim() || null,
+      isTicket: row.is_fallback !== 1,
+      lastActivity: row.last_activity,
+      runCount: row.run_count,
+      activeCount: row.active_count ?? 0,
+      branches: branchesByGroup.get(row.key) ?? [],
+    })),
+  };
 }
 
 export function deleteReview(id: number): void {

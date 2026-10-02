@@ -25,10 +25,12 @@ export function usePath(): string {
 export function Link({
   to,
   className,
+  title,
   children,
 }: {
   to: string;
   className?: string;
+  title?: string;
   children: ReactNode;
 }) {
   const onClick = (e: MouseEvent<HTMLAnchorElement>): void => {
@@ -37,7 +39,7 @@ export function Link({
     navigate(to);
   };
   return (
-    <a href={to} className={className} onClick={onClick}>
+    <a href={to} className={className} title={title} onClick={onClick}>
       {children}
     </a>
   );

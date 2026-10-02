@@ -18,6 +18,7 @@ import {
   getPreviousRun,
   getRequirements,
   getReview,
+  listReviewGroups,
   listReviews,
   updateReview,
 } from '../db.js';
@@ -61,8 +62,17 @@ const listQuery = z.object({
   ticket: z.string().optional(),
   repo: z.string().optional(),
   branch: z.string().optional(),
+  // Exact group key, as returned by /api/review-groups.
+  group: z.string().min(1).max(600).optional(),
   q: z.string().min(1).max(200).optional(),
   limit: z.coerce.number().int().min(1).max(500).optional(),
+  offset: z.coerce.number().int().min(0).optional(),
+});
+
+const groupsQuery = z.object({
+  q: z.string().min(1).max(200).optional(),
+  status: z.enum(['active', 'failed', 'done']).optional(),
+  limit: z.coerce.number().int().min(1).max(100).optional(),
   offset: z.coerce.number().int().min(0).optional(),
 });
 
@@ -147,6 +157,14 @@ export async function reviewRoutes(app: FastifyInstance): Promise<void> {
     return listReviews({ ...rest, limit, offset });
   });
 
+  // The history grouped by ticket (see groupKey.ts), most recently active first.
+  app.get('/api/review-groups', async (req, reply) => {
+    const parsed = groupsQuery.safeParse(req.query);
+    if (!parsed.success) return reply.code(400).send({ error: 'Invalid query' });
+    const { limit = 20, offset = 0, ...rest } = parsed.data;
+    return listReviewGroups({ ...rest, limit, offset });
+  });
+
   app.get('/api/reviews/:id', async (req, reply) => {
     const parsed = idParams.safeParse(req.params);
     if (!parsed.success) return reply.code(400).send({ error: 'Invalid review id' });
@@ -197,15 +215,16 @@ export async function reviewRoutes(app: FastifyInstance): Promise<void> {
     const prev = getReview(parsed.data.id);
     if (!prev) return reply.code(404).send({ error: 'Review not found' });
 
-    const ticket: TicketInfo | null = prev.ticket_key
+    // Pasted requirements are stored without a key; they must survive a re-run too.
+    const ticket: TicketInfo | null = prev.ticket_key || prev.ticket_body
       ? ({
-          provider: 'stored',
-          key: prev.ticket_key,
+          provider: prev.ticket_key ? 'stored' : 'manual',
+          key: prev.ticket_key ?? '',
           title: prev.ticket_title ?? '',
           url: prev.ticket_url ?? '',
           body: prev.ticket_body ?? '',
-          state: '',
-          branchName: prev.branch,
+          state: prev.ticket_key ? '' : 'manual',
+          branchName: prev.ticket_key ? prev.branch : null,
           comments: [],
           attachmentUrls: [],
         } satisfies TicketInfo)

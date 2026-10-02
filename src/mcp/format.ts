@@ -7,7 +7,7 @@
  * pulls in nothing that reads configuration or secrets.
  */
 import type {
-  FindingRow, LogRow, RequirementRow, ReviewRow, ReviewStatus, Severity,
+  FindingRow, LogRow, RequirementRow, ReviewGroup, ReviewRow, ReviewStatus, Severity,
 } from '../types.js';
 
 export const TERMINAL_STATUSES: readonly ReviewStatus[] = ['done', 'failed', 'cancelled'];
@@ -127,6 +127,43 @@ export function reviewListRow(row: ReviewRow, url: string): ReviewRef & {
     blocking_count: row.blocking_count,
     created_at: row.created_at,
     finished_at: row.finished_at,
+  };
+}
+
+export const DEFAULT_GROUP_BRANCHES = 20;
+
+/** A row of `list_review_groups`: the group, its counts, and the latest run of each branch. */
+export function compactGroup(
+  group: ReviewGroup,
+  urlFor: (id: number) => string,
+  maxBranches = DEFAULT_GROUP_BRANCHES,
+) {
+  const branches = group.branches.slice(0, maxBranches);
+  return {
+    key: group.key,
+    is_ticket: group.isTicket,
+    title: truncate(group.title, 160),
+    ticket_url: group.ticketUrl || null,
+    last_activity: group.lastActivity,
+    runs: group.runCount,
+    active: group.activeCount,
+    branches: branches.map((b) => ({
+      repo: b.repo,
+      branch: b.branch,
+      source: b.source ?? 'github',
+      latest: {
+        id: b.latest.id,
+        run: b.latest.run_index,
+        status: b.latest.status,
+        verdict: b.latest.verdict,
+        can_merge: b.latest.can_merge === null || b.latest.can_merge === undefined ? null : b.latest.can_merge === 1,
+        reviewer: b.latest.reviewer,
+        model: b.latest.model,
+        created_at: b.latest.created_at,
+        url: urlFor(b.latest.id),
+      },
+    })),
+    ...(group.branches.length > branches.length ? { branches_omitted: group.branches.length - branches.length } : {}),
   };
 }
 

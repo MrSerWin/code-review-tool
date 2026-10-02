@@ -58,6 +58,46 @@ export interface Review {
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
+  /** What the history groups this run under: ticket key, a key from the branch name, or repo#branch. */
+  group_key?: string | null;
+}
+
+/** The latest run of one branch of a review group. */
+export interface ReviewGroupRun {
+  id: number;
+  run_index: number;
+  status: ReviewStatus;
+  verdict: Verdict | null;
+  can_merge: number | null;
+  reviewer: string | null;
+  model: string | null;
+  created_at: string;
+}
+
+export interface ReviewGroupBranch {
+  repo: string;
+  branch: string;
+  source: 'github' | 'local';
+  latest: ReviewGroupRun;
+}
+
+/** One row of GET /api/review-groups. */
+export interface ReviewGroup {
+  key: string;
+  title: string | null;
+  ticketUrl: string | null;
+  /** False only for the repo#branch fallback, which has no ticket page of its own. */
+  isTicket: boolean;
+  lastActivity: string;
+  runCount: number;
+  activeCount: number;
+  /** One entry per repo/branch, most recently active first. */
+  branches: ReviewGroupBranch[];
+}
+
+export interface ReviewGroupsPayload {
+  groups: ReviewGroup[];
+  total: number;
 }
 
 export interface Finding {

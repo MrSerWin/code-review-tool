@@ -419,7 +419,8 @@ the API under `/api`. Handlers validate input with zod and return errors as
 | GET | `/api/repos` | | `{ repos: string[] }` |
 | GET | `/api/tickets/:key` | | `{ ticket, targets }` — preview before running |
 | POST | `/api/reviews` | `{ input, targets?, model?, requirementsText? }` | `{ reviews }` — one row per target, status `queued` |
-| GET | `/api/reviews` | `?ticket=&repo=&branch=&limit=&offset=` | `{ reviews, total }`, newest first |
+| GET | `/api/reviews` | `?ticket=&repo=&branch=&group=&q=&limit=&offset=` | `{ reviews, total }`, newest first |
+| GET | `/api/review-groups` | `?q=&status=active\|failed\|done&limit=&offset=` | `{ groups, total }`: one group per `group_key` (ticket key, else a ticket-like key from the branch name, else `repo#branch`), most recently active first, each with its title, run and active counts, and the latest run of every repo/branch |
 | GET | `/api/reviews/:id` | | `{ review, requirements, findings, observations, logs }` |
 | GET | `/api/reviews/:id/report` | | `text/markdown` raw report |
 | POST | `/api/reviews/:id/rerun` | | `{ review }` — new row, same repo and branch, `run_index + 1` |
@@ -458,12 +459,17 @@ Vite + React + TypeScript, dev server proxying `/api` to `PORT`. Plain CSS in
   and shows the resolved ticket, a chip naming the tracker that answered, and
   the detected branches with checkboxes, then posts the chosen targets. A
   collapsible **Paste requirements instead** textarea sends `requirementsText`
-  and skips the ticket lookup. Below is the history table of all runs.
+  and skips the ticket lookup. Below is the history: **By ticket** (default,
+  20 groups a page) shows one row per group with a chip per branch carrying the
+  latest run's verdict or status, and expands inline to that group's runs;
+  **All runs** is the flat table, 25 runs a page. The filter and the chosen view
+  are remembered; both refresh every 4 s while something on screen is running.
 - **Review detail** (`/review/:id`) — verdict banner, meta table, requirements
   table, findings grouped by severity, and a live log fed by SSE while the run is
   in progress. Actions: re-run, download report, copy report, delete.
-- **Ticket view** (`/ticket/:key`) — all runs for one ticket across repositories,
-  grouped by repo and branch, newest first.
+- **Ticket view** (`/ticket/:key`) — all runs of one group (`group_key`) across
+  repositories, grouped by repo and branch, newest first. Runs started with pasted
+  requirements appear under the key their branch name carries.
 
 Routing is a small hand-written history-based router; there is no react-router
 dependency.

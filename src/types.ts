@@ -121,6 +121,48 @@ export interface ReviewRow {
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
+  /**
+   * What the history groups this run under: the ticket key, else a ticket-like
+   * key from the branch name, else `repo#branch`. Derived (see groupKey.ts).
+   */
+  group_key: string | null;
+}
+
+/** `active`: a run is queued/fetching/reviewing; `failed`: some branch's latest run failed; `done`: see db.ts. */
+export type GroupStatusFilter = 'active' | 'failed' | 'done';
+
+/** The latest run of one branch of a review group. */
+export interface ReviewGroupRun {
+  id: number;
+  run_index: number;
+  status: ReviewStatus;
+  verdict: Verdict | null;
+  can_merge: number | null;
+  reviewer: string | null;
+  model: string | null;
+  created_at: string;
+}
+
+export interface ReviewGroupBranch {
+  repo: string;
+  branch: string;
+  /** Source of the latest run; local and GitHub runs of one repo/branch share a run sequence. */
+  source: ReviewSource;
+  latest: ReviewGroupRun;
+}
+
+/** One row of `GET /api/review-groups`. */
+export interface ReviewGroup {
+  key: string;
+  title: string | null;
+  ticketUrl: string | null;
+  /** False only for the `repo#branch` fallback. */
+  isTicket: boolean;
+  lastActivity: string;
+  runCount: number;
+  activeCount: number;
+  /** One entry per repo/branch, most recently active first. */
+  branches: ReviewGroupBranch[];
 }
 
 /** Mirrors a row of the `findings` table. */

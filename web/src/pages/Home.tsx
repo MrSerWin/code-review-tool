@@ -1,36 +1,20 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { api } from '../api';
-import { Card, StatusPill, VerdictBadge, fmtTime } from '../components/ui';
-import { Link, navigate } from '../router';
-import type { Health, LocalRepo, ResolvedTarget, Review, ReviewerInfo, TicketInfo } from '../types';
+import History from '../components/History';
+import { Card } from '../components/ui';
+import { navigate } from '../router';
+import { readStored, writeStored } from '../storage';
+import type { Health, LocalRepo, ResolvedTarget, ReviewerInfo, TicketInfo } from '../types';
 
 const TICKET_RE = /^(?:[a-z]+:)?[a-z][a-z0-9_]*-\d+$/i;
 /** A GitHub issue reference, the one ticket shape that is always available. */
 const ISSUE_RE = /^(?:github:)?[\w.-]+\/[\w.-]+#\d+$/i;
-const ACTIVE = new Set(['queued', 'fetching', 'reviewing']);
 const keyOf = (t: ResolvedTarget): string => `${t.repo}#${t.branch}`;
 
 const REVIEWER_KEY = 'crt.reviewer';
 const MODE_KEY = 'crt.mode';
 type Mode = 'github' | 'local';
 const modelKey = (reviewer: string): string => `crt.model.${reviewer}`;
-
-/** localStorage can be missing or throw (private mode, blocked storage); never let it break the page. */
-function readStored(key: string): string | null {
-  try {
-    return window.localStorage.getItem(key);
-  } catch {
-    return null;
-  }
-}
-
-function writeStored(key: string, value: string): void {
-  try {
-    window.localStorage.setItem(key, value);
-  } catch {
-    /* storage unavailable — remembering is a convenience, not a requirement */
-  }
-}
 
 export default function Home() {
   const [input, setInput] = useState('');
@@ -39,8 +23,8 @@ export default function Home() {
   const [ticket, setTicket] = useState<TicketInfo | null>(null);
   const [targets, setTargets] = useState<ResolvedTarget[]>([]);
   const [picked, setPicked] = useState<string[]>([]);
-  const [history, setHistory] = useState<Review[]>([]);
-  const [historyQuery, setHistoryQuery] = useState('');
+  /** Bumped to make the history reload after runs were started without leaving the page. */
+  const [historyToken, setHistoryToken] = useState(0);
   const [trackers, setTrackers] = useState<string[] | null>(null);
   const [reviewers, setReviewers] = useState<ReviewerInfo[]>([]);
   const [reviewer, setReviewer] = useState('claude');
@@ -187,20 +171,6 @@ export default function Home() {
     ? 'ABC-123, PR URL, or repo#branch'
     : 'my-org/my-service#12, PR URL, or repo#branch';
 
-  const loadHistory = useCallback(async () => {
-    try {
-      const q = historyQuery.trim();
-      const { reviews } = await api.listReviews({ limit: 60, ...(q ? { q } : {}) });
-      setHistory(reviews);
-    } catch (err) {
-      setError((err as Error).message);
-    }
-  }, [historyQuery]);
-
-  useEffect(() => {
-    void loadHistory();
-  }, [loadHistory]);
-
   useEffect(() => {
     api
       .health()
@@ -245,14 +215,10 @@ export default function Home() {
   };
 
   const selected = reviewers.find((r) => r.name === reviewer);
-  const reviewerLabel = (name: string): string =>
-    reviewers.find((r) => r.name === name)?.label ?? name;
-
-  useEffect(() => {
-    if (!history.some((r) => ACTIVE.has(r.status))) return;
-    const timer = window.setInterval(() => void loadHistory(), 4000);
-    return () => window.clearInterval(timer);
-  }, [history, loadHistory]);
+  const reviewerLabel = useCallback(
+    (name: string): string => reviewers.find((r) => r.name === name)?.label ?? name,
+    [reviewers],
+  );
 
   const resolve = async (): Promise<void> => {
     const value = input.trim();
@@ -288,7 +254,7 @@ export default function Home() {
       });
       if (reviews.length === 1) navigate(`/review/${reviews[0]!.id}`);
       else if (reviews[0]?.ticket_key) navigate(`/ticket/${encodeURIComponent(reviews[0].ticket_key)}`);
-      else await loadHistory();
+      else setHistoryToken((n) => n + 1);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -568,73 +534,7 @@ export default function Home() {
         </Card>
       )}
 
-      <Card
-        title="History"
-        actions={
-          <input
-            className="history-search mono"
-            placeholder="Filter ticket, repo, branch…"
-            value={historyQuery}
-            spellCheck={false}
-            onChange={(e) => setHistoryQuery(e.target.value)}
-          />
-        }
-      >
-        {history.length === 0 ? (
-          <p className="muted">No reviews yet.</p>
-        ) : (
-          <div className="table-wrap">
-            <table className="grid">
-              <thead>
-                <tr>
-                  <th>Ticket</th>
-                  <th>Repo</th>
-                  <th>Branch</th>
-                  <th>Reviewer</th>
-                  <th>Run</th>
-                  <th>Verdict</th>
-                  <th>Status</th>
-                  <th>Created</th>
-                </tr>
-              </thead>
-              <tbody>
-                {history.map((r) => (
-                  <tr key={r.id} className="row-link" onClick={() => navigate(`/review/${r.id}`)}>
-                    <td onClick={(e) => e.stopPropagation()}>
-                      {r.ticket_key ? (
-                        <Link to={`/ticket/${encodeURIComponent(r.ticket_key)}`} className="mono">
-                          {r.ticket_key}
-                        </Link>
-                      ) : (
-                        <span className="muted">—</span>
-                      )}
-                    </td>
-                    <td>
-                      {r.repo}
-                      {r.source === 'local' && (
-                        <>
-                          {' '}
-                          <span className="tag local">local</span>
-                        </>
-                      )}
-                    </td>
-                    <td className="mono truncate">{r.branch}</td>
-                    <td>{r.reviewer ? reviewerLabel(r.reviewer) : '—'}</td>
-                    <td className="mono">#{r.run_index}</td>
-                    <td>
-                      <VerdictBadge verdict={r.verdict} />
-                    </td>
-                    <td>
-                      <StatusPill status={r.status} />
-                    </td>
-                    <td className="muted nowrap">{fmtTime(r.created_at)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </Card>
+      <History reviewerLabel={reviewerLabel} refreshToken={historyToken} />
     </div>
   );
 }

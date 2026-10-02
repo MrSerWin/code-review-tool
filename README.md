@@ -250,7 +250,8 @@ every tool returns an error saying so.
 | `get_review` | status and, once done, verdict, `can_merge`, requirements met/total, severity counts, findings (capped) |
 | `wait_for_review` | poll until the review finishes or `timeoutSec` (default 50) passes; returns `finished`, call again while it is `false` |
 | `get_report` | the Markdown report of a finished review (truncated past `maxChars`) |
-| `list_reviews` | recent reviews, filterable by text, repo, ticket, or status |
+| `list_reviews` | recent reviews, filterable by text, repo, ticket, group, or status |
+| `list_review_groups` | the history grouped by ticket (a key from the tracker or from the branch name, else `repo#branch`), with the latest run of each branch; filterable by text or status (`active`, `failed`, `done`), paged |
 | `cancel_review` | cancel a queued or running review |
 | `rerun_review` | run a review again, optionally with another reviewer or model |
 

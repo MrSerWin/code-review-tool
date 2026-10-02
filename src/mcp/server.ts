@@ -9,10 +9,10 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 // Names only: this module imports nothing (no config, no secrets).
 import { REVIEWER_NAMES } from '../reviewers/types.js';
-import type { ResolvedTarget, ReviewRow, TicketInfo } from '../types.js';
+import type { ResolvedTarget, ReviewGroup, ReviewRow, TicketInfo } from '../types.js';
 import { ApiClient, ApiError, ApiUnreachableError } from './client.js';
 import {
-  ALL_STATUSES, ACTIVE_STATUSES, compactLocalRepos, compactReviewers, DEFAULT_MAX_BRANCHES,
+  ALL_STATUSES, ACTIVE_STATUSES, compactGroup, compactLocalRepos, compactReviewers, DEFAULT_MAX_BRANCHES,
   DEFAULT_MAX_FINDINGS, DEFAULT_REPORT_MAX, isTerminalStatus, mutationRefusal, parseTargetSelector,
   reviewDetail, reviewListRow, reviewRef, selectTargets, truncateReport,
   type ReviewDetailPayload,
@@ -290,23 +290,29 @@ export function createMcpServer({ api, env = process.env }: CreateServerOptions)
   server.registerTool('list_reviews', {
     title: 'List reviews',
     description:
-      'Recent reviews, newest first, as compact rows (id, status, ticket, repo, branch, base, reviewer, model, ' +
-      'verdict, can_merge, blocking_count, url). Filter by free text q (matches ticket key/title, repo, branch), ' +
-      'repo, ticket, or status ("active" = queued, fetching, or reviewing).',
+      'Recent reviews (single runs), newest first, as compact rows (id, status, ticket, repo, branch, base, ' +
+      'reviewer, model, verdict, can_merge, blocking_count, url). Filter by free text q (matches ticket key/title, ' +
+      'repo, branch, group key), repo, ticket, group, or status ("active" = queued, fetching, or reviewing). ' +
+      'For an overview by ticket use list_review_groups; group=<key> from there lists every run of that group.',
     inputSchema: {
-      q: z.string().min(1).max(200).optional().describe('Free-text filter on ticket key/title, repo, and branch.'),
+      q: z.string().min(1).max(200).optional()
+        .describe('Free-text filter on ticket key/title, repo, branch, and group key.'),
       repo: z.string().min(1).max(200).optional(),
-      ticket: z.string().min(1).max(64).optional().describe('Exact ticket key.'),
+      ticket: z.string().min(1).max(64).optional()
+        .describe('Exact ticket key. Misses runs started with pasted requirements; use group for those.'),
+      group: z.string().min(1).max(600).optional()
+        .describe('Exact group key from list_review_groups: every run of that ticket, including runs with ' +
+          'pasted requirements whose branch name carries the key, or of that repo#branch.'),
       status: z.enum(['active', ...ALL_STATUSES]).optional()
         .describe('One status, or "active" for queued, fetching, and reviewing.'),
       limit: z.number().int().min(1).max(100).optional().describe('Rows to return (default 20).'),
     },
     annotations: { readOnlyHint: true, openWorldHint: false },
-  }, ({ q, repo, ticket, status, limit }) => guarded(async () => {
+  }, ({ q, repo, ticket, group, status, limit }) => guarded(async () => {
     const want = limit ?? 20;
     // The API has no status filter, so a filtered listing scans a wider window.
     const { reviews, total } = await api.listReviews<{ reviews: ReviewRow[]; total: number }>({
-      q, repo, ticket, limit: status ? 500 : want,
+      q, repo, ticket, group, limit: status ? 500 : want,
     });
     const matches = (s: string): boolean =>
       !status || (status === 'active' ? (ACTIVE_STATUSES as readonly string[]).includes(s) : s === status);
@@ -320,6 +326,40 @@ export function createMcpServer({ api, env = process.env }: CreateServerOptions)
         ? { note: `status filter applied to the newest ${reviews.length} of ${total} reviews` }
         : {}),
       reviews: rows.map((r) => reviewListRow(r, api.reviewUrl(r.id))),
+    });
+  }));
+
+  server.registerTool('list_review_groups', {
+    title: 'List review groups',
+    description:
+      'The review history grouped by ticket, most recently active group first. A group is a ticket key (from the ' +
+      'tracker, or found in the branch name when requirements were pasted by hand, e.g. feat/abc-123-x -> ABC-123), ' +
+      'or a single "repo#branch" when there is neither (is_ticket=false). Each group has its title, run count, ' +
+      'number of active runs, and one entry per repo/branch with that branch\'s latest run (id, run, status, ' +
+      'verdict, can_merge, url). Filter by free text q (ticket key/title, repo, branch) or status: "active" (a run ' +
+      'is queued, fetching, or reviewing), "failed" (a branch\'s latest run failed), "done" (nothing running or ' +
+      'failed, at least one verdict). Page with limit/offset. list_reviews with group=<key> lists every run of a group.',
+    inputSchema: {
+      q: z.string().min(1).max(200).optional().describe('Free-text filter on ticket key/title, repo, and branch.'),
+      status: z.enum(['active', 'failed', 'done']).optional()
+        .describe('"active", "failed", or "done", judged per group as described above.'),
+      limit: z.number().int().min(1).max(50).optional().describe('Groups to return (default 10).'),
+      offset: z.number().int().min(0).optional().describe('Groups to skip, for the next page (default 0).'),
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  }, ({ q, status, limit, offset }) => guarded(async () => {
+    const want = limit ?? 10;
+    const skip = offset ?? 0;
+    const { groups, total } = await api.reviewGroups<{ groups: ReviewGroup[]; total: number }>({
+      q, status, limit: want, offset: skip,
+    });
+    const nextOffset = skip + groups.length;
+    return ok({
+      total,
+      offset: skip,
+      shown: groups.length,
+      ...(nextOffset < total ? { next_offset: nextOffset } : {}),
+      groups: groups.map((g) => compactGroup(g, (id) => api.reviewUrl(id))),
     });
   }));
 

@@ -12,10 +12,10 @@ import {
   ApiClient, ApiError, ApiUnreachableError, apiBaseUrl, DEFAULT_API_URL,
 } from './mcp/client.js';
 import {
-  compactFindings, compactLocalRepos, findingLocation, isTerminalStatus, mutationRefusal,
+  compactFindings, compactGroup, compactLocalRepos, findingLocation, isTerminalStatus, mutationRefusal,
   parseTargetSelector, reviewDetail, selectTargets, severityCounts, truncate, truncateReport,
 } from './mcp/format.js';
-import type { FindingRow, ReviewRow } from './types.js';
+import type { FindingRow, ReviewGroup, ReviewRow } from './types.js';
 
 const SRC_DIR = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(SRC_DIR, '..');
@@ -30,7 +30,7 @@ function reviewRow(overrides: Partial<ReviewRow> = {}): ReviewRow {
     verdict: null, can_merge: null, summary: null, requirements_met: null, requirements_total: null,
     blocking_count: null, report_path: null, reviewer: 'claude', model: 'opus', error: null,
     files_changed: null, additions: null, deletions: null, created_at: '2026-01-01T00:00:00.000Z',
-    started_at: null, finished_at: null,
+    started_at: null, finished_at: null, group_key: 'ABC-123',
     ...overrides,
   };
 }
@@ -39,6 +39,30 @@ function finding(i: number, severity: FindingRow['severity'], overrides: Partial
   return {
     id: i, review_id: 1, severity, category: 'correctness', file: `src/f${i}.ts`, line: i, end_line: null,
     title: `Finding ${i}`, problem: `Problem ${i}`, why: null, suggestion: null, snippet: null, ord: i,
+    ...overrides,
+  };
+}
+
+function reviewGroup(overrides: Partial<ReviewGroup> = {}): ReviewGroup {
+  return {
+    key: 'ABC-123', title: 'Add export', ticketUrl: null, isTicket: true,
+    lastActivity: '2026-01-02T00:00:00.000Z', runCount: 3, activeCount: 1,
+    branches: [
+      {
+        repo: 'my-frontend', branch: 'feature/abc-123-ui', source: 'local',
+        latest: {
+          id: 12, run_index: 2, status: 'reviewing', verdict: null, can_merge: null,
+          reviewer: 'claude', model: 'opus', created_at: '2026-01-02T00:00:00.000Z',
+        },
+      },
+      {
+        repo: 'my-service', branch: 'feature/abc-123-api', source: 'github',
+        latest: {
+          id: 10, run_index: 1, status: 'done', verdict: 'approve', can_merge: 1,
+          reviewer: 'claude', model: 'opus', created_at: '2026-01-01T00:00:00.000Z',
+        },
+      },
+    ],
     ...overrides,
   };
 }
@@ -168,6 +192,23 @@ test('targets parse from "repo#branch" and select resolved branches', () => {
   assert.deepEqual(unmatched, [{ repo: 'other', branch: 'z' }]);
 });
 
+test('a review group is compacted with boolean can_merge, run urls, and a branch cap', () => {
+  const out = compactGroup(reviewGroup(), (id) => `http://x/review/${id}`, 1);
+  assert.equal(out.key, 'ABC-123');
+  assert.equal(out.is_ticket, true);
+  assert.equal(out.runs, 3);
+  assert.equal(out.active, 1);
+  assert.equal(out.branches.length, 1);
+  assert.equal(out.branches_omitted, 1);
+  assert.deepEqual(out.branches[0]!.latest, {
+    id: 12, run: 2, status: 'reviewing', verdict: null, can_merge: null, reviewer: 'claude', model: 'opus',
+    created_at: '2026-01-02T00:00:00.000Z', url: 'http://x/review/12',
+  });
+  const all = compactGroup(reviewGroup(), (id) => `http://x/review/${id}`);
+  assert.equal(all.branches[1]!.latest.can_merge, true);
+  assert.equal('branches_omitted' in all, false);
+});
+
 // --- recursion guard ----------------------------------------------------------
 
 test('starting, re-running, and cancelling are refused inside a reviewer', () => {
@@ -247,12 +288,15 @@ test('an API error carries the status and the error field', async () => {
 interface Stub {
   url: string;
   posts: unknown[];
+  /** Query strings of the GET list requests, by path. */
+  gets: { path: string; query: Record<string, string> }[];
   close: () => Promise<void>;
 }
 
 /** A fake API: two-branch ticket, reviews that finish after a few status polls. */
 async function startStub(pollsUntilDone = 2): Promise<Stub> {
   const posts: unknown[] = [];
+  const gets: Stub['gets'] = [];
   const polls = new Map<number, number>();
   const targets = [
     { repo: 'my-service', branch: 'feature/abc-123-a', baseBranch: 'main', prNumber: null },
@@ -274,6 +318,16 @@ async function startStub(pollsUntilDone = 2): Promise<Stub> {
             name: 'claude', label: 'Claude Code', defaultModel: 'opus', bin: 'claude', available: true,
             models: [{ id: 'opus', label: 'Opus' }, { id: 'sonnet', label: 'Sonnet' }],
           }],
+        });
+      }
+      if (req.method === 'GET' && (url.pathname === '/api/reviews' || url.pathname === '/api/review-groups')) {
+        gets.push({ path: url.pathname, query: Object.fromEntries(url.searchParams) });
+        if (url.pathname === '/api/reviews') {
+          return send(res, 200, { reviews: [doneRow(10), reviewRow({ id: 12, status: 'reviewing' })], total: 2 });
+        }
+        return send(res, 200, {
+          groups: [reviewGroup(), reviewGroup({ key: 'my-service#cleanup', isTicket: false, branches: [] })],
+          total: 7,
         });
       }
       if (req.method === 'GET' && url.pathname === '/api/tickets/ABC-123') {
@@ -311,6 +365,7 @@ async function startStub(pollsUntilDone = 2): Promise<Stub> {
   return {
     url: `http://127.0.0.1:${port}`,
     posts,
+    gets,
     close: () => new Promise<void>((resolve) => server.close(() => resolve())),
   };
 }
@@ -347,8 +402,8 @@ test('stdio MCP server: list, start, get, and wait against a stub API', { timeou
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     assert.deepEqual(names, [
-      'cancel_review', 'detect_base', 'get_report', 'get_review', 'list_local_repos', 'list_reviewers',
-      'list_reviews', 'rerun_review', 'start_review', 'wait_for_review',
+      'cancel_review', 'detect_base', 'get_report', 'get_review', 'list_local_repos', 'list_review_groups',
+      'list_reviewers', 'list_reviews', 'rerun_review', 'start_review', 'wait_for_review',
     ]);
     assert.match(tools.find((t) => t.name === 'wait_for_review')!.description ?? '', /call wait_for_review again/i);
 
@@ -405,6 +460,41 @@ test('stdio MCP server: list, start, get, and wait against a stub API', { timeou
 
     const invalid = await client.callTool({ name: 'get_review', arguments: { id: -1 } });
     assert.equal(invalid.isError, true);
+  } finally {
+    await client.close();
+    await stub.close();
+  }
+});
+
+test('stdio MCP server: grouped history and the runs of one group', { timeout: 60_000 }, async () => {
+  const stub = await startStub();
+  const client = await connect({ CODE_REVIEW_API_URL: stub.url });
+  try {
+    const page = json(await client.callTool({
+      name: 'list_review_groups', arguments: { q: 'abc', status: 'active', limit: 2, offset: 4 },
+    }));
+    assert.deepEqual(stub.gets.at(-1), {
+      path: '/api/review-groups', query: { q: 'abc', status: 'active', limit: '2', offset: '4' },
+    });
+    assert.equal(page.total, 7);
+    assert.equal(page.shown, 2);
+    assert.equal(page.next_offset, 6);
+    assert.equal(page.groups[0].key, 'ABC-123');
+    assert.equal(page.groups[0].branches[0].latest.url, `${stub.url}/review/12`);
+    assert.equal(page.groups[0].branches[1].latest.can_merge, true);
+    assert.equal(page.groups[1].is_ticket, false);
+
+    // Defaults: the first ten groups, no filters sent.
+    await client.callTool({ name: 'list_review_groups', arguments: {} });
+    assert.deepEqual(stub.gets.at(-1)?.query, { limit: '10', offset: '0' });
+
+    const tooMany = await client.callTool({ name: 'list_review_groups', arguments: { limit: 51 } });
+    assert.equal(tooMany.isError, true);
+
+    // group is passed through to the run list untouched.
+    const runs = json(await client.callTool({ name: 'list_reviews', arguments: { group: 'ABC-123' } }));
+    assert.deepEqual(stub.gets.at(-1), { path: '/api/reviews', query: { group: 'ABC-123', limit: '20' } });
+    assert.deepEqual(runs.reviews.map((r: { id: number }) => r.id), [10, 12]);
   } finally {
     await client.close();
     await stub.close();

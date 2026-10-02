@@ -55,6 +55,46 @@ export function Card({ title, actions, children }: { title?: ReactNode; actions?
   );
 }
 
+/** ‹ Prev · 1–20 of 143 · Next ›. Renders nothing while there is nothing to page. */
+export function Pager({
+  offset,
+  limit,
+  total,
+  onChange,
+}: {
+  offset: number;
+  limit: number;
+  total: number;
+  onChange: (offset: number) => void;
+}) {
+  if (total <= 0) return null;
+  const from = Math.min(offset + 1, total);
+  const to = Math.min(offset + limit, total);
+  return (
+    <nav className="pager" aria-label="Pages">
+      <button
+        className="btn ghost"
+        type="button"
+        disabled={offset <= 0}
+        onClick={() => onChange(Math.max(0, offset - limit))}
+      >
+        ‹ Prev
+      </button>
+      <span className="muted mono" aria-live="polite">
+        {from}–{to} of {total}
+      </span>
+      <button
+        className="btn ghost"
+        type="button"
+        disabled={to >= total}
+        onClick={() => onChange(offset + limit)}
+      >
+        Next ›
+      </button>
+    </nav>
+  );
+}
+
 export function fmtTime(iso: string | null): string {
   if (!iso) return '—';
   const d = new Date(iso);

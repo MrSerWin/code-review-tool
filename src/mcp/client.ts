@@ -73,6 +73,16 @@ export function isUnreachable(err: unknown): boolean {
   return err instanceof TypeError && /fetch failed/i.test(err.message);
 }
 
+/** `path?k=v&...`, leaving out absent and empty values. */
+function withQuery(path: string, params: Record<string, string | number | undefined>): string {
+  const qs = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== '') qs.set(key, String(value));
+  }
+  const query = qs.toString();
+  return query ? `${path}?${query}` : path;
+}
+
 export class ApiClient {
   readonly baseUrl: string;
   private readonly fetchImpl: FetchLike;
@@ -161,12 +171,11 @@ export class ApiClient {
   }
 
   listReviews<T>(params: Record<string, string | number | undefined>): Promise<T> {
-    const qs = new URLSearchParams();
-    for (const [key, value] of Object.entries(params)) {
-      if (value !== undefined && value !== '') qs.set(key, String(value));
-    }
-    const query = qs.toString();
-    return this.requestJson<T>(`/api/reviews${query ? `?${query}` : ''}`);
+    return this.requestJson<T>(withQuery('/api/reviews', params));
+  }
+
+  reviewGroups<T>(params: Record<string, string | number | undefined>): Promise<T> {
+    return this.requestJson<T>(withQuery('/api/review-groups', params));
   }
 
   cancel<T>(id: number): Promise<T> {
