@@ -9,7 +9,8 @@ import { activeTrackerNames } from './trackers/index.js';
 import { listReviewers, listReviewersWithModels } from './reviewers/index.js';
 import { ensureImage } from './gitSandbox.js';
 import { logger } from './logger.js';
-import { recoverInterrupted } from './queue.js';
+import { recoverInterrupted, stopAllReviews } from './queue.js';
+import { killAllReviewersNow } from './reviewRunner.js';
 import { previewsSummary, recoverOrphanPreviews, startReaper } from './preview/engine.js';
 import { previewRoutes } from './routes/previews.js';
 import { repoRoutes } from './routes/repos.js';
@@ -72,7 +73,15 @@ export async function buildServer() {
 }
 
 async function main(): Promise<void> {
-  recoverInterrupted();
+  // Only rows whose owner is gone (see recoverInterrupted): a CLI run that is
+  // still going keeps its reviews.
+  const recovered = await recoverInterrupted('server');
+  if (recovered.failed.length > 0 || recovered.killedGroups.length > 0) {
+    logger.info(
+      `recovery: failed ${recovered.failed.length} interrupted review(s), ` +
+        `stopped ${recovered.killedGroups.length} orphaned reviewer process group(s)`,
+    );
+  }
 
   const app = await buildServer();
   await app.listen({ host: '127.0.0.1', port: config.PORT });
@@ -88,8 +97,28 @@ async function main(): Promise<void> {
     .catch((err: unknown) => logger.warn(`preview recovery failed: ${(err as Error).message}`))
     .finally(() => startReaper());
 
-  const shutdown = (): void => {
-    void app.close().then(() => process.exit(0));
+  // Reviewer CLIs run in their own process groups, so a signal to this
+  // process never reaches them: stop them here, or they outlive the server.
+  // Running reviews are failed first, then their processes get SIGTERM and,
+  // after a grace period, SIGKILL. Previews are left to the next start, which
+  // tears them down. A second signal skips the grace period.
+  let stopping = false;
+  const shutdown = (signal: NodeJS.Signals): void => {
+    if (stopping) {
+      killAllReviewersNow();
+      process.exit(1);
+    }
+    stopping = true;
+    logger.info(`${signal}: shutting down`);
+    void (async () => {
+      try {
+        await stopAllReviews('interrupted by shutdown');
+      } catch (err) {
+        logger.warn(`stopping reviews failed: ${(err as Error).message}`);
+      }
+      // An open event stream can keep close() waiting; never wait for it long.
+      await Promise.race([app.close(), new Promise((resolve) => setTimeout(resolve, 3_000))]);
+    })().finally(() => process.exit(0));
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);

@@ -21,6 +21,7 @@ import {
   fmtAge,
   fmtExpiry,
 } from './preview';
+import RoleBranchInputs, { roleRequests } from './RoleBranchInputs';
 import { Card, fmtTime } from './ui';
 
 /** How many log lines a failed preview shows without the user asking. */
@@ -44,7 +45,14 @@ export default function PreviewPanel({
   const [dumpMode, setDumpMode] = useState<DumpModeRequest>('auto');
   const [logOpen, setLogOpen] = useState(false);
   const [now, setNow] = useState(() => Date.now());
+  // Custom launch: branches picked per role instead of resolved from the ticket.
+  const [custom, setCustom] = useState(false);
+  const [branches, setBranches] = useState<Record<string, string>>({});
   const logEndRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    setCustom(false);
+  }, [reviewId]);
 
   useEffect(() => {
     api.recipes().then(setRecipes).catch(() => setRecipes(null));
@@ -141,6 +149,8 @@ export default function PreviewPanel({
       const { preview: created } = await api.createPreview({
         reviewId,
         recipe: recipe.name,
+        // Every role is sent: an empty one runs its base branch, not the ticket's branch.
+        ...(custom ? { roles: roleRequests(recipe.roles, branches, true) } : {}),
         ...(dumpMode === 'auto' ? {} : { dumpMode }),
       });
       setPreview(created);
@@ -152,6 +162,29 @@ export default function PreviewPanel({
     } finally {
       setBusy(false);
     }
+  };
+
+  /**
+   * Opens the custom launch prefilled with what the ticket would run: this
+   * review's branch for its repo, and for the others the branch the last
+   * preview ran (empty, so the base branch, when it ran the base or there is none).
+   */
+  const toggleCustom = (): void => {
+    if (custom) {
+      setCustom(false);
+      return;
+    }
+    const prefill: Record<string, string> = {};
+    for (const r of recipe.roles) {
+      if (r.repo === repo) {
+        prefill[r.role] = branch;
+        continue;
+      }
+      const last = preview?.roles.find((p) => p.role === r.role && p.repo === r.repo && !p.usedBase);
+      prefill[r.role] = last?.branch ?? '';
+    }
+    setBranches(prefill);
+    setCustom(true);
   };
 
   const stop = async (): Promise<void> => {
@@ -199,6 +232,15 @@ export default function PreviewPanel({
         <>
           {!live && (
             <>
+              <button
+                className="btn ghost"
+                type="button"
+                aria-pressed={custom}
+                onClick={toggleCustom}
+                title="Pick the branch of each repo by hand"
+              >
+                Custom…
+              </button>
               <select
                 className="mini-select"
                 value={dumpMode}
@@ -231,7 +273,21 @@ export default function PreviewPanel({
     >
       {error && <p className="error-line">{error}</p>}
 
-      {!preview && (
+      {custom && !live && (
+        <div className="preview-custom">
+          <RoleBranchInputs
+            roles={recipe.roles}
+            values={branches}
+            onChange={(role, value) => setBranches((prev) => ({ ...prev, [role]: value }))}
+            disabled={busy}
+          />
+          <p className="muted custom-launch-hint">
+            Start preview runs these branches. Leave one empty to run its base branch.
+          </p>
+        </div>
+      )}
+
+      {!preview && !custom && (
         <div className="preview-intro">
           <p className="muted">
             Runs {recipe.roles.map((r) => r.repo).join(' + ')} from this ticket&rsquo;s branches on a local

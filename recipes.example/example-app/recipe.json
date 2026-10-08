@@ -10,7 +10,7 @@
   //         (backend -> CHECKOUT_BACKEND, BRANCH_BACKEND, BASE_BACKEND).
   // Value = repository name; it must appear in ALLOWED_REPOS.
   // A role whose repository has no branch for the ticket runs its base branch,
-  // and the API reports that role with "usedBase": true.
+  // and the API reports that role with "usedBase": true (USED_BASE_<ROLE>=1).
   "repos": {
     "backend": "my-service",
     "frontend": "my-frontend"
@@ -19,7 +19,8 @@
   // Logical ports. The engine allocates one free host port per entry from
   // PREVIEW_PORT_RANGE and exposes it as PORT_<ID in upper case>.
   // "primary" marks the port whose URL is shown to the user; without it the
-  // first entry wins. A port with the id "db" is also used for DB_PORT.
+  // first entry wins. A port with the id "db" (or "postgres") is also used
+  // for DB_PORT.
   "ports": [
     { "id": "db", "internal": 5432 },
     { "id": "api", "internal": 8000 },
@@ -94,21 +95,26 @@
       "docker compose -p \"$PREVIEW_ID\" -f \"$PREVIEW_DIR/compose.yml\" up -d --build"
     ],
 
-    // Polled until every command exits 0 or readyTimeoutSec runs out.
+    // Polled every 3 s until every command exits 0 or readyTimeoutSec runs
+    // out. Background services (see compose.yml) belong here too: a preview
+    // whose worker is down only looks ready.
     "health": [
       "curl -fsS \"http://127.0.0.1:$PORT_API/healthz\" > /dev/null",
       "curl -fsS \"http://127.0.0.1:$PORT_WEB/\" > /dev/null"
     ],
 
     // Runs on stop, on failure, on timeout, on TTL expiry, and at server start
-    // for previews a crash left behind. Must be idempotent and must succeed
+    // for previews a crash or restart left behind. Must be idempotent and must succeed
     // even when nothing was ever started.
     "down": [
-      "docker compose -p \"$PREVIEW_ID\" -f \"$PREVIEW_DIR/compose.yml\" down -v --remove-orphans || true"
+      "docker compose -p \"$PREVIEW_ID\" -f \"$PREVIEW_DIR/compose.yml\" down -v --remove-orphans || true",
+      "docker image rm -f \"example-app-api:$PREVIEW_ID\" > /dev/null 2>&1 || true"
     ]
   },
 
-  // Budget for prepare + up + health together.
+  // Budget from the moment the preview leaves the queue until health passes:
+  // checkouts, the database dump, prepare, up, and health together.
+  // Default 600.
   "readyTimeoutSec": 900,
 
   // Optional ceiling for a single command; defaults to readyTimeoutSec.

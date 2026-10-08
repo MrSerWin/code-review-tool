@@ -1,6 +1,12 @@
 # Example stack for the preview engine. Every host port and every source
 # directory arrives through the environment the engine sets, so the same file
 # works for any number of concurrent previews.
+
+# The api environment, shared by every process that runs the api image.
+x-api-env: &api-env
+  DATABASE_URL: postgres://${DB_USER}:preview@db:5432/${DB_NAME}
+  ALLOWED_ORIGINS: http://127.0.0.1:${PORT_WEB}
+
 services:
   db:
     image: postgres:16-alpine
@@ -16,16 +22,30 @@ services:
       retries: 20
 
   api:
+    # Named per preview so background services can reuse the build; the
+    # recipe's `down` removes it.
+    image: example-app-api:${PREVIEW_ID}
     build:
       context: ${CHECKOUT_BACKEND}
-    environment:
-      DATABASE_URL: postgres://${DB_USER}:preview@db:5432/${DB_NAME}
-      ALLOWED_ORIGINS: http://127.0.0.1:${PORT_WEB}
+    environment: *api-env
     ports:
       - "${PORT_API}:8000"
     depends_on:
       db:
         condition: service_healthy
+
+  # A background process: same image, same environment, the api's network.
+  # Uncomment and adapt the command if the app has a queue worker, a
+  # scheduler, or a database-notification listener, and make `health` wait for
+  # it. See recipes.example/README.md, "Background processes".
+  # worker:
+  #   image: example-app-api:${PREVIEW_ID}
+  #   command: ["./manage.sh", "worker"]
+  #   environment: *api-env
+  #   network_mode: "service:api"
+  #   depends_on:
+  #     - api
+  #   restart: unless-stopped
 
   web:
     build:

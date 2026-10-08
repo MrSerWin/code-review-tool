@@ -1,3 +1,4 @@
+import { Link } from '../router';
 import type { DumpMode, DumpModeRequest, Preview, PreviewRole, PreviewStatus } from '../types';
 
 /** Database contents offered when starting a preview, shared by every start form. */
@@ -100,27 +101,87 @@ export function DumpModeNote({ mode }: { mode: DumpMode | null }) {
   return <p className={`dump-note${mode === 'clean' ? ' dump-note-warn' : ''}`}>{DUMP_NOTE[mode]}</p>;
 }
 
-/** One chip per repo in the preview, flagging any role that is not under review. */
+/** One line per repo in the preview, flagging any role that is not under review. */
 export function RoleChips({ roles }: { roles: PreviewRole[] }) {
   if (roles.length === 0) return <span className="muted">—</span>;
   return (
-    <div className="role-row">
-      {roles.map((r) => (
-        <span
-          key={r.role}
-          className={`role-chip${r.usedBase ? ' role-base' : ''}`}
-          title={
-            r.usedBase
-              ? `${r.repo}: no ticket branch to run (never had one, or it is gone from the remote); running its base branch ${r.base}`
-              : `${r.repo}: ${r.branch} (base ${r.base})`
-          }
-        >
-          <span className="role-name">{r.role}</span>
-          <span className="mono role-branch">{r.usedBase ? r.base : r.branch}</span>
-          {r.usedBase && <span className="role-flag">base branch</span>}
-        </span>
-      ))}
-    </div>
+    <ul className="role-list">
+      {roles.map((r) => {
+        const branch = r.usedBase ? r.base : r.branch;
+        const title = r.usedBase
+          ? `${r.repo}: ${branch}. No ticket branch to run (never had one, or it is gone from the remote), so the base branch runs.`
+          : `${r.repo}: ${branch} (base ${r.base})`;
+        return (
+          <li key={r.role} className={`role-chip${r.usedBase ? ' role-base' : ''}`}>
+            <span className="role-name" title={r.role}>
+              {r.role}
+            </span>
+            {r.url ? (
+              <a className="role-branch" href={r.url} target="_blank" rel="noreferrer" title={`${title} Open on GitHub.`}>
+                {branch}
+              </a>
+            ) : (
+              <span className="role-branch" title={title}>
+                {branch}
+              </span>
+            )}
+            {r.usedBase && (
+              <span className="tag role-flag" title={title}>
+                base branch
+              </span>
+            )}
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+/** How a preview's ticket reads in a narrow column, and where it leads. */
+export interface TicketDisplay {
+  label: string;
+  href: string;
+  external: boolean;
+}
+
+function decodeRef(ref: string): string {
+  try {
+    return decodeURIComponent(ref);
+  } catch {
+    return ref;
+  }
+}
+
+/**
+ * A ticket key as is; a pull request (URL or `org/repo#N`) as `repo#N`; a tree
+ * URL as `repo#branch`. URLs open GitHub, everything else the ticket's page.
+ */
+export function ticketDisplay(key: string): TicketDisplay {
+  const value = key.trim();
+  const pr = /^https?:\/\/github\.com\/[^/]+\/([^/]+)\/pull\/(\d+)/i.exec(value);
+  if (pr) return { label: `${pr[1]}#${pr[2]}`, href: value, external: true };
+  const tree = /^https?:\/\/github\.com\/[^/]+\/([^/]+)\/tree\/(.+?)\/?$/i.exec(value);
+  if (tree) return { label: `${tree[1]}#${decodeRef(tree[2] ?? '')}`, href: value, external: true };
+  if (/^https?:\/\//i.test(value)) return { label: value.replace(/^https?:\/\//i, ''), href: value, external: true };
+  const shortPr = /^[^/\s#]+\/([^/\s#]+)#(\d+)$/.exec(value);
+  return {
+    label: shortPr ? `${shortPr[1]}#${shortPr[2]}` : value,
+    href: `/ticket/${encodeURIComponent(value)}`,
+    external: false,
+  };
+}
+
+/** The ticket a preview was started for, shortened, with the full value on hover. */
+export function TicketLabel({ ticketKey }: { ticketKey: string }) {
+  const t = ticketDisplay(ticketKey);
+  return t.external ? (
+    <a className="mono ticket-label" href={t.href} target="_blank" rel="noreferrer" title={ticketKey}>
+      {t.label}
+    </a>
+  ) : (
+    <Link to={t.href} className="mono ticket-label" title={ticketKey}>
+      {t.label}
+    </Link>
   );
 }
 

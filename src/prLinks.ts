@@ -1,7 +1,7 @@
 import { assertAllowedRepo, config } from './config.js';
 
-const PR_URL = /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:[/?#].*)?$/i;
-const PR_URL_ANYWHERE = /https:\/\/github\.com\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+\/pull\/\d+/gi;
+const PR_URL = /^https?:\/\/(?:www\.)?github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:[/?#].*)?$/i;
+const PR_URL_ANYWHERE = /https?:\/\/(?:www\.)?github\.com\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+\/pull\/\d+/gi;
 
 /**
  * GitHub pull request links, whatever tracker they came from. Anything outside

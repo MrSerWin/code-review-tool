@@ -26,13 +26,23 @@ export const PASSTHROUGH_ENV = [
  */
 export const REVIEWER_MARKER_ENV = 'CODE_REVIEW_TOOL_REVIEWER';
 
-export function buildBaseChildEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
+/**
+ * The allowlisted environment with every forbidden token removed, and nothing
+ * else: no reviewer marker. Preview steps start from this.
+ */
+export function buildSanitizedEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...extra };
   for (const key of PASSTHROUGH_ENV) {
     const value = process.env[key];
     if (value !== undefined) env[key] = value;
   }
   for (const key of FORBIDDEN_ENV) delete env[key];
+  return env;
+}
+
+/** A reviewer process's environment: the sanitized base plus the reviewer marker. */
+export function buildBaseChildEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
+  const env = buildSanitizedEnv(extra);
   env[REVIEWER_MARKER_ENV] = '1';
   return env;
 }

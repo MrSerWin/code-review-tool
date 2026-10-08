@@ -84,7 +84,7 @@ export default function ReviewDetail({ id }: { id: number }) {
   // The re-run picker; prefilled from this review once it loads.
   const [rerunReviewer, setRerunReviewer] = useState('');
   const [rerunModel, setRerunModel] = useState('');
-  const logEndRef = useRef<HTMLDivElement | null>(null);
+  const logRef = useRef<HTMLDivElement | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -152,7 +152,9 @@ export default function ReviewDetail({ id }: { id: number }) {
   }, [id, load]);
 
   useEffect(() => {
-    logEndRef.current?.scrollIntoView({ block: 'end' });
+    // Scroll the log box only; scrollIntoView would also scroll the page past the banner.
+    const box = logRef.current;
+    if (box) box.scrollTop = box.scrollHeight;
   }, [live.length]);
 
   const lenses = useMemo(() => deriveLensProgress(live), [live]);
@@ -160,7 +162,7 @@ export default function ReviewDetail({ id }: { id: number }) {
   if (error) return <p className="error-line">{error}</p>;
   if (!data) return <p className="muted">Loading…</p>;
 
-  const { review, requirements, findings, comparison } = data;
+  const { review, requirements, findings, comparison, links } = data;
   const observations = data.observations ?? [];
   const running = ACTIVE.has(review.status);
   const finished = review.status === 'done';
@@ -220,73 +222,139 @@ export default function ReviewDetail({ id }: { id: number }) {
     items: findings.filter((f) => f.severity === sev),
   })).filter((g) => g.items.length > 0);
 
+  // "CHANGES REQUESTED — do not merge yet" → a loud verdict and a quieter hint.
+  const [verdictText, verdictHint] = review.verdict
+    ? (BANNER[review.verdict] ?? review.verdict).split(' — ')
+    : [running ? 'Review in progress' : `Run ${review.status}`];
+  const modelsListId = `rerun-models-${rerunReviewer}`;
+
   return (
     <div className="stack">
       <div className={`banner verdict-${review.verdict ?? 'none'}`}>
         <div className="banner-main">
-          <span className="banner-title">
-            {review.verdict ? BANNER[review.verdict] : running ? 'Review in progress' : `Run ${review.status}`}
-          </span>
-          <span className="banner-sub mono">
-            {review.repo} · {review.branch} · run #{review.run_index}
-          </span>
-        </div>
-        <div className="banner-actions">
-          <StatusPill status={review.status} />
-          {running ? (
-            <button className="btn ghost" type="button" onClick={() => void cancel()}>
-              Cancel
-            </button>
-          ) : (
-            <span className="rerun-group">
-              {reviewers.length > 0 && (
-                <>
-                  <select
-                    className="mini-select"
-                    aria-label="Reviewer for the re-run"
-                    value={rerunReviewer}
-                    onChange={(e) => onRerunReviewerChange(e.target.value)}
-                  >
-                    {/* A stored reviewer the server no longer offers still shows as chosen. */}
-                    {!rerunInfo && <option value={rerunReviewer}>{rerunReviewer || 'Default'}</option>}
-                    {reviewers.map((r) => (
-                      <option key={r.name} value={r.name} disabled={!r.available}>
-                        {r.available ? r.label : `${r.label} (not installed)`}
-                      </option>
-                    ))}
-                  </select>
-                  <input
-                    className="mini-select mono rerun-model"
-                    aria-label="Model for the re-run"
-                    value={rerunModel}
-                    spellCheck={false}
-                    list={`rerun-models-${rerunReviewer}`}
-                    placeholder={rerunInfo?.defaultModel ?? 'model'}
-                    onChange={(e) => setRerunModel(e.target.value)}
-                  />
-                  <datalist id={`rerun-models-${rerunReviewer}`}>
-                    {(rerunInfo?.models ?? []).map((m) => (
-                      <option key={m.id} value={m.id}>
-                        {m.label}
-                      </option>
-                    ))}
-                  </datalist>
-                </>
+          <h1 className="banner-title">
+            <span className="banner-verdict">{verdictText}</span>
+            {verdictHint && <span className="banner-hint"> — {verdictHint}</span>}
+          </h1>
+          {/* Each separator travels with the item after it, so no line ends on a "·". */}
+          <div className="banner-sub mono">
+            <span>{review.repo}</span>
+            <span>
+              <span className="banner-sep" aria-hidden="true">·</span>
+              {links ? (
+                <a href={links.branch} target="_blank" rel="noreferrer" title="Open the branch on GitHub">
+                  {review.branch}
+                </a>
+              ) : (
+                review.branch
               )}
-              <button className="btn" type="button" onClick={() => void rerun()}>
-                Re-run
-              </button>
             </span>
+            <span className="nowrap">
+              <span className="banner-sep" aria-hidden="true">·</span>
+              run #{review.run_index}
+            </span>
+          </div>
+          {links && (
+            <div className="banner-links">
+              {links.pr && (
+                <a className="link-btn link-btn-pr" href={links.pr} target="_blank" rel="noreferrer">
+                  PR #{review.pr_number}
+                  <span className="link-arrow" aria-hidden="true">↗</span>
+                </a>
+              )}
+              <a className="link-btn" href={links.branch} target="_blank" rel="noreferrer">
+                Branch
+                <span className="link-arrow" aria-hidden="true">↗</span>
+              </a>
+              {links.compare && (
+                <a
+                  className="link-btn"
+                  href={links.compare}
+                  target="_blank"
+                  rel="noreferrer"
+                  title={`${review.base_branch}...${review.branch} on GitHub`}
+                >
+                  Diff
+                  <span className="link-arrow" aria-hidden="true">↗</span>
+                </a>
+              )}
+              {review.source === 'local' && (
+                <span className="banner-note" title="Read from the local clone; GitHub shows only what is pushed">
+                  local run — GitHub may lag
+                </span>
+              )}
+            </div>
           )}
-          <a className="btn" href={api.reportUrl(review.id)} download={`review-${review.id}.md`}>
-            Download
-          </a>
-          <button className="btn" type="button" onClick={() => void copyReport()}>
-            Copy
-          </button>
-          <button className="btn danger" type="button" onClick={() => void remove()}>
-            Delete
-          </button>
+        </div>
+
+        <div className="banner-actions">
+          <div className="banner-row">
+            <StatusPill status={review.status} boxed />
+            {running ? (
+              <button className="btn ctl" type="button" onClick={() => void cancel()}>
+                Cancel
+              </button>
+            ) : (
+              <div className="input-group" role="group" aria-label="Re-run this review">
+                {reviewers.length > 0 && (
+                  <>
+                    <select
+                      className="ig-field ig-select"
+                      aria-label="Reviewer for the re-run"
+                      value={rerunReviewer}
+                      onChange={(e) => onRerunReviewerChange(e.target.value)}
+                    >
+                      {/* A stored reviewer the server no longer offers still shows as chosen. */}
+                      {!rerunInfo && <option value={rerunReviewer}>{rerunReviewer || 'Default'}</option>}
+                      {reviewers.map((r) => (
+                        <option key={r.name} value={r.name} disabled={!r.available}>
+                          {r.available ? r.label : `${r.label} (not installed)`}
+                        </option>
+                      ))}
+                    </select>
+                    <input
+                      className="ig-field ig-input mono"
+                      aria-label="Model for the re-run"
+                      value={rerunModel}
+                      spellCheck={false}
+                      list={modelsListId}
+                      placeholder={rerunInfo?.defaultModel ?? 'model'}
+                      onChange={(e) => setRerunModel(e.target.value)}
+                    />
+                  </>
+                )}
+                <button className="ig-btn" type="button" onClick={() => void rerun()}>
+                  <Icon name="rerun" />
+                  Re-run
+                </button>
+              </div>
+            )}
+            {/* Outside the group so it never counts as one of its joined segments. */}
+            {!running && reviewers.length > 0 && (
+              <datalist id={modelsListId}>
+                {(rerunInfo?.models ?? []).map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.label}
+                  </option>
+                ))}
+              </datalist>
+            )}
+          </div>
+          <div className="banner-row">
+            <a className="btn ghost ctl" href={api.reportUrl(review.id)} download={`review-${review.id}.md`}>
+              <Icon name="download" />
+              Download
+            </a>
+            <button className="btn ghost ctl" type="button" onClick={() => void copyReport()}>
+              <Icon name="copy" />
+              Copy report
+            </button>
+            <span className="banner-divider" aria-hidden="true" />
+            <button className="btn ghost ctl ctl-danger" type="button" onClick={() => void remove()}>
+              <Icon name="trash" />
+              Delete
+            </button>
+          </div>
         </div>
       </div>
 
@@ -311,7 +379,14 @@ export default function ReviewDetail({ id }: { id: number }) {
             </dd>
             <dt>Branch</dt>
             <dd className="mono">
-              {review.branch} <span className="muted">→ {review.base_branch}</span>
+              {links ? (
+                <a href={links.branch} target="_blank" rel="noreferrer">
+                  {review.branch}
+                </a>
+              ) : (
+                review.branch
+              )}{' '}
+              <span className="muted">→ {review.base_branch}</span>
               {review.base_reason && (
                 <span className="muted">
                   {' '}
@@ -329,8 +404,8 @@ export default function ReviewDetail({ id }: { id: number }) {
             </dd>
             <dt>Commits</dt>
             <dd className="mono">
-              {review.head_sha ? review.head_sha.slice(0, 7) : '—'} /{' '}
-              {review.base_sha ? review.base_sha.slice(0, 7) : '—'}
+              <ShaLink sha={review.head_sha} href={links?.head ?? null} /> /{' '}
+              <ShaLink sha={review.base_sha} href={links?.base ?? null} />
             </dd>
             <dt>Diff</dt>
             <dd className="mono">
@@ -358,7 +433,7 @@ export default function ReviewDetail({ id }: { id: number }) {
 
         <Card title={`Log${running ? ' · live' : ''}`}>
           {lenses && <LensChips lenses={lenses} />}
-          <div className="log">
+          <div className="log" ref={logRef}>
             {live.length === 0 && <div className="muted">No log output yet.</div>}
             {live.map((l) => (
               <div key={l.id} className={`log-line log-${l.level}`}>
@@ -366,7 +441,6 @@ export default function ReviewDetail({ id }: { id: number }) {
                 <span className="log-msg">{l.message}</span>
               </div>
             ))}
-            <div ref={logEndRef} />
           </div>
         </Card>
       </div>
@@ -465,6 +539,36 @@ export default function ReviewDetail({ id }: { id: number }) {
   );
 }
 
+function ShaLink({ sha, href }: { sha: string | null; href: string | null }) {
+  if (!sha) return <>—</>;
+  const short = sha.slice(0, 7);
+  return href ? (
+    <a href={href} target="_blank" rel="noreferrer" title={sha}>
+      {short}
+    </a>
+  ) : (
+    <>{short}</>
+  );
+}
+
+type IconName = 'rerun' | 'download' | 'copy' | 'trash';
+
+const ICON_PATHS: Record<IconName, string> = {
+  rerun: 'M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.5v3h-3',
+  download: 'M8 2.5v8m0 0L4.8 7.3M8 10.5l3.2-3.2M3 13.5h10',
+  copy: 'M5.5 5.5V3.2c0-.4.3-.7.7-.7h6.6c.4 0 .7.3.7.7v6.6c0 .4-.3.7-.7.7h-2.3M3.2 5.5h6.6c.4 0 .7.3.7.7v6.6c0 .4-.3.7-.7.7H3.2a.7.7 0 0 1-.7-.7V6.2c0-.4.3-.7.7-.7Z',
+  trash: 'M2.5 4.5h11M6.5 4.5V3c0-.3.2-.5.5-.5h2c.3 0 .5.2.5.5v1.5M4 4.5l.6 8.4c0 .3.3.6.7.6h5.4c.4 0 .7-.3.7-.6l.6-8.4',
+};
+
+/** A 14px line icon for the banner buttons; decorative, the button text names the action. */
+function Icon({ name }: { name: IconName }) {
+  return (
+    <svg className="icon" width="14" height="14" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+      <path d={ICON_PATHS[name]} fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 function RunComparisonView({ comparison }: { comparison: RunComparison }) {
   const { resolved, new: added, persistent } = comparison;
   if (resolved.length === 0 && added.length === 0 && persistent.length === 0) {
@@ -527,16 +631,44 @@ function ComparisonGroup({
   );
 }
 
+/**
+ * "1 finding, 2 observations" → findings and observations as numbers, so a chip can
+ * show a short count. Null when the note is not in that shape.
+ */
+function lensCounts(note: string): { findings: number; observations: number } | null {
+  const findings = /(\d+)\s+findings?/i.exec(note)?.[1];
+  const observations = /(\d+)\s+observations?/i.exec(note)?.[1];
+  if (findings === undefined && observations === undefined) return null;
+  return { findings: Number(findings ?? 0), observations: Number(observations ?? 0) };
+}
+
 function LensChips({ lenses }: { lenses: LensProgress[] }) {
   return (
     <div className="lens-row" role="list" aria-label="Lens progress">
-      {lenses.map((l) => (
-        <span key={l.name} role="listitem" className={`lens lens-${l.state}`} title={l.note || l.state}>
-          <span className="lens-dot" aria-hidden="true" />
-          <span className="lens-name">{l.name}</span>
-          {l.note && <span className="lens-note">{l.note}</span>}
-        </span>
-      ))}
+      {lenses.map((l) => {
+        const counts = l.state === 'done' ? lensCounts(l.note) : null;
+        return (
+          <span
+            key={l.name}
+            role="listitem"
+            className={`lens lens-${l.state}`}
+            title={`${l.name}: ${l.note || l.state}`}
+          >
+            <span className="lens-dot" aria-hidden="true" />
+            <span className="lens-name">{l.name}</span>
+            {counts ? (
+              <span className="lens-count">
+                <span className={counts.findings > 0 ? 'lens-findings' : undefined}>{counts.findings}</span>
+                {counts.observations > 0 && <span className="lens-obs"> · {counts.observations} obs</span>}
+              </span>
+            ) : l.state === 'failed' ? (
+              <span className="lens-count">failed</span>
+            ) : (
+              l.note && <span className="lens-count lens-note">{l.note}</span>
+            )}
+          </span>
+        );
+      })}
     </div>
   );
 }

@@ -28,7 +28,7 @@ interface IssueRef {
 /** `owner/repo#123` or a GitHub issue or pull request URL. */
 function parseRef(input: string): IssueRef | null {
   const raw = input.trim();
-  const url = /^https:\/\/github\.com\/([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)\/(?:issues|pull)\/(\d+)(?:[/?#].*)?$/i.exec(raw);
+  const url = /^https?:\/\/(?:www\.)?github\.com\/([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)\/(?:issues|pull)\/(\d+)(?:[/?#].*)?$/i.exec(raw);
   if (url) return { owner: url[1] as string, repo: url[2] as string, number: Number(url[3]) };
   const short = /^([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)#(\d+)$/.exec(raw);
   if (short) return { owner: short[1] as string, repo: short[2] as string, number: Number(short[3]) };

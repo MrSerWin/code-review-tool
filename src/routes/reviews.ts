@@ -23,6 +23,7 @@ import {
   updateReview,
 } from '../db.js';
 import { compareFindings, toComparable } from '../findingCompare.js';
+import { githubLinks } from '../githubLinks.js';
 import { subscribe } from '../events.js';
 import { cancelReview, enqueueReview } from '../queue.js';
 import { resolveTargets } from '../resolver.js';
@@ -191,6 +192,7 @@ export async function reviewRoutes(app: FastifyInstance): Promise<void> {
       observations: getObservations(review.id),
       logs: getLogs(review.id),
       comparison,
+      links: githubLinks(config.GITHUB_ORG, review),
     };
   });
 

@@ -1,7 +1,8 @@
 import path from 'node:path';
 import { config } from './config.js';
 import * as db from './db.js';
-import { enqueueReview, recoverInterrupted } from './queue.js';
+import { enqueueReview, recoverInterrupted, stopAllReviews } from './queue.js';
+import { killAllReviewersNow } from './reviewRunner.js';
 import {
   getReviewer, listReviewersWithModels, notInstalledMessage, REVIEWER_NAMES,
 } from './reviewers/index.js';
@@ -19,12 +20,19 @@ Usage:
 Input can be:
   ABC-123                                          a ticket key of a configured tracker
   jira:ABC-123                                     the same key, forced to one tracker
-  https://github.com/<org>/<repo>/pull/12          a pull request URL
+  https://github.com/<org>/<repo>/pull/12          a pull request URL: exactly that PR's branch
+  <org>/<repo>#12                                  the same pull request (github:<org>/<repo>#12
+                                                   too); when 12 is an issue, the GitHub issue
+                                                   is read as a ticket
+  https://github.com/<org>/<repo>/issues/12        a GitHub issue, read as a ticket
   https://github.com/<org>/<repo>/tree/<branch>    a branch URL
   my-service#feature/abc-123-example               repo#branch
   local:my-service#feature/abc-123-example         a branch of the local clone, pushed or not
   local:my-service                                 the local clone's checked-out branch
                                                    (needs LOCAL_REPOS_DIR or LOCAL_REPOS)
+
+  GitHub links may also start with http:// or www.github.com, and may be
+  wrapped in <...>. <org> must be GITHUB_ORG and <repo> one of ALLOWED_REPOS.
 
 Options:
   --reviewer <name>
@@ -54,6 +62,13 @@ Exit codes:
      (all ticket requirements met, no blocker and no major finding)
   1  at least one review failed, was cancelled, or reported can_merge = false
   2  bad usage, or the input could not be resolved to any branch
+
+Shared database:
+  The CLI and the server may run at the same time against the same DATA_DIR.
+  At start the CLI fails only reviews whose owning process is gone (and stops
+  the reviewer processes they left running); a live server's reviews are left
+  alone. Ctrl+C fails this run's reviews and stops their reviewer processes;
+  press it twice to skip the grace period.
 
 The reviewed code is never modified.`;
 
@@ -129,7 +144,12 @@ async function main(): Promise<number> {
     return 2;
   }
 
-  recoverInterrupted();
+  stopOnSignals();
+
+  // The server may be running reviews in the same database right now. Only
+  // rows whose recorded owner is provably gone are failed here; rows of a live
+  // process, and rows with no recorded owner, are left alone.
+  await recoverInterrupted('cli');
 
   let resolved: { ticket: TicketInfo | null; targets: ResolvedTarget[] };
   try {
@@ -204,6 +224,29 @@ async function main(): Promise<number> {
     }
   }
   return bad > 0 || failed ? 1 : 0;
+}
+
+/**
+ * Ctrl+C or SIGTERM: fail this run's reviews and stop their reviewer
+ * processes, which run in their own process groups and would otherwise keep
+ * going. A second signal kills them without the grace period.
+ */
+function stopOnSignals(): void {
+  let stopping = false;
+  const stop = (signal: NodeJS.Signals): void => {
+    const code = signal === 'SIGINT' ? 130 : 143;
+    if (stopping) {
+      killAllReviewersNow();
+      process.exit(code);
+    }
+    stopping = true;
+    console.error(`\n${signal}: stopping the reviews…`);
+    void stopAllReviews('interrupted: the CLI was stopped')
+      .catch(() => undefined)
+      .finally(() => process.exit(code));
+  };
+  process.on('SIGINT', stop);
+  process.on('SIGTERM', stop);
 }
 
 function describeBaseReason(t: ResolvedTarget): string {

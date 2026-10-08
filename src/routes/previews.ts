@@ -19,8 +19,9 @@ const createBody = z
       .array(
         z.object({
           role: z.string().min(1).max(64),
-          branch: z.string().min(1).max(255),
-          base: z.string().min(1).max(255).optional(),
+          // Empty or absent: the role runs its base branch.
+          branch: z.string().max(255).optional(),
+          base: z.string().max(255).optional(),
         }),
       )
       .max(20)

@@ -3,6 +3,7 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 import { config } from './config.js';
 import { cleanGroupTitle, groupKeyFor } from './groupKey.js';
+import { SELF } from './processOwnership.js';
 import type {
   FindingRow, GroupStatusFilter, LogLevel, LogRow, ObservationRow, RequirementRow, ReviewGroup,
   ReviewGroupBranch, ReviewOutput, ReviewRow,
@@ -134,6 +135,11 @@ export function migrate(): void {
     ensureColumn('reviews', 'working_tree', `ALTER TABLE reviews ADD COLUMN working_tree INTEGER NOT NULL DEFAULT 0`);
     ensureColumn('reviews', 'base_reason', `ALTER TABLE reviews ADD COLUMN base_reason TEXT`);
     ensureColumn('reviews', 'group_key', `ALTER TABLE reviews ADD COLUMN group_key TEXT`);
+    // Which process runs an in-flight row, and which reviewer processes it has
+    // started (see processOwnership.ts). NULL on rows written before them.
+    ensureColumn('reviews', 'runner_pid', `ALTER TABLE reviews ADD COLUMN runner_pid INTEGER`);
+    ensureColumn('reviews', 'runner_started_at', `ALTER TABLE reviews ADD COLUMN runner_started_at TEXT`);
+    ensureColumn('reviews', 'reviewer_pgids', `ALTER TABLE reviews ADD COLUMN reviewer_pgids TEXT`);
     // After ensureColumn: on an older database the column only exists from here on.
     db.prepare(`CREATE INDEX IF NOT EXISTS idx_reviews_group ON reviews(group_key, created_at)`).run();
     syncGroupKeys();
@@ -178,6 +184,7 @@ const REVIEW_COLUMNS = [
   'requirements_met', 'requirements_total', 'blocking_count', 'report_path', 'reviewer', 'model', 'error',
   'files_changed', 'additions', 'deletions', 'created_at', 'started_at', 'finished_at',
   'source', 'working_tree', 'base_reason', 'group_key',
+  'runner_pid', 'runner_started_at', 'reviewer_pgids',
 ] as const satisfies readonly (keyof ReviewRow)[];
 
 /** Columns group_key is derived from; changing one of them re-derives it. */
@@ -207,6 +214,9 @@ export function createReview(input: CreateReviewInput): ReviewRow {
     created_at: input.created_at ?? new Date().toISOString(),
     started_at: null, finished_at: null,
     source: 'github', working_tree: 0, base_reason: null, group_key: null,
+    // The creating process enqueues the row right away, so it owns it from
+    // the first moment: no other process's recovery can see it unowned.
+    runner_pid: SELF.pid, runner_started_at: SELF.startedAt, reviewer_pgids: null,
   };
   for (const column of REVIEW_COLUMNS) {
     const value = (input as Record<string, unknown>)[column];

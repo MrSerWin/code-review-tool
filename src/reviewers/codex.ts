@@ -57,7 +57,13 @@ export const codexReviewer: ReviewerDefinition = {
   label: 'OpenAI Codex',
   defaultModel: config.codexReviewModel,
   bin: config.codexBin,
-  buildChildEnv: () => buildBaseChildEnv(),
+  // CODEX_HOME is where the model list above comes from, so the review must
+  // use the same home (login, models) or it would silently fall back to
+  // ~/.codex. Only this reviewer gets it: it is not in the shared passthrough.
+  buildChildEnv: () => {
+    const home = process.env.CODEX_HOME?.trim();
+    return buildBaseChildEnv(home ? { CODEX_HOME: home } : {});
+  },
   buildArgs(prompt: string, model: string, dir: string): string[] {
     // `-s read-only` is what makes the run read-only: the sandbox refuses every
     // write and every network call. `--ephemeral` keeps the run out of the

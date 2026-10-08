@@ -151,6 +151,17 @@ export interface ReviewDetailPayload {
   observations: Observation[];
   logs: LogLine[];
   comparison: RunComparison | null;
+  /** GitHub pages of the reviewed branch; absent from servers older than this field. */
+  links?: GithubLinks;
+}
+
+export interface GithubLinks {
+  repo: string;
+  branch: string;
+  pr: string | null;
+  compare: string | null;
+  head: string | null;
+  base: string | null;
 }
 
 /** How this run's findings differ from the previous run of the same branch. */
@@ -230,6 +241,8 @@ export interface PreviewRole {
   base: string;
   /** True when the repo had no branch of its own and its base branch is used. */
   usedBase: boolean;
+  /** GitHub page of the branch that runs; absent from servers older than this field. */
+  url?: string;
 }
 
 export interface Preview {
@@ -291,6 +304,23 @@ export interface Recipe {
   database: RecipeDatabase | null;
   readyTimeoutSec: number;
   credentialsHint: string | null;
+}
+
+/** A branch picked by hand for one recipe role; an empty or absent branch runs the role's base branch. */
+export interface PreviewRoleRequest {
+  role: string;
+  branch?: string;
+  base?: string;
+}
+
+/** `GET /api/repos/:repo/branches`: remote branches, default branch first. */
+export interface RepoBranchesPayload {
+  repo: string;
+  defaultBranch: string | null;
+  branches: string[];
+  /** Branches that matched before the server's cap. */
+  total: number;
+  truncated: boolean;
 }
 
 export interface RecipesPayload {

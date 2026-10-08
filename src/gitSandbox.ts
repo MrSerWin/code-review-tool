@@ -157,6 +157,44 @@ export async function lsRemoteHeads(repo: string): Promise<string[]> {
     .filter(Boolean);
 }
 
+/** The branches of a remote, and the one its HEAD points at when the remote says so. */
+export interface RemoteBranchList {
+  defaultBranch: string | null;
+  branches: string[];
+}
+
+/**
+ * Reads `git ls-remote --symref <url> HEAD refs/heads/*`: a `ref: refs/heads/<x>\tHEAD`
+ * line names the default branch, `<sha>\trefs/heads/<name>` lines the branches.
+ */
+export function parseLsRemoteBranches(stdout: string): RemoteBranchList {
+  let defaultBranch: string | null = null;
+  const branches: string[] = [];
+  for (const raw of stdout.split('\n')) {
+    const line = raw.trim();
+    if (!line) continue;
+    const [left = '', ref = ''] = line.split('\t');
+    if (left.startsWith('ref: ') && ref === 'HEAD') {
+      const target = left.slice('ref: '.length).trim();
+      if (target.startsWith('refs/heads/')) defaultBranch = target.slice('refs/heads/'.length) || null;
+      continue;
+    }
+    if (ref.startsWith('refs/heads/') && ref.length > 'refs/heads/'.length) branches.push(ref.slice('refs/heads/'.length));
+  }
+  return { defaultBranch, branches };
+}
+
+/** Every branch of an allowed repository plus its default branch, in one sandboxed call. */
+export async function lsRemoteBranches(repo: string): Promise<RemoteBranchList> {
+  assertAllowedRepo(repo);
+  const url = repoUrl(repo);
+  assertAllowedRemote(url);
+  const result = await runInSandbox(['git', 'ls-remote', '--symref', url, 'HEAD', 'refs/heads/*'], {
+    timeoutMs: 60_000,
+  });
+  return parseLsRemoteBranches(result.stdout);
+}
+
 const GH_PATH_SAFE = /^[A-Za-z0-9._~/?=&%-]+$/;
 
 export async function ghApi<T>(apiPath: string): Promise<T> {

@@ -103,6 +103,24 @@ test('every reviewer process is marked as a reviewer for the MCP guard', () => {
   }
 });
 
+test('CODEX_HOME reaches the codex reviewer only, and only when it is set', () => {
+  const saved = process.env.CODEX_HOME;
+  try {
+    process.env.CODEX_HOME = '/tmp/example-codex-home';
+    assert.equal(codexReviewer.buildChildEnv().CODEX_HOME, '/tmp/example-codex-home');
+    for (const name of REVIEWER_NAMES.filter((n) => n !== 'codex')) {
+      assert.equal(getReviewer(name).buildChildEnv().CODEX_HOME, undefined, `${name} must not get CODEX_HOME`);
+    }
+    process.env.CODEX_HOME = '   ';
+    assert.equal(codexReviewer.buildChildEnv().CODEX_HOME, undefined);
+    delete process.env.CODEX_HOME;
+    assert.equal(codexReviewer.buildChildEnv().CODEX_HOME, undefined);
+  } finally {
+    if (saved === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = saved;
+  }
+});
+
 // --- the Anthropic-style stream (claude, cursor, grok) -------------------
 
 test('anthropic parser logs the init event, text, and tool calls', () => {

@@ -6,16 +6,23 @@ import {
   PREVIEW_LIVE,
   PreviewStatusPill,
   RoleChips,
+  TicketLabel,
   baseRoles,
   fmtAge,
   fmtExpiry,
 } from '../components/preview';
+import RoleBranchInputs, { roleRequests } from '../components/RoleBranchInputs';
 import { Card } from '../components/ui';
 import { Link } from '../router';
-import type { DumpModeRequest, Preview, PreviewLogLine, RecipesPayload } from '../types';
+import { readStored, writeStored } from '../storage';
+import type { DumpModeRequest, Preview, PreviewLogLine, PreviewRoleRequest, RecipesPayload } from '../types';
 
 /** Lines of log shown inline when a row is expanded. */
 const TAIL = 25;
+
+/** Start from a ticket (branches resolved) or from branches picked per role. */
+type StartMode = 'ticket' | 'custom';
+const START_MODE_KEY = 'crt.previewStartMode';
 
 export default function Previews() {
   const [previews, setPreviews] = useState<Preview[]>([]);
@@ -30,6 +37,11 @@ export default function Previews() {
   const [recipeName, setRecipeName] = useState('');
   const [dumpMode, setDumpMode] = useState<DumpModeRequest>('auto');
   const [starting, setStarting] = useState(false);
+  const [startMode, setStartMode] = useState<StartMode>(() =>
+    readStored(START_MODE_KEY) === 'custom' ? 'custom' : 'ticket',
+  );
+  // Custom mode: the branch typed per role; empty runs the role's base branch.
+  const [branches, setBranches] = useState<Record<string, string>>({});
 
   const load = useCallback(async () => {
     try {
@@ -112,17 +124,22 @@ export default function Previews() {
   const disabled = recipes !== null && !recipes.enabled;
   const canStart = recipes !== null && recipes.enabled && recipes.recipes.length > 0;
 
-  const start = async (e: FormEvent): Promise<void> => {
-    e.preventDefault();
-    // A single recipe needs no picking: run it implicitly.
-    const recipe = recipeName || recipes?.recipes[0]?.name;
-    if (!canStart || !recipe || !ticket.trim()) return;
+  // A single recipe needs no picking: run it implicitly.
+  const recipe = recipes?.recipes.find((r) => r.name === recipeName) ?? recipes?.recipes[0] ?? null;
+
+  const switchStartMode = (next: StartMode): void => {
+    setStartMode(next);
+    writeStored(START_MODE_KEY, next);
+  };
+
+  const launch = async (from: { ticket?: string; roles?: PreviewRoleRequest[] }): Promise<void> => {
+    if (!canStart || !recipe) return;
     setStarting(true);
     setError(null);
     try {
       const { preview: created } = await api.createPreview({
-        ticket: ticket.trim(),
-        recipe,
+        ...from,
+        recipe: recipe.name,
         ...(dumpMode === 'auto' ? {} : { dumpMode }),
       });
       await load();
@@ -133,6 +150,46 @@ export default function Previews() {
       setStarting(false);
     }
   };
+
+  const start = async (e: FormEvent): Promise<void> => {
+    e.preventDefault();
+    if (startMode === 'custom') {
+      // Only the roles given a branch; the rest run their base branch.
+      if (recipe) await launch({ roles: roleRequests(recipe.roles, branches) });
+      return;
+    }
+    if (ticket.trim()) await launch({ ticket: ticket.trim() });
+  };
+
+  const recipeSelect = recipes && recipes.recipes.length > 1 && (
+    <select
+      className="mini-select"
+      value={recipe?.name ?? ''}
+      onChange={(e) => setRecipeName(e.target.value)}
+      aria-label="Recipe to run"
+    >
+      {recipes.recipes.map((r) => (
+        <option key={r.name} value={r.name}>
+          {r.name}
+        </option>
+      ))}
+    </select>
+  );
+
+  const dumpSelect = (
+    <select
+      className="mini-select"
+      value={dumpMode}
+      onChange={(e) => setDumpMode(e.target.value as DumpModeRequest)}
+      aria-label="Database contents for the preview"
+    >
+      {DUMP_CHOICES.map((c) => (
+        <option key={c.value} value={c.value}>
+          {c.label}
+        </option>
+      ))}
+    </select>
+  );
 
   return (
     <div className="stack">
@@ -151,49 +208,67 @@ export default function Previews() {
         </p>
       ))}
 
-      {canStart && (
-        <Card title="Start a preview">
-          <form className="launcher" onSubmit={(e) => void start(e)}>
-            <input
-              className="launcher-input"
-              placeholder="ABC-123, PR URL, or repo#branch"
-              value={ticket}
-              spellCheck={false}
-              onChange={(e) => setTicket(e.target.value)}
-            />
-            {recipes.recipes.length > 1 && (
-              <select
-                className="mini-select"
-                value={recipeName || recipes.recipes[0].name}
-                onChange={(e) => setRecipeName(e.target.value)}
-                aria-label="Recipe to run"
-              >
-                {recipes.recipes.map((r) => (
-                  <option key={r.name} value={r.name}>
-                    {r.name}
-                  </option>
-                ))}
-              </select>
-            )}
-            <select
-              className="mini-select"
-              value={dumpMode}
-              onChange={(e) => setDumpMode(e.target.value as DumpModeRequest)}
-              aria-label="Database contents for the preview"
-            >
-              {DUMP_CHOICES.map((c) => (
-                <option key={c.value} value={c.value}>
-                  {c.label}
-                </option>
+      {canStart && recipe && (
+        <Card
+          title="Start a preview"
+          actions={
+            <div className="mode-switch" role="group" aria-label="Start the preview from">
+              {(['ticket', 'custom'] as const).map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  className={`btn btn-sm${startMode === m ? ' primary' : ' ghost'}`}
+                  aria-pressed={startMode === m}
+                  onClick={() => switchStartMode(m)}
+                >
+                  {m === 'ticket' ? 'From ticket' : 'Custom branches'}
+                </button>
               ))}
-            </select>
-            <button className="btn primary" type="submit" disabled={starting || !ticket.trim()}>
-              {starting ? 'Starting…' : 'Start preview'}
-            </button>
-          </form>
-          <p className="muted">
-            Branches are resolved from the ticket. A repo without a branch of its own runs its base branch.
-          </p>
+            </div>
+          }
+        >
+          {startMode === 'ticket' ? (
+            <>
+              <form className="launcher" onSubmit={(e) => void start(e)}>
+                <input
+                  className="launcher-input"
+                  placeholder="ABC-123, PR URL, or repo#branch"
+                  value={ticket}
+                  spellCheck={false}
+                  onChange={(e) => setTicket(e.target.value)}
+                />
+                {recipeSelect}
+                {dumpSelect}
+                <button className="btn primary" type="submit" disabled={starting || !ticket.trim()}>
+                  {starting ? 'Starting…' : 'Start preview'}
+                </button>
+              </form>
+              <p className="muted">
+                Branches are resolved from the ticket. A repo without a branch of its own runs its base branch.
+              </p>
+            </>
+          ) : (
+            <form className="custom-launch" onSubmit={(e) => void start(e)}>
+              <RoleBranchInputs
+                roles={recipe.roles}
+                values={branches}
+                onChange={(role, value) => setBranches((prev) => ({ ...prev, [role]: value }))}
+                disabled={starting}
+              />
+              <div className="custom-launch-foot">
+                <p className="muted custom-launch-hint">
+                  Pick a branch for each repo, from any ticket. Leave one empty to run its base branch.
+                </p>
+                <div className="custom-launch-actions">
+                  {recipeSelect}
+                  {dumpSelect}
+                  <button className="btn primary" type="submit" disabled={starting}>
+                    {starting ? 'Starting…' : 'Start preview'}
+                  </button>
+                </div>
+              </div>
+            </form>
+          )}
         </Card>
       )}
 
@@ -204,18 +279,18 @@ export default function Previews() {
           </p>
         ) : (
           <div className="table-wrap">
-            <table className="grid">
+            <table className="grid previews-table">
               <thead>
                 <tr>
                   <th>Recipe</th>
                   <th>Ticket</th>
-                  <th>Branches</th>
+                  <th className="col-branches">Branches</th>
                   <th>Status</th>
                   <th>URL</th>
                   <th>Data</th>
                   <th>Age</th>
                   <th>Expires</th>
-                  <th />
+                  <th className="col-actions" aria-label="Actions" />
                 </tr>
               </thead>
               <tbody>
@@ -229,29 +304,22 @@ export default function Previews() {
                         <span className="muted mono">#{p.id}</span>
                       </td>
                       <td>
-                        {p.ticket_key ? (
-                          <Link to={`/ticket/${p.ticket_key}`} className="mono">
-                            {p.ticket_key}
-                          </Link>
-                        ) : (
-                          <span className="muted">—</span>
-                        )}
+                        {p.ticket_key ? <TicketLabel ticketKey={p.ticket_key} /> : <span className="muted">—</span>}
                         {p.review_id !== null && (
-                          <>
-                            {' '}
-                            <Link to={`/review/${p.review_id}`} className="mono muted">
-                              review
-                            </Link>
-                          </>
+                          <Link to={`/review/${p.review_id}`} className="mono muted cell-sub">
+                            review #{p.review_id}
+                          </Link>
                         )}
                       </td>
-                      <td>
-                        <RoleChips roles={p.roles} />
-                        {bases.length > 0 && (
-                          <p className="role-warning">
-                            {bases.map((r) => r.role).join(', ')} on base branch, not under review
-                          </p>
-                        )}
+                      <td className="col-branches">
+                        <div className="role-cell">
+                          <RoleChips roles={p.roles} />
+                          {bases.length > 0 && (
+                            <p className="role-warning">
+                              {bases.map((r) => r.role).join(', ')} on base branch, not under review
+                            </p>
+                          )}
+                        </div>
                       </td>
                       <td>
                         <button
@@ -271,7 +339,7 @@ export default function Previews() {
                       </td>
                       <td>
                         {p.status === 'ready' && p.url ? (
-                          <a className="mono" href={p.url} target="_blank" rel="noreferrer">
+                          <a className="mono nowrap" href={p.url} target="_blank" rel="noreferrer">
                             {p.url.replace(/^https?:\/\//, '')} ↗
                           </a>
                         ) : (
@@ -284,25 +352,27 @@ export default function Previews() {
                       </td>
                       <td className="muted nowrap">{fmtAge(p.created_at, now)}</td>
                       <td className="muted nowrap">{fmtExpiry(p, now)}</td>
-                      <td className="row-actions">
-                        {PREVIEW_LIVE.has(p.status) && (
+                      <td className="col-actions">
+                        <div className="row-actions">
+                          {PREVIEW_LIVE.has(p.status) && (
+                            <button
+                              className="btn ghost btn-sm"
+                              type="button"
+                              onClick={() => void stop(p)}
+                              disabled={busy === p.id}
+                            >
+                              Stop
+                            </button>
+                          )}
                           <button
-                            className="btn ghost"
+                            className="btn danger btn-sm"
                             type="button"
-                            onClick={() => void stop(p)}
+                            onClick={() => void remove(p)}
                             disabled={busy === p.id}
                           >
-                            Stop
+                            Delete
                           </button>
-                        )}
-                        <button
-                          className="btn danger"
-                          type="button"
-                          onClick={() => void remove(p)}
-                          disabled={busy === p.id}
-                        >
-                          Delete
-                        </button>
+                        </div>
                       </td>
                     </tr>,
                     open ? (

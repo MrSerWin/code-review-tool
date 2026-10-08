@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { config } from './config.js';
+import { killProcessGroups, killProcessGroupsNow, type RecordedGroup } from './processOwnership.js';
 import { getReviewer } from './reviewers/index.js';
 import { parseAnthropicStreamLine } from './reviewers/anthropicStream.js';
 import type { ReviewerDefinition } from './reviewers/types.js';
@@ -33,6 +34,11 @@ export interface RunReviewOptions {
   reviewer?: string;
   model?: string;
   timeoutMs?: number;
+  /**
+   * Called with this review's live reviewer processes whenever one starts or
+   * exits, so the caller can persist them for orphan cleanup after a crash.
+   */
+  onProcessGroups?: (groups: RecordedGroup[]) => void;
 }
 
 const requirementSchema = z.object({
@@ -248,12 +254,84 @@ export interface LensResult {
   error: string | null;
 }
 
-interface PassOptions {
+export interface PassOptions {
   dir: string;
   reviewer: ReviewerDefinition;
   model: string;
   timeoutMs: number;
   signal: AbortSignal | undefined;
+  /** This review's live reviewer processes; see `RunReviewOptions.onProcessGroups`. */
+  groups?: ReviewGroupTracker;
+}
+
+/** The reviewer processes of one review, reported on every change. */
+export class ReviewGroupTracker {
+  private readonly live = new Map<number, RecordedGroup>();
+
+  constructor(private readonly onChange?: (groups: RecordedGroup[]) => void) {}
+
+  add(group: RecordedGroup): void {
+    this.live.set(group.pgid, group);
+    this.notify();
+  }
+
+  remove(pgid: number): void {
+    if (this.live.delete(pgid)) this.notify();
+  }
+
+  private notify(): void {
+    try {
+      this.onChange?.([...this.live.values()]);
+    } catch {
+      // Bookkeeping must never break a review.
+    }
+  }
+}
+
+// --- every reviewer process of this process ------------------------------
+
+/**
+ * Process groups of the reviewer CLIs this process started and has not seen
+ * exit. Each CLI is spawned `detached`, so it leads its own group: a group
+ * kill reaches every helper it started, and a signal sent to this process
+ * (Ctrl+C, launchd) never reaches it. Hence the explicit cleanup below.
+ */
+const liveGroups = new Set<number>();
+let stopping = false;
+let exitHookInstalled = false;
+
+/** The live reviewer process groups; for shutdown and tests. */
+export function liveReviewerGroups(): number[] {
+  return [...liveGroups];
+}
+
+/**
+ * Last resort for any exit path that skipped `stopAllReviewers` (an uncaught
+ * error, a plain `process.exit`): an `exit` handler cannot wait, so whatever
+ * is left gets SIGKILL. `beforeExit` would be useless here: it only fires
+ * once nothing keeps the event loop alive, and a live child does.
+ */
+function ensureExitHook(): void {
+  if (exitHookInstalled) return;
+  exitHookInstalled = true;
+  process.on('exit', () => killProcessGroupsNow(liveGroups));
+}
+
+/**
+ * Shutdown: refuse new reviewer processes, SIGTERM every live one, and SIGKILL
+ * the ones still running after `graceMs`. Pending passes then fail on their
+ * own; the caller decides what the rows say. Resolves once every group got
+ * its signal.
+ */
+export async function stopAllReviewers(graceMs = 3_000): Promise<number[]> {
+  stopping = true;
+  return killProcessGroups([...liveGroups], { graceMs });
+}
+
+/** Shutdown when there is no time to wait (a second Ctrl+C): SIGKILL everything now. */
+export function killAllReviewersNow(): void {
+  stopping = true;
+  killProcessGroupsNow(liveGroups);
 }
 
 /** Run one review pass and parse its JSON block, retrying once. */
@@ -354,6 +432,7 @@ export async function runReview(
     model,
     timeoutMs: opts.timeoutMs ?? config.REVIEW_TIMEOUT_MS,
     signal: opts.signal,
+    groups: new ReviewGroupTracker(opts.onProcessGroups),
   };
 
   onLog(
@@ -416,7 +495,8 @@ function normalize(output: ReviewOutput): ReviewOutput {
   return { ...output, can_merge: canMerge, verdict };
 }
 
-function spawnReviewer(
+/** One reviewer CLI process: spawn it, stream its output, return its answer. Exported for tests. */
+export function spawnReviewer(
   prompt: string,
   opts: PassOptions,
   onLog: OnLog,
@@ -427,6 +507,10 @@ function spawnReviewer(
       reject(new Error('Review cancelled'));
       return;
     }
+    if (stopping) {
+      reject(new Error('Shutting down: no new reviewer process is started'));
+      return;
+    }
     const args = reviewer.buildArgs(prompt, model, dir);
     const child = spawn(reviewer.bin, args, {
       cwd: dir,
@@ -434,6 +518,20 @@ function spawnReviewer(
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: true, // own process group, so we can kill the whole tree
     });
+
+    const pgid = child.pid;
+    if (pgid !== undefined) {
+      ensureExitHook();
+      liveGroups.add(pgid);
+      opts.groups?.add({ pgid, bin: path.basename(reviewer.bin), spawnedAt: new Date().toISOString() });
+    }
+    let untracked = false;
+    const untrack = () => {
+      if (untracked || pgid === undefined) return;
+      untracked = true;
+      liveGroups.delete(pgid);
+      opts.groups?.remove(pgid);
+    };
 
     let settled = false;
     let stdoutBuf = '';
@@ -443,6 +541,9 @@ function spawnReviewer(
 
     const killTree = () => {
       if (child.pid === undefined) return;
+      // During shutdown stopAllReviewers owns the kill: SIGTERM first, then
+      // SIGKILL after a grace period.
+      if (stopping) return;
       try {
         process.kill(-child.pid, 'SIGKILL');
       } catch {
@@ -494,6 +595,9 @@ function spawnReviewer(
     child.on('error', (err) => finish(new Error(`Failed to start ${reviewer.bin}: ${err.message}`)));
 
     child.on('close', (code) => {
+      // `close` comes once every holder of the pipes is gone: normally the
+      // whole group, helpers included.
+      untrack();
       // Flush a trailing line without a newline.
       const tail = stdoutBuf.trim();
       if (tail) {

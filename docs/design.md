@@ -1,59 +1,80 @@
 # Design
 
 How the tool is put together, for anyone reading or extending the code. The
-user-facing setup lives in [../README.md](../README.md).
+user-facing setup — environment variables, accepted inputs, the CLI, the HTTP
+API, the MCP tools, and previews — lives in [../README.md](../README.md); this
+document links there instead of repeating it.
 
 ## What it does
 
 Input is a ticket key (`ABC-123`, optionally prefixed with its tracker as in
-`jira:ABC-123`), a GitHub pull request URL, a tree URL, or `repo#branch` —
-optionally with requirements pasted by hand instead of a ticket. The tool
-resolves that into one or more `repo` + `branch` targets, fetches each one inside a Docker sandbox, runs a read-only Claude Code
-review against the ticket requirements — five independent lens passes plus a
-synthesis pass — stores the run in SQLite, and writes a Markdown report.
+`jira:ABC-123`), a GitHub pull request, a tree URL, `repo#branch`, or
+`local:repo#branch` for a branch of a local clone — optionally with
+requirements pasted by hand instead of a ticket (every form:
+[README › Inputs](../README.md#inputs)). The tool resolves that into one or
+more `repo` + `branch` targets, fetches each one inside a Docker sandbox, runs
+a read-only review with one of four agent CLIs (Claude Code, Cursor Agent,
+OpenAI Codex, Grok) against the ticket requirements — five independent lens
+passes plus a synthesis pass — stores the run in SQLite, and writes a Markdown
+report.
 
 Two rules shape everything else:
 
 - The reviewed code is never modified, and nothing is ever pushed or posted back
   to GitHub or any ticket tracker.
 - Only `https://github.com/$GITHUB_ORG/<repo>` for a repo in `ALLOWED_REPOS` may
-  be fetched. Anything else is rejected.
+  be fetched, and only `<LOCAL_REPOS_DIR>/<repo>` (or a `LOCAL_REPOS` entry) for
+  such a repo may be read locally. Anything else is rejected.
 
 ## Layout
 
 ```
 package.json  tsconfig.json  .env.example  LICENSE  README.md
 docker/Dockerfile.git  docker/entrypoint.sh
+docs/design.md
 src/
-  config.ts  types.ts  db.ts  logger.ts  events.ts
-  prLinks.ts  resolver.ts  gitSandbox.ts  reviewRunner.ts  reportWriter.ts
+  config.ts  types.ts  db.ts  logger.ts  events.ts  logSanitize.ts  gitNames.ts
+  resolver.ts  prLinks.ts  localRepos.ts  gitSandbox.ts  remoteBranches.ts
+  reviewRunner.ts  reportWriter.ts  findingCompare.ts  groupKey.ts  githubLinks.ts
+  queue.ts  processOwnership.ts  cli.ts  server.ts
+  reviewers/types.ts  reviewers/index.ts  reviewers/shared.ts
+  reviewers/claude.ts  reviewers/cursor.ts  reviewers/codex.ts  reviewers/grok.ts
+  reviewers/anthropicStream.ts  reviewers/codexStream.ts
   trackers/index.ts  trackers/types.ts  trackers/adf.ts  trackers/html.ts
   trackers/linear.ts  trackers/jira.ts  trackers/github.ts
   trackers/azure.ts  trackers/youtrack.ts
-  queue.ts  cli.ts  server.ts
-  preview/recipes.ts  preview/ports.ts  preview/database.ts
-  preview/steps.ts  preview/engine.ts  preview/store.ts  preview/events.ts
   routes/reviews.ts  routes/tickets.ts  routes/repos.ts  routes/previews.ts
+  preview/recipes.ts  preview/roles.ts  preview/ports.ts  preview/database.ts
+  preview/steps.ts  preview/engine.ts  preview/store.ts  preview/events.ts
+  mcp.ts  mcp/client.ts  mcp/server.ts  mcp/format.ts
   prompts/common-preamble.md  prompts/lens-common.md
   prompts/lens-correctness.md  prompts/lens-security.md
   prompts/lens-tests.md  prompts/lens-contracts.md
   prompts/lens-regressions.md  prompts/synthesis.md
+  *.test.ts  testEnv.ts   # node:test suites (npm test)
 recipes.example/   # one documented, product-neutral preview recipe
 recipes/           # gitignored: the real preview recipes
 web/     # vite + react + ts, builds to web/dist
 data/    # gitignored: review.db, checkouts/, reports/, previews/
 ```
 
-Node 20, TypeScript, ESM. `tsx` for development, `tsc` for the build. Runtime
-dependencies: `fastify`, `@fastify/static`, `better-sqlite3`, `zod`, `dotenv`.
-The web app uses `react`, `react-dom`, and `vite`.
+Node 20, TypeScript, ESM. `tsx` for development, `tsc` for the build
+(`npm run build` also copies `src/prompts` to `dist/prompts` and builds the
+web app). Runtime dependencies: `fastify`, `@fastify/static`,
+`better-sqlite3`, `zod`, `dotenv`, and `@modelcontextprotocol/sdk` for the MCP
+server. The web app uses `react`,
+`react-dom`, and `vite`.
 
 ## Configuration (`src/config.ts`)
 
-Environment is loaded from `.env` and validated with zod into a frozen `config`
-object. Missing or malformed values throw at import time with the offending keys
-listed, so the process never starts half-configured. The full variable table is
-in the README.
+Environment is loaded from `<repo>/.env` and validated with zod into a frozen
+`config` object. Missing or malformed values throw at import time with the
+offending keys listed, so the process never starts half-configured. Only
+`REVIEW_GH_TOKEN`, `GITHUB_ORG`, and `ALLOWED_REPOS` are required; every default
+lives in the schema, and `.env.example` only lists them commented out. The full
+variable table, including the few variables read elsewhere (`LOG_LEVEL`,
+`CODEX_HOME`, `CODE_REVIEW_API_URL`), is in
+[README › Environment](../README.md#environment).
 
 The same module owns the allowlist:
 
@@ -66,23 +87,30 @@ The same module owns the allowlist:
 - `repoUrl(repo)` — builds the clone URL and re-checks it through
   `assertAllowedRemote` before returning it.
 
+`config.ts` imports only the reviewer names (`reviewers/types.ts`), never the
+reviewer registry, because the registry imports `config.ts`.
+
 ### Preview configuration
 
-`PREVIEW_ENABLED` (default false) gates the whole feature. `PREVIEW_RECIPES_DIR`
-(default `<repo>/recipes`), `PREVIEW_PORT_RANGE` (default `21000-21999`),
-`PREVIEW_TTL_MINUTES` (default 120) and `PREVIEW_MAX_CONCURRENT` (default 3)
-follow the same rule as everything else: the default lives in `src/config.ts`
-and `.env.example` only lists it commented out.
+`PREVIEW_ENABLED` (`1`/`true`/`yes`/`on`, default off) gates the whole feature.
+`PREVIEW_RECIPES_DIR` (default `<repo>/recipes`), `PREVIEW_PORT_RANGE` (default
+`21000-21999`, validated as an ascending range inside 1024–65535),
+`PREVIEW_TTL_MINUTES` (default 120, counted from the moment a preview is ready)
+and `PREVIEW_MAX_CONCURRENT` (default 3, the number of previews being started
+at once — a ready preview no longer holds a slot) follow the same rule as
+everything else.
 
 ## Isolation model
 
-This is the part worth understanding before changing anything.
+This is the part worth understanding before changing anything. The
+user-facing summary is in [README › Isolation model](../README.md#isolation-model).
 
 **Authenticated git never runs on the host.** `runInSandbox()` shells out to
 `docker run --rm` with the sandbox image. The token is referenced by name in the
 docker argv (`-e GH_TOKEN`) and supplied through the child process environment,
 so it never appears in the host process list and is never written to disk on the
-host. The only host path mounted is the checkout directory, at `/work`. The
+host. The only host path mounted read-write is the checkout root, at `/work`; a
+local clone is added as a read-only bind mount at `/src` when one is needed. The
 container runs with `--user <host uid>:<host gid>` so the checkout stays readable
 outside. Networking stays on the default bridge because fetching needs the
 internet.
@@ -93,7 +121,8 @@ references a URL, an scp-style remote, or a `github.com` path outside
 `github.com/$GITHUB_ORG`. It then writes an isolated `$HOME/.gitconfig` with a
 throwaway identity, `safe.directory=*`, and a credential helper that echoes
 `$GH_TOKEN`. This is defence in depth: the Node side already validates, and the
-container validates again with no trust in its caller.
+container validates again with no trust in its caller. A local clone is
+therefore cloned from the plain path `/src`, never from a `file://` URL.
 
 **The checkout is severed from its origin.** The clone deliberately avoids
 `--filter`: a partial clone leaves blobs on a promisor remote, and the remote is
@@ -108,24 +137,45 @@ The scrub is section-aware on purpose: filtering line by line would orphan `url`
 and `fetch` entries into the preceding section. A remaining remote is a hard
 error.
 
-**The reviewer is read-only and token-free.** `buildClaudeArgs()` allows only
-`Read`, `Grep`, `Glob`, and read-only `Bash(git diff|log|show|status:*)`, and
-explicitly disallows `Edit`, `Write`, `MultiEdit`, `NotebookEdit`, `WebFetch`,
-`WebSearch`, and `Task`. `buildChildEnv()` builds the child environment from an
-allowlist (`PATH`, `HOME`, `SHELL`, `LANG`, `LC_ALL`, `TERM`, `USER`, `LOGNAME`,
-`TMPDIR`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`) and deletes `GH_TOKEN`,
-`GITHUB_TOKEN`, `REVIEW_GH_TOKEN`, and every tracker token (`LINEAR_API_KEY`,
-`JIRA_API_TOKEN`, `AZURE_PAT`, `YOUTRACK_TOKEN`). `USER` is load-bearing
-on macOS: without it the Claude CLI cannot read its credentials from the Keychain
-and every review fails with "Not logged in". None of the passthrough variables
-carry a secret. After the run, `assertPristine()` requires `git status
---porcelain` to be empty; a modified checkout invalidates the review.
+**A local clone is only read.** `src/localRepos.ts` runs a fixed set of
+read-only git commands in the clone through `execFile` with
+`GIT_OPTIONAL_LOCKS=0` and `core.fsmonitor=false`. The review checkout is made
+in the sandbox with `git clone --no-local` from the read-only mount (a real
+object copy), and the base branch is fetched into that copy — from GitHub when
+it is the default branch, from the mount otherwise. Uncommitted changes, when
+asked for, are captured on the host (`git diff HEAD --binary` plus the
+untracked, non-ignored files, with size caps) and committed as one snapshot
+commit inside the checkout, never in the clone.
 
-**Names are inert.** Repo and branch names must match `[A-Za-z0-9._/-]+` and
-must not contain `..`. Branch names are sanitised for filesystem paths by
-replacing `/` with `__`. Everything is spawned with an argv array via
-`execFile`, never through a shell string. GitHub API paths are checked against a
-narrow character class and rejected if they contain `..` or a scheme.
+**The reviewer is read-only and token-free.** Each reviewer definition in
+`src/reviewers/` builds its own argv (`buildArgs()`) and child environment
+(`buildChildEnv()`); the exact read-only and MCP-disabling flags per CLI are in
+[README › Reviewers](../README.md#reviewers). Every child environment starts
+from `buildBaseChildEnv()` in `reviewers/shared.ts`: `buildSanitizedEnv()`,
+an allowlist (`PATH`, `HOME`, `SHELL`, `LANG`, `LC_ALL`, `TERM`, `USER`,
+`LOGNAME`, `TMPDIR`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`) from which
+`GH_TOKEN`, `GITHUB_TOKEN`, `REVIEW_GH_TOKEN`, and every tracker token
+(`LINEAR_API_KEY`, `JIRA_API_TOKEN`, `AZURE_PAT`, `YOUTRACK_TOKEN`) are
+deleted, plus `CODE_REVIEW_TOOL_REVIEWER=1`. Cursor adds `CURSOR_API_KEY` when
+it is configured; Codex adds `CODEX_HOME` when it is set, so the review runs
+against the same Codex home the model list is read from; Grok adds
+`GROK_CLAUDE_MCPS_ENABLED`, `GROK_CURSOR_MCPS_ENABLED`, and
+`GROK_MANAGED_MCPS_ENABLED`, all `false`. Preview steps start from
+`buildSanitizedEnv()` alone: the same allowlist and stripping, without the
+reviewer marker. `USER` is load-bearing on macOS:
+without it the CLIs cannot read their credentials from the Keychain and every
+review fails with "Not logged in". None of the passthrough variables carry a
+secret. After the run, `assertPristine()` requires `git status --porcelain` to
+be empty; a modified checkout invalidates the review.
+
+**Names are inert.** Branch names must match `[A-Za-z0-9._/-]+`, must not
+contain `..`, and must not start with `-` (`gitNames.ts`); repository names must
+be on the allowlist, and for local clones also match `[A-Za-z0-9._-]+`. Branch
+names are sanitised for filesystem paths by replacing `/` with `__`. Everything
+is spawned with an argv array via `execFile` or `spawn`, never through a shell
+string (recipe steps are the one deliberate exception, see below). GitHub API
+paths are checked against a narrow character class and rejected if they contain
+`..` or a scheme.
 
 **The server is local only.** Fastify binds to `127.0.0.1`. There is no auth
 because there is no remote reachability.
@@ -151,7 +201,7 @@ produced it, so nothing downstream knows which tracker a review came from.
 |---|---|---|
 | `linear` | `LINEAR_API_KEY` | one GraphQL POST to `api.linear.app`; description, state, `branchName`, attachments, comments |
 | `jira` | `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN` | REST v3 `issue/{key}?fields=summary,description,status,comment` with HTTP Basic, plus the development panel |
-| `github` | none beyond `GITHUB_ORG`, `REVIEW_GH_TOKEN` | `ghApi` inside the sandbox: `repos/{owner}/{repo}/issues/{n}` and its `/comments` |
+| `github` | none beyond `GITHUB_ORG`, `REVIEW_GH_TOKEN` | `ghApi` inside the sandbox: `repos/{owner}/{repo}/issues/{n}` and its `/comments`; only the configured organization |
 | `azure` | `AZURE_ORG_URL`, `AZURE_PROJECT`, `AZURE_PAT` | `wit/workitems/{id}?$expand=all` with PAT Basic auth (empty user), plus `/comments` |
 | `youtrack` | `YOUTRACK_BASE_URL`, `YOUTRACK_TOKEN` | `api/issues/{id}?fields=...` with a bearer token |
 
@@ -184,10 +234,30 @@ the requirements pasted instead.
 
 ## Resolver (`src/resolver.ts`)
 
-`resolveTargets(input, { requirementsText? })` returns `{ ticket, targets }`.
+`resolveTargets(input, { requirementsText?, includeWorkingTree?, baseBranch? })`
+returns `{ ticket, targets }`. The input is first normalized by
+`normalizeInput()`: trimmed, a surrounding `<…>` removed, and `http://` or
+`www.github.com` rewritten to `https://github.com/`. Then, in this order:
 
-1. **Ticket key** - anything the registry claims. The ticket is fetched through
-   its provider, then targets are collected from, in order:
+1. **`local:<repo>[#<branch>]`** — `localRepos.ts` validates the clone and the
+   branch and picks the base: an explicit `baseBranch`, else the detected parent
+   (`detectParentBranch()`: the closest branch whose tip the reviewed branch
+   contains, else a local branch it forked from that has moved on, else the
+   default branch). `includeWorkingTree` and `baseBranch` are refused for every
+   other input.
+2. **A pull request** — `https://github.com/<org>/<repo>/pull/<n>` (with any
+   trailing path, query, or fragment) or `<org>/<repo>#<n>`, both through
+   `parsePullRequestRef()`. This runs before the ticket lookup on purpose: the
+   GitHub tracker also accepts PR references, and as a ticket a PR would fan
+   out to every PR it links to and every branch containing its number. A PR is
+   exactly one target, its head against its base. Its ticket is the pasted
+   requirements, else the tracker ticket named by its branch, else the PR
+   itself read through the GitHub tracker (with its links dropped). An
+   `<org>/<repo>#<n>` that is not a PR falls through to step 3 as a GitHub
+   issue; a PR URL whose lookup fails is an error.
+3. **Ticket key** — anything the registry claims (skipped when requirements
+   were pasted). The ticket is fetched through its provider, then targets are
+   collected from, in order:
    - pull request links, asking GitHub for each PR's head and base branch;
    - a remote branch scan: `git ls-remote --heads` on every allowlisted repo,
      keeping branches whose name matches the ticket key, plus an exact match on
@@ -198,30 +268,53 @@ the requirements pasted instead.
    trailing number for GitHub issue and Azure work item keys, and otherwise
    matches the key literally. Targets are deduplicated by `repo` + `branch`.
    The base branch falls back to the repository's default branch, cached per
-   process.
-2. **`https://github.com/<org>/<repo>/pull/<n>`** - a single target from the PR's
-   head and base.
-3. **`https://github.com/<org>/<repo>/tree/<branch>`** or **`<repo>#<branch>`** -
-   a single target; the ticket is looked up from the branch name if it contains a
-   ticket-key token and some tracker claims it.
+   process. A ticket that resolves to no branch is an error naming what was
+   searched.
+4. **`https://github.com/<org>/<repo>/tree/<branch>`** or **`<repo>#<branch>`** —
+   a single target against the default branch; the ticket is looked up from
+   the branch name if it contains a ticket-key token and some tracker claims
+   it.
 
 `requirementsText` replaces the tracker entirely: the ticket becomes a manual
 `TicketInfo` (`provider: 'manual'`, empty `key`, title from the first line), no
 lookup happens, and the input only has to name a branch. The empty key is what
-stores `ticket_key` as `NULL`.
+stores `ticket_key` as `NULL`. A run with neither ticket nor pasted text tells
+the reviewer to infer the requirements from the branch name, the commit
+messages, and the diff.
 
-`src/prLinks.ts` is the provider-agnostic half of the old Linear module:
-`parsePrUrls()` extracts `{ repo, prNumber }` from pull request URLs and
-silently drops anything outside the organization or the allowlist, and
-`collectPrUrls()` finds pull request links in the free text of trackers that
-have no attachment list.
+`src/prLinks.ts` extracts `{ repo, prNumber }` from pull request URLs
+(`parsePrUrls()`, dropping anything outside the organization or the allowlist)
+and finds pull request links in the free text of trackers that have no
+attachment list (`collectPrUrls()`).
 
-Anything else throws. If a ticket resolves to no branches, the error names what
-was searched.
+Anything else throws.
+
+## Reviewers (`src/reviewers/`)
+
+A reviewer is a `ReviewerDefinition`: a name (`claude`, `cursor`, `codex`,
+`grok`), a label, a binary, a default model, `buildArgs(prompt, model, dir)`,
+`buildChildEnv()`, `parseStreamLine()`, `listModels()`, `isAvailable()`, and
+`describeFailure()` for a human hint on known failures (mostly "not logged
+in"). `reviewers/index.ts` is the registry; `DEFAULT_REVIEWER` picks the
+default.
+
+- **Availability** is a walk of `PATH` (no shell), cached per process. An
+  unavailable reviewer is refused before a review row is created.
+- **Models** come from `cursor-agent --list-models`, `grok models`, Codex's
+  `$CODEX_HOME/models_cache.json` (entries with `visibility: "list"`, ordered by
+  `priority`), or a static alias list for Claude. Helper calls time out after
+  20 s, never throw, and fall back to a short built-in list; results are
+  cached for ten minutes.
+- **Streams.** Claude Code, Cursor Agent, and the Grok CLI share the
+  Anthropic-style `stream-json` events (`anthropicStream.ts`); Codex speaks its
+  own JSONL (`codexStream.ts`), where the answer is the last `agent_message`.
+- **Re-runs.** `resolveRerunChoice()` keeps the previous reviewer unless one is
+  named, and keeps the previous model only while the reviewer stays the same: a
+  model id belongs to one CLI, so `opus` is never handed to Codex.
 
 ## Review runner (`src/reviewRunner.ts`)
 
-One review is six `claude -p` processes, not one.
+One review is six reviewer processes, not one.
 
 **Why.** A single pass produced zero findings on every real run. Three reasons:
 the prompt banned nitpicking, so a reviewer noticing something non-blocking had
@@ -229,8 +322,8 @@ nowhere to put it; every finding fed the merge gate, so mentioning anything
 blocked the merge; and one pass has whatever recall that one pass happens to
 have, which varied run to run.
 
-**Fan-out.** Five lenses run concurrently (`Promise.all`) against the same
-checkout, each its own process with its own mandate:
+**Fan-out.** Five lenses (`LENS_NAMES`) run concurrently (`Promise.all`)
+against the same checkout, each its own process with its own mandate:
 
 | lens | mandate |
 |---|---|
@@ -242,9 +335,11 @@ checkout, each its own process with its own mandate:
 
 A lens returns only `{ findings, observations }`. Lenses do not evaluate ticket
 requirements and do not emit a verdict: five passes deriving their own
-requirement list produce five contradictory lists. A lens that fails twice is
-recorded as failed and the review continues with the rest; if all five fail the
-review fails. A cancel aborts the whole review instead of degrading it.
+requirement list produce five contradictory lists. A lens whose pass fails — an
+answer that is still not valid JSON after one corrective retry, a crash, or a
+timeout — is recorded as failed and the review continues with the rest; if all
+five fail the review fails. A cancel aborts the whole review instead of
+degrading it.
 
 **Synthesis.** A sixth pass receives the ticket, the diff summary, and the five
 lenses' raw JSON. Their claims are candidates, not facts: it must verify each
@@ -276,36 +371,54 @@ finding-versus-observation contract, and the lens JSON shape. A lens prompt is
 is `common-preamble.md` + `synthesis.md`. `renderTemplate()` substitutes
 `{{TICKET}}`, `{{REPO}}`, `{{BRANCH}}`, `{{BASE_SHA}}`, `{{CHANGED_FILES}}`,
 `{{PREVIOUS_FINDINGS}}` and, for synthesis, `{{LENS_OUTPUTS}}`, and throws if any
-placeholder is left unresolved.
+placeholder is left unresolved. Previous findings are the blocker and major
+findings of the branch's previous finished run; the synthesis reports which of
+them are fixed.
 
-**Per process.** Every process — lens and synthesis alike — gets the same
-scrubbed environment from `buildChildEnv()` and the same read-only tool set from
-`buildClaudeArgs()`. `stream-json` output is parsed line by line; assistant text
-and tool names are forwarded to the log, prefixed with the lens name, and lens
-start and completion are logged as `lens security: started` /
-`lens security: 2 findings, 1 observation`. The final `type: "result"` message
-carries the answer. The JSON payload is extracted from the last fenced `json`
-block, falling back to the last balanced `{...}`, and validated with zod; on
-failure the pass retries once with a corrective prompt, then throws.
-`REVIEW_TIMEOUT_MS` bounds each process, and the process tree is killed on
-timeout or cancel.
+**Per process.** Every process — lens and synthesis alike — is started from the
+chosen reviewer's `buildArgs()` and `buildChildEnv()`, in its own process
+group. Its stream is parsed line by line; assistant text and tool names are
+forwarded to the log, prefixed with the lens name, and lens start and
+completion are logged as `lens security: started` /
+`lens security: 2 findings, 1 observation`. The JSON payload is extracted from
+the last fenced `json` block, falling back to the last balanced `{...}`, and
+validated with zod; on failure the pass retries once with a corrective prompt,
+then throws. `REVIEW_TIMEOUT_MS` bounds each process, and the process group is
+killed (SIGKILL) on timeout or cancel.
+
+**Process groups and shutdown.** Because every reviewer CLI leads its own
+process group, a signal sent to the server or the CLI never reaches it. The
+runner therefore tracks the live groups: a module-level set in
+`reviewRunner.ts` (added on spawn, removed on `close`), and per review the
+`reviewer_pgids` column, a JSON array of `{ pgid, bin, spawnedAt }` rewritten
+on every spawn and exit. On SIGTERM or SIGINT, `stopAllReviews()` in
+`queue.ts` fails every queued and running review of the process (the server
+writes "interrupted by shutdown", the CLI "interrupted: the CLI was stopped"),
+then `stopAllReviewers()` refuses new processes and sends SIGTERM to every live
+group, and SIGKILL to the ones still there after 3 s; a second signal sends
+SIGKILL at once. An `exit` handler SIGKILLs anything left on any other exit
+path. When the process dies without running any of this (SIGKILL, a crash),
+`reviewer_pgids` is what the next recovery uses to stop the orphans (see
+[Queue and events](#queue-and-events)).
 
 `normalize()` re-derives `can_merge` defensively (no blocker or major finding,
-no `partial` or `missing` requirement) and downgrades an `approve` verdict that
-contradicts it. Observations are deliberately absent from that computation.
+no `partial` or `missing` requirement — `not_verifiable` does not block) and
+downgrades an `approve` verdict that contradicts it to `changes_requested`.
+Observations are deliberately absent from that computation.
 
 ## Database (`src/db.ts`, better-sqlite3, `data/review.db`)
 
-Migrations run at startup from an in-code array, idempotent, with
-`PRAGMA journal_mode = WAL`.
+Migrations run at startup from an in-code array plus `ensureColumn()` calls for
+columns added later, idempotent, with `PRAGMA journal_mode = WAL` and foreign
+keys on. The effective schema:
 
 ```sql
 CREATE TABLE reviews (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  ticket_key TEXT,                -- 'ABC-123' or NULL
+  ticket_key TEXT,                -- 'ABC-123', 'my-org/my-service#12', or NULL
   ticket_title TEXT,
   ticket_url TEXT,
-  ticket_body TEXT,
+  ticket_body TEXT,               -- also holds pasted requirements
   repo TEXT NOT NULL,
   branch TEXT NOT NULL,
   base_branch TEXT NOT NULL,
@@ -321,6 +434,7 @@ CREATE TABLE reviews (
   requirements_total INTEGER,
   blocking_count INTEGER,
   report_path TEXT,               -- relative to DATA_DIR
+  reviewer TEXT,                  -- claude|cursor|codex|grok      (added)
   model TEXT,
   error TEXT,
   files_changed INTEGER,
@@ -328,10 +442,18 @@ CREATE TABLE reviews (
   deletions INTEGER,
   created_at TEXT NOT NULL,       -- ISO8601 UTC
   started_at TEXT,
-  finished_at TEXT
+  finished_at TEXT,
+  source TEXT NOT NULL DEFAULT 'github',      -- github|local      (added)
+  working_tree INTEGER NOT NULL DEFAULT 0,    -- local only         (added)
+  base_reason TEXT,               -- parent|chosen|default, local only (added)
+  group_key TEXT,                 -- see groupKey.ts               (added)
+  runner_pid INTEGER,             -- process that enqueued it      (added)
+  runner_started_at TEXT,         -- that process's start, ISO8601 (added)
+  reviewer_pgids TEXT             -- live reviewer processes, JSON (added)
 );
 CREATE INDEX idx_reviews_ticket ON reviews(ticket_key);
 CREATE INDEX idx_reviews_branch ON reviews(repo, branch);
+CREATE INDEX idx_reviews_group ON reviews(group_key, created_at);
 
 CREATE TABLE findings (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -380,7 +502,57 @@ CREATE TABLE review_logs (
   message TEXT NOT NULL
 );
 CREATE INDEX idx_logs_review ON review_logs(review_id);
+
+-- A preview outlives the review it came from: the reference is nulled, not cascaded.
+CREATE TABLE previews (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  review_id INTEGER REFERENCES reviews(id) ON DELETE SET NULL,
+  recipe TEXT NOT NULL,
+  ticket_key TEXT,
+  roles_json TEXT NOT NULL,       -- [{ role, repo, branch, base, usedBase }]
+  ports_json TEXT NOT NULL,       -- { <port id>: <host port> }
+  url TEXT,
+  db_name TEXT,
+  dump_mode TEXT,                 -- pg_dump|dump-dir|clean
+  dump_source TEXT,
+  status TEXT NOT NULL,           -- queued|preparing|starting|ready|stopping|stopped|failed|expired
+  error TEXT,
+  credentials_hint TEXT,
+  created_at TEXT NOT NULL,
+  ready_at TEXT,
+  expires_at TEXT,
+  stopped_at TEXT
+);
+CREATE INDEX idx_previews_status ON previews(status);
+CREATE INDEX idx_previews_review ON previews(review_id);
+
+CREATE TABLE preview_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  preview_id INTEGER NOT NULL REFERENCES previews(id) ON DELETE CASCADE,
+  ts TEXT NOT NULL,
+  level TEXT NOT NULL,
+  message TEXT NOT NULL
+);
+CREATE INDEX idx_preview_logs_preview ON preview_logs(preview_id);
 ```
+
+Every log line, of reviews and previews alike, goes through
+`sanitizeLogMessage()` first: ANSI escapes and C0 control characters would
+otherwise make a JSON response unparseable.
+
+### History groups (`src/groupKey.ts`)
+
+`group_key` is never taken from input; `createReview()` and `updateReview()`
+derive it with `groupKeyFor()`: the ticket key when there is one, else the
+first ticket-like token of the branch name (`feat/abc-123-x` → `ABC-123`;
+version and encoding markers, generic words with a counter, and project keys
+outside 2–10 characters are skipped, see `NOT_A_PROJECT`), else `repo#branch`.
+`syncGroupKeys()` re-derives every row at startup, so a change to the rules
+reaches old rows. `listReviewGroups()` aggregates in SQL: per group the last
+activity, run count, active count, the latest title and ticket URL, and the
+latest run of every repo/branch ("head"). The status filter is judged per
+group: `active` — any run is queued, fetching, or reviewing; `failed` — any
+head failed; `done` — nothing active or failed and at least one head is done.
 
 ## Types (`src/types.ts`)
 
@@ -388,103 +560,142 @@ CREATE INDEX idx_logs_review ON review_logs(review_id);
 (`blocker|major|minor|nit`), and `RequirementStatus`
 (`met|partial|missing|not_verifiable`) mirror the columns above. `LENS_NAMES`
 and `LensName` name the five lenses. `TicketInfo` carries `provider`: the
-tracker that produced it, or `manual`. `TicketInfo`, `ResolvedTarget`, and
+tracker that produced it, or `manual`. `TicketInfo`, `ResolvedTarget` (with
+`source`, `includeWorkingTree`, `baseReason` for local targets), and
 `CheckoutResult` are the values passed between the resolver, the sandbox, and
 the runner. `LensOutput` is what one lens returns: `findings[]` and
 `observations[]`. `ReviewOutput` is what the synthesis pass returns: `summary`,
 `requirements[]`, `findings[]`, `observations[]`, `verdict`, `can_merge`,
 `conclusion`. An `Observation` is `{ file, line, note, rationale }`.
+`ReviewGroup` is one row of the grouped history.
 
 ## Queue and events
 
 `src/queue.ts` runs reviews through an in-process worker pool of
 `REVIEW_CONCURRENCY` (default 2) workers; the lens fan-out inside one review is
 always 5 wide plus a synthesis pass, so the process ceiling is
-`REVIEW_CONCURRENCY * 6`. On server
-start any row still in `queued`, `fetching`, or `reviewing` is marked `failed`
-with `error = 'interrupted by restart'`. `src/events.ts` is a process-level
-`EventEmitter`; each SSE message is
-`data: {"type":"log"|"status"|"done","reviewId":n,...}\n\n`, with a heartbeat
-comment every 15 seconds.
+`REVIEW_CONCURRENCY * 6`. The queue lives in memory, so nothing resumes after a
+restart. A checkout is removed after a successful review and kept after a
+failure for inspection.
+
+**Ownership and recovery.** The server and the CLI share the database, and
+each can only ever finish the rows in its own memory. So every row records its
+owner: `createReview()` and `enqueueReview()` write `runner_pid` and
+`runner_started_at` (`SELF` in `processOwnership.ts`, the start time fixed at
+module load). `recoverInterrupted(caller)` runs once at server start
+(`caller = 'server'`) and once when the CLI starts (`'cli'`), before anything
+is enqueued, and `shouldRecover()` decides per `queued`, `fetching`, or
+`reviewing` row:
+
+| owner recorded on the row | server | CLI |
+|---|---|---|
+| none (written before ownership existed) | fail | leave |
+| this process (same pid and start time) | leave | leave |
+| this pid, another start time (an earlier process) | fail | fail |
+| another pid that exists (`kill(pid, 0)` succeeds or EPERM) | leave | leave |
+| another pid that does not exist (ESRCH) | fail | fail |
+
+A failed row gets `status = 'failed'`, `error = 'interrupted by restart'`, and
+a log line naming the gone pid. A reused pid can keep a dead owner's row
+active; cancelling it clears it. For every row it fails, recovery also stops
+the reviewer processes in its `reviewer_pgids` that are still running
+(SIGTERM, SIGKILL after 2 s), but only those that pass `isOrphanReviewer()`:
+`ps` still shows the pid as the leader of that group, its command line still
+contains the recorded binary's name, and its start time is within 10 s of the
+recorded spawn time. Anything else may be an unrelated process that got the
+pid, and is left alone. `src/events.ts` is a process-level `EventEmitter`;
+each SSE message is `data: {"type":"log"|"status"|"done","reviewId":n,...}\n\n`,
+with a heartbeat comment every 15 seconds.
 
 ## HTTP API
 
-Fastify on `PORT`, serving `web/dist` statically at `/` with an SPA fallback, and
-the API under `/api`. Handlers validate input with zod and return errors as
-`{ error: string }` with a proper status code.
+Fastify on `127.0.0.1:PORT`, serving `web/dist` statically at `/` with an SPA
+fallback, and the API under `/api` (routes in `src/server.ts` and
+`src/routes/*.ts`). Handlers validate input with zod and return errors as
+`{ error: string }` with a proper status code. Unknown `/api/` paths are a JSON
+404; other unknown GET paths serve `index.html`. Every endpoint is listed in
+[README › HTTP API](../README.md#http-api).
 
-| method | path | body / query | returns |
-|---|---|---|---|
-| GET | `/api/health` | | `{ ok, version, dockerImage, trackers, repos }` - tracker names only |
-| GET | `/api/repos` | | `{ repos: string[] }` |
-| GET | `/api/tickets/:key` | | `{ ticket, targets }` — preview before running |
-| POST | `/api/reviews` | `{ input, targets?, model?, requirementsText? }` | `{ reviews }` — one row per target, status `queued` |
-| GET | `/api/reviews` | `?ticket=&repo=&branch=&group=&q=&limit=&offset=` | `{ reviews, total }`, newest first |
-| GET | `/api/review-groups` | `?q=&status=active\|failed\|done&limit=&offset=` | `{ groups, total }`: one group per `group_key` (ticket key, else a ticket-like key from the branch name, else `repo#branch`), most recently active first, each with its title, run and active counts, and the latest run of every repo/branch |
-| GET | `/api/reviews/:id` | | `{ review, requirements, findings, observations, logs }` |
-| GET | `/api/reviews/:id/report` | | `text/markdown` raw report |
-| POST | `/api/reviews/:id/rerun` | | `{ review }` — new row, same repo and branch, `run_index + 1` |
-| POST | `/api/reviews/:id/cancel` | | `{ review }` |
-| DELETE | `/api/reviews/:id` | | `{ ok: true }` — deletes the row and the report file |
-| GET | `/api/reviews/:id/events` | | SSE stream |
-| GET | `/api/recipes` | | `{ enabled, dir, recipes, errors }` — invalid recipes are reported, not thrown |
-| GET | `/api/previews` | `?reviewId=&ticket=&recipe=&limit=&offset=` | `{ previews, total }`, newest first |
-| GET | `/api/previews/:id` | | `{ preview, logs }` |
-| POST | `/api/previews` | `{ reviewId?, ticket?, recipe?, roles?, dumpMode? }` | `{ preview }` — status `queued` |
-| POST | `/api/previews/:id/stop` | | `{ preview }` — runs `down` |
-| DELETE | `/api/previews/:id` | | `{ ok: true }` — stops it first, then deletes the row |
-| GET | `/api/previews/:id/events` | | SSE stream |
+`GET /api/reviews/:id` also returns `comparison` — the findings of this run
+against the branch's previous finished run, matched on severity, file, line,
+and title (`findingCompare.ts`) into `resolved`, `new`, and `persistent` — and
+`links`, the GitHub URLs built by `githubLinks.ts` from the configured
+organization (the UI cannot know it).
 
 ## Report writer (`src/reportWriter.ts`)
 
 `writeReport()` returns a path relative to `DATA_DIR`:
 `reports/<ticket_key || repo>/<repo>__<sanitized-branch>/run-<runIndex>-<YYYYMMDD-HHmmss>.md`
 
-The report opens with the verdict, then a meta table (ticket, repository, branch
-with head and base shas, diff size, run number, timestamp, model), the summary,
-a requirement table with status icons (met ✅, partial ⚠️, missing ❌,
-not_verifiable ❓), findings grouped by severity with `file:line`, a
-`## Suggestions (non-blocking)` section listing the observations as
-`` - `file:line` — note `` with an indented rationale line (or `None.`), and a
-conclusion naming exactly what is still required before merge.
+The report opens with the verdict, then a meta table (ticket, repository, the
+source and base reason for local runs, branch with head and base shas, diff
+size, and the run: number, timestamp, reviewer, model), `## Summary`,
+`## Ticket requirements` as a table with status icons (met ✅, partial ⚠️,
+missing ❌, not_verifiable ❓), `## Issues to fix` ordered by severity with
+`file:line`, problem, why, suggested fix, and snippet, `## Suggestions
+(non-blocking)` listing the observations as `` - `file:line` — note `` with an
+indented rationale line (or `None.`), and `## Conclusion` naming exactly what is
+still required before merge.
 
 ## Web UI (`web/`)
 
-Vite + React + TypeScript, dev server proxying `/api` to `PORT`. Plain CSS in
-`web/src/styles.css` — no UI framework, no CDN. Dark-first, compact.
+Vite + React + TypeScript, dev server on `127.0.0.1:5179` proxying `/api` to
+`PORT`. Plain CSS in `web/src/styles.css` — no UI framework, no CDN.
+Dark-first, compact. What each page offers is described in
+[README › The web UI](../README.md#the-web-ui).
 
-- **Home** — an input box and a Review button. The placeholder follows what
-  `/api/health` reports: with no tracker configured it asks for a branch only.
-  When the input looks like a ticket key it calls `GET /api/tickets/:key` first
-  and shows the resolved ticket, a chip naming the tracker that answered, and
-  the detected branches with checkboxes, then posts the chosen targets. A
-  collapsible **Paste requirements instead** textarea sends `requirementsText`
-  and skips the ticket lookup. Below is the history: **By ticket** (default,
-  20 groups a page) shows one row per group with a chip per branch carrying the
-  latest run's verdict or status, and expands inline to that group's runs;
-  **All runs** is the flat table, 25 runs a page. The filter and the chosen view
-  are remembered; both refresh every 4 s while something on screen is running.
-- **Review detail** (`/review/:id`) — verdict banner, meta table, requirements
-  table, findings grouped by severity, and a live log fed by SSE while the run is
-  in progress. Actions: re-run, download report, copy report, delete.
+- **Home** — the launcher (GitHub or Local mode, reviewer, model; the choices
+  are kept in `localStorage`) and the history. The placeholder follows what
+  `/api/health` reports. A ticket-key input calls `GET /api/tickets/<input>`
+  first and shows the ticket, a chip naming the tracker that answered, and the
+  branches with checkboxes; the chosen targets are posted. **Paste requirements
+  instead** sends `requirementsText` and skips the ticket lookup. The history
+  has two views, **By ticket** (`/api/review-groups`, 20 groups a page,
+  expanding inline to a group's runs) and **All runs** (`/api/reviews`, 25 a
+  page); the chosen view is remembered, and both refresh every 4 s while
+  something on screen is running.
+- **Review detail** (`/review/:id`) — verdict banner with GitHub links,
+  meta table, requirements, findings by severity, observations, the comparison
+  with the previous run, a live log fed by SSE, and the Preview card (not for
+  local runs). Actions: cancel, re-run with an optional reviewer and model,
+  download report, copy report, delete.
 - **Ticket view** (`/ticket/:key`) — all runs of one group (`group_key`) across
-  repositories, grouped by repo and branch, newest first. Runs started with pasted
-  requirements appear under the key their branch name carries.
+  repositories, grouped by repo and branch, newest first.
+- **Previews** (`/previews`, only when enabled) — start a preview from a ticket
+  or from custom branches per role, and follow every preview.
 
 Routing is a small hand-written history-based router; there is no react-router
 dependency.
 
+## MCP server (`src/mcp.ts`, `src/mcp/`)
+
+`dist/mcp.js` (also the `code-review-mcp` bin) is a stdio MCP server built on
+`@modelcontextprotocol/sdk`. It is a thin HTTP client of the running API
+(`mcp/client.ts`, base URL from `CODE_REVIEW_API_URL`): it must never import
+`config.ts` or anything that needs a secret, so the MCP process holds no token
+and reads no `.env`. stdout carries only the protocol; diagnostics go to
+stderr. Tools are registered in `mcp/server.ts` and their output is compacted
+in `mcp/format.ts`; the tool list is in
+[README › Use from other agents](../README.md#use-from-other-agents-mcp).
+
+**Recursion guard.** A reviewer CLI is the same kind of agent that might have
+this server configured. Each reviewer's argv keeps user MCP servers out of the
+run, and as a second line of defence `mutationRefusal()` makes `start_review`,
+`rerun_review`, and `cancel_review` refuse whenever `CODE_REVIEW_TOOL_REVIEWER`
+is set (and not `0`/`false`) in the MCP process's environment.
+
 ## Preview environments (`src/preview/`)
 
-A preview is the reviewed branches running as a clickable stack. The engine is
+A preview is branches running as a clickable stack. The engine is
 product-agnostic: what to run lives in a **recipe** outside this repository
 (`PREVIEW_RECIPES_DIR`, `recipes/` by default, gitignored). One documented,
 product-neutral sample ships in `recipes.example/`. The whole feature is off
-until `PREVIEW_ENABLED` is set.
+until `PREVIEW_ENABLED` is set. No reviewer CLI is involved.
 
 | module | responsibility |
 |---|---|
-| `recipes.ts` | zod schema, loading, validation; errors name the field and the file |
+| `recipes.ts` | zod schema, loading (`//` and block comments allowed), validation; errors name the field and the file |
+| `roles.ts` | pure branch-per-role planning: hand-picked overrides, the review's branch, the input's and the ticket's branches, base-branch fallback |
 | `ports.ts` | host port allocation, verified by binding, held until the row records it |
 | `database.ts` | where the data comes from: `pg_dump` → newest file in `dumpDir` → clean |
 | `steps.ts` | runs one recipe command, streams its output, enforces timeouts, kills the process group |
@@ -492,37 +703,63 @@ until `PREVIEW_ENABLED` is set.
 | `store.ts` | `previews` and `preview_logs` rows |
 | `events.ts` | preview SSE bus, mirroring `src/events.ts` |
 
-**Lifecycle.** `queued → preparing → starting → ready`, then `stopping →
-stopped`, or `failed` / `expired`. `preparing` resolves the roles (a repository
-with no branch for the ticket runs its base branch, recorded as `usedBase`),
-reuses the review's checkout when it is still on disk and otherwise fetches
-through the same Docker sandbox as a review, allocates the ports, resolves the
-database source, and runs `prepare`. `starting` runs `up` and then polls
-`health` until it exits 0 or `readyTimeoutSec` runs out. Previews beyond
-`PREVIEW_MAX_CONCURRENT` wait in the queue and report their position.
+**Roles.** `requestPreview()` refuses local reviews (an unpushed branch is not
+on GitHub), checks hand-picked roles against the recipe and their branches
+against the remote (one uncached retry, so a branch pushed a moment ago is
+found), then `resolveRoles()` plans one role per recipe repository:
+a hand-picked branch wins (empty = base branch); then the review's own branch
+for its repository; then the branches of the input, which is resolved with
+`resolveTargets()` — and when that input is a PR whose branch carries a tracker
+key, the ticket is resolved as well so its other repositories join, the PR's
+branch still winning for its own; otherwise the base branch, recorded as
+`usedBase`. When every role is hand-picked, no ticket is resolved.
 
-**Database source.** `mode: "auto"` tries `pg_dump` against the configured live
-database first — after a five second TCP probe, so an unreachable host cannot
-hang a preview — then the newest non-empty file in `dumpDir`, then a clean
-install. The mode that actually happened is stored as `dump_mode` and handed to
-the steps as `DUMP_MODE`. Only `onFailure: "fail"` turns a missing dump into an
+**Lifecycle.** `queued → preparing → starting → ready`, then `stopping →
+stopped`, or `failed` / `expired`. At most `PREVIEW_MAX_CONCURRENT` previews are
+between `preparing` and `ready` at once; the rest wait in the queue and report
+their position. `preparing` reuses the review's checkout when it is still on
+disk and otherwise fetches through the same Docker sandbox as a review (a
+branch deleted on the remote falls back to its base branch here, preview-only:
+a review of a vanished branch still fails), allocates the ports, resolves the
+database source, and runs `prepare`. `starting` runs `up` and then polls
+`health` every 3 s until every command exits 0. All of it shares
+`readyTimeoutSec`; `stepTimeoutSec` caps a single command. A ready preview
+gets `expires_at = ready_at + PREVIEW_TTL_MINUTES`, and a reaper checks every
+30 s.
+
+**Database source.** `mode: "auto"` tries `pg_dump` (the host's binary) against
+the configured live database first — after a five second TCP probe, so an
+unreachable host cannot hang a preview — then the newest non-empty file in
+`dumpDir`, then a clean install. A launch may override the mode (`dumpMode`).
+The mode that actually happened is stored as `dump_mode` and handed to the
+steps as `DUMP_MODE`. Only `onFailure: "fail"` turns a missing dump into an
 error; nothing ever waits for a human.
 
 **Steps.** Commands come from a trusted local file and run through `/bin/sh`
 with `PREVIEW_DIR` as the working directory. No value is ever interpolated into
 a command string: checkouts, branches, ports, database coordinates and the dump
 are passed through the environment (`CHECKOUT_<ROLE>`, `BRANCH_<ROLE>`,
-`BASE_<ROLE>`, `PORT_<ID>`, `DB_*`, `DUMP_FILE`, `DUMP_MODE`), on top of the
-same scrubbed environment the reviewer gets. Each child gets its own process
-group, so a timeout or a stop kills the whole tree.
+`BASE_<ROLE>`, `USED_BASE_<ROLE>`, `PORT_<ID>`, `DB_*`, `DUMP_FILE`,
+`DUMP_MODE`, …; the full list is in
+[recipes.example/README.md](../recipes.example/README.md)), on top of the same
+scrubbed environment the reviewer gets (`buildSanitizedEnv()`, without the
+reviewer marker) and the recipe's `env`. Each child gets
+its own process group, so a timeout or a stop kills the whole tree.
 
 **Teardown.** `down` runs on stop, on any failure, on timeout, on TTL expiry,
-and at server start for previews a crash left behind — it is idempotent, every
-command runs even if an earlier one failed, and it runs even when `prepare`
-died halfway. The context needed to tear a preview down later (environment and
-checkouts) is written to `<DATA_DIR>/previews/<id>/preview-context.json`. After
-teardown a reused review checkout is verified pristine with `assertPristine`;
-checkouts the preview fetched itself are removed.
+and at server start for previews a restart left behind — it is idempotent,
+every command runs even if an earlier one failed, and it runs even when
+`prepare` died halfway. The context needed to tear a preview down later
+(environment and checkouts) is written to
+`<DATA_DIR>/previews/<id>/preview-context.json`. After teardown a reused review
+checkout is verified pristine with `assertPristine`; checkouts the preview
+fetched itself are removed, and so is a dump taken for it.
+
+**Restarts.** `recoverOrphanPreviews()` runs at server start: every preview
+still `queued`, `preparing`, `starting`, `ready`, or `stopping` is torn down
+with `down` and marked `stopped` with `error = 'interrupted by restart'` — a
+restart ends live previews, ready ones included. Shutting the server down runs
+no teardown; that happens on the next start.
 
 ## Non-goals
 

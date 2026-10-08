@@ -5,17 +5,24 @@ import { getReview } from '../db.js';
 import {
   assertPristine, fetchCheckout, ghApi, lsRemoteHeads, sanitizeBranchForPath,
 } from '../gitSandbox.js';
+import { branchUrl } from '../githubLinks.js';
 import { logger } from '../logger.js';
 import { sanitizeLogMessage } from '../logSanitize.js';
+import { remoteBranches } from '../remoteBranches.js';
 import { resolveTargets } from '../resolver.js';
-import { buildChildEnv } from '../reviewRunner.js';
+import { buildSanitizedEnv, REVIEWER_MARKER_ENV } from '../reviewers/shared.js';
 import type {
-  DumpMode, LogLevel, PreviewRole, PreviewRow, PreviewStatus, ResolvedTarget,
+  DumpMode, LogLevel, PreviewRole, PreviewRow, PreviewStatus,
 } from '../types.js';
 import { resolveDumpSource } from './database.js';
 import { publishPreview } from './events.js';
 import { allocatePorts } from './ports.js';
 import { findRecipe, loadRecipes, primaryPort, type Recipe } from './recipes.js';
+import {
+  coversAllRoles, followUpTicketKey, missingBranchMessage, missingOverrideBranches, normalizeOverrides,
+  planRoles, previewLookupKey, ticketKeyFromBranches, trackerKeyOf, type RoleOverride, type RoleOverrideInput,
+  type RoleTarget,
+} from './roles.js';
 import { runStep } from './steps.js';
 import {
   addPreviewLog, countLive, createPreview, deletePreviewRow, expiredPreviews, getPreview,
@@ -60,7 +67,8 @@ export interface CreatePreviewRequest {
   reviewId?: number;
   ticket?: string;
   recipe?: string;
-  roles?: { role: string; branch: string; base?: string }[];
+  /** Branches picked by hand per role; an empty branch runs that role's base branch. */
+  roles?: RoleOverrideInput[];
   dumpMode?: 'auto' | 'dump-dir' | 'pg_dump' | 'none' | 'clean';
 }
 
@@ -80,8 +88,15 @@ export async function requestPreview(request: CreatePreviewRequest): Promise<Pre
     );
   }
 
-  const ticketKey = request.ticket?.trim() || review?.ticket_key || null;
-  const roles = await resolveRoles(recipe, { review, ticketKey, overrides: request.roles });
+  // Hand-picked branches are checked before anything is queued: a typo must
+  // not quietly turn into a preview of the base branch.
+  const overrides = await checkOverrides(recipe, request.roles);
+
+  const { roles, ticketKey } = await resolveRoles(recipe, {
+    review,
+    ticket: request.ticket,
+    overrides,
+  });
 
   const row = createPreview({
     review_id: review?.id ?? null,
@@ -116,6 +131,40 @@ function pickRecipe(name: string | undefined): Recipe {
 
 // --- role resolution ---
 
+async function remoteHeads(repos: string[], fresh: boolean): Promise<Record<string, string[]>> {
+  const heads: Record<string, string[]> = {};
+  await Promise.all(
+    repos.map(async (repo) => {
+      try {
+        heads[repo] = (await remoteBranches(repo, { fresh })).branches;
+      } catch (err) {
+        throw new Error(`Could not list the branches of ${repo} to check the chosen branch: ${(err as Error).message}`);
+      }
+    }),
+  );
+  return heads;
+}
+
+/**
+ * Every hand-picked role must belong to the recipe, and every hand-picked
+ * branch must exist on its repository's remote. The listing is cached; a miss
+ * is checked once more uncached, so a branch pushed a moment ago is found.
+ */
+async function checkOverrides(recipe: Recipe, input: RoleOverrideInput[] | undefined): Promise<RoleOverride[]> {
+  const overrides = normalizeOverrides(input, recipe.repos, recipe.name);
+  const named = overrides.filter((o) => o.branch !== null || o.base !== undefined);
+  if (named.length === 0) return overrides;
+  const repos = [...new Set(named.map((o) => o.repo))];
+  let heads = await remoteHeads(repos, false);
+  let missing = missingOverrideBranches(overrides, heads);
+  if (missing.length > 0) {
+    heads = { ...heads, ...(await remoteHeads([...new Set(missing.map((m) => m.repo))], true)) };
+    missing = missingOverrideBranches(overrides, heads);
+  }
+  if (missing.length > 0) throw new Error(missingBranchMessage(missing));
+  return overrides;
+}
+
 const defaultBranchCache = new Map<string, string>();
 
 async function defaultBranch(repo: string): Promise<string> {
@@ -129,46 +178,75 @@ async function defaultBranch(repo: string): Promise<string> {
 }
 
 interface ResolveRolesInput {
-  review?: { id: number; repo: string; branch: string; base_branch: string } | undefined;
+  review?: { id: number; repo: string; branch: string; base_branch: string; ticket_key: string | null } | undefined;
+  /** What the user typed: a ticket key, a PR URL, or repo#branch. */
+  ticket?: string | null | undefined;
+  overrides?: RoleOverride[] | undefined;
+}
+
+export interface ResolvedRoles {
+  roles: PreviewRole[];
+  /** The tracker ticket when one was found, else what the preview was started from. */
   ticketKey: string | null;
-  overrides?: { role: string; branch: string; base?: string }[] | undefined;
+}
+
+/** The branches behind one input, and the tracker key found on the way; null when nothing resolved. */
+async function targetsFor(key: string): Promise<{ targets: RoleTarget[]; trackerKey: string | null } | null> {
+  try {
+    const { ticket, targets } = await resolveTargets(key);
+    return { targets, trackerKey: trackerKeyOf(ticket, config.githubOrg) };
+  } catch (err) {
+    logger.warn(`preview: no branches resolved for ${key}: ${(err as Error).message}`);
+    return null;
+  }
 }
 
 /**
- * A role whose repository has no branch for this ticket runs its base branch.
- * That is recorded as `usedBase` so the UI can say so instead of silently
+ * Branches come from the whole ticket, not just the input: a PR names one
+ * branch of one repository, so when its branch carries a tracker key the
+ * ticket is resolved as well and its other repositories join the preview. The
+ * PR's own branch still wins for its repository.
+ *
+ * A role whose repository has no branch anywhere in the ticket runs its base
+ * branch, recorded as `usedBase` so the UI can say so instead of silently
  * previewing something the ticket never touched.
  */
-export async function resolveRoles(recipe: Recipe, input: ResolveRolesInput): Promise<PreviewRole[]> {
-  let ticketTargets: ResolvedTarget[] = [];
-  if (input.ticketKey) {
-    try {
-      ticketTargets = (await resolveTargets(input.ticketKey)).targets;
-    } catch (err) {
-      logger.warn(`preview: no branches resolved for ${input.ticketKey}: ${(err as Error).message}`);
+export async function resolveRoles(recipe: Recipe, input: ResolveRolesInput): Promise<ResolvedRoles> {
+  const org = config.githubOrg;
+  const lookup = previewLookupKey({ ticket: input.ticket, review: input.review }, org);
+  const fallbackKey = input.ticket?.trim() || input.review?.ticket_key || null;
+  const overrides = input.overrides ?? [];
+  // Every role picked by hand: the ticket (if any) only labels the preview, so
+  // it is not resolved. Without one, the branch names may still carry a key.
+  const handPicked = overrides.length > 0 && coversAllRoles(overrides, recipe.repos);
+  const branchKey = overrides.length > 0 ? ticketKeyFromBranches(overrides.map((o) => o.branch)) : null;
+
+  let explicitTargets: RoleTarget[] = [];
+  let ticketTargets: RoleTarget[] = [];
+  let trackerKey: string | null = null;
+  if (lookup && !handPicked) {
+    const first = await targetsFor(lookup);
+    if (first) {
+      explicitTargets = first.targets;
+      trackerKey = first.trackerKey;
+      const followUp = followUpTicketKey(lookup, first.trackerKey);
+      if (followUp) ticketTargets = (await targetsFor(followUp))?.targets ?? [];
     }
   }
 
-  const roles: PreviewRole[] = [];
-  for (const [role, repo] of Object.entries(recipe.repos)) {
-    const base = await defaultBranch(repo);
-    const override = input.overrides?.find((o) => o.role === role);
-    if (override) {
-      roles.push({ role, repo, branch: override.branch, base: override.base ?? base, usedBase: false });
-      continue;
-    }
-    if (input.review && input.review.repo === repo) {
-      roles.push({ role, repo, branch: input.review.branch, base: input.review.base_branch, usedBase: false });
-      continue;
-    }
-    const fromTicket = ticketTargets.find((t) => t.repo === repo);
-    if (fromTicket) {
-      roles.push({ role, repo, branch: fromTicket.branch, base: fromTicket.baseBranch, usedBase: false });
-      continue;
-    }
-    roles.push({ role, repo, branch: base, base, usedBase: true });
-  }
-  return roles;
+  const defaultBranches: Record<string, string> = {};
+  for (const repo of Object.values(recipe.repos)) defaultBranches[repo] = await defaultBranch(repo);
+
+  const roles = planRoles({
+    recipeRepos: recipe.repos,
+    defaultBranches,
+    overrides,
+    review: input.review,
+    explicitTargets,
+    ticketTargets,
+  });
+  const label = handPicked ? lookup ?? fallbackKey : trackerKey ?? fallbackKey;
+  return { roles, ticketKey: label ?? branchKey };
 }
 
 // --- worker pool ---
@@ -423,10 +501,19 @@ interface StepEnvInput {
   dbName: string;
 }
 
+/**
+ * The base every preview step starts from: the reviewer's allowlist with every
+ * tracker and GitHub token removed, but without the reviewer marker. A step is
+ * not a reviewer, and the marker would make an MCP server it starts refuse
+ * every review.
+ */
+export function previewBaseEnv(): NodeJS.ProcessEnv {
+  return buildSanitizedEnv();
+}
+
 /** Everything variable reaches a step through the environment, never through the command string. */
 export function buildStepEnv(input: StepEnvInput): NodeJS.ProcessEnv {
-  // Same scrubbed base as the reviewer: no tracker token, no GitHub token.
-  const env: NodeJS.ProcessEnv = buildChildEnv();
+  const env: NodeJS.ProcessEnv = previewBaseEnv();
   env.PREVIEW_ID = `preview-${input.previewId}`;
   env.PREVIEW_DIR = input.previewDir;
   env.RECIPE_DIR = input.recipe.dir;
@@ -670,11 +757,13 @@ function rebuildContext(row: PreviewRow): RunContext {
   // A preview that died before its context was written still has to be torn
   // down: the id and the directory are enough for a compose project.
   const env: NodeJS.ProcessEnv = persisted?.env ?? {
-    ...buildChildEnv(),
+    ...previewBaseEnv(),
     PREVIEW_ID: `preview-${row.id}`,
     PREVIEW_DIR: previewDir,
     RECIPE_DIR: recipe.dir,
   };
+  // Contexts written before steps had their own base carry the reviewer marker.
+  delete env[REVIEWER_MARKER_ENV];
   fs.mkdirSync(previewDir, { recursive: true });
   return {
     previewId: row.id,
@@ -758,7 +847,11 @@ export function previewsSummary(): {
 export function decoratePreview(row: PreviewRow): Record<string, unknown> {
   return {
     ...row,
-    roles: safeRoles(row.roles_json),
+    // The org lives only in the server config, so the GitHub link is built here.
+    roles: safeRoles(row.roles_json).map((role) => ({
+      ...role,
+      url: branchUrl(config.githubOrg, role.repo, role.usedBase ? role.base : role.branch),
+    })),
     ports: parsePorts(row.ports_json),
     queuePosition: queuePosition(row.id),
   };

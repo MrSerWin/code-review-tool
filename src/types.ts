@@ -126,6 +126,15 @@ export interface ReviewRow {
    * key from the branch name, else `repo#branch`. Derived (see groupKey.ts).
    */
   group_key: string | null;
+  /**
+   * The process that enqueued the run and holds it in its in-memory queue,
+   * with that process's start time (see processOwnership.ts). NULL on rows
+   * written before ownership was recorded.
+   */
+  runner_pid: number | null;
+  runner_started_at: string | null;
+  /** JSON array of the reviewer processes running for it: `{ pgid, bin, spawnedAt }`. */
+  reviewer_pgids: string | null;
 }
 
 /** `active`: a run is queued/fetching/reviewing; `failed`: some branch's latest run failed; `done`: see db.ts. */

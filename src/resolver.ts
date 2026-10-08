@@ -111,6 +111,52 @@ function manualTicket(text: string): TicketInfo {
   };
 }
 
+/** A pull request named by URL (certainly a PR) or `owner/repo#N` (a PR or an issue). */
+export interface PullRequestRef {
+  repo: string;
+  number: number;
+  /** False for `owner/repo#N`, which GitHub shares between issues and pull requests. */
+  certain: boolean;
+}
+
+export function parsePullRequestRef(raw: string, org: string): PullRequestRef | null {
+  const input = raw.trim().replace(/^github:/i, '');
+  const orgRe = escapeRegExp(org);
+  const url = new RegExp(`^https://github\\.com/${orgRe}/([A-Za-z0-9._-]+)/pull/(\\d+)(?:[/?#].*)?$`, 'i').exec(input);
+  if (url) return { repo: url[1] as string, number: Number(url[2]), certain: true };
+  const short = new RegExp(`^${orgRe}/([A-Za-z0-9._-]+)#(\\d+)$`, 'i').exec(input);
+  if (short) return { repo: short[1] as string, number: Number(short[2]), certain: false };
+  return null;
+}
+
+interface PullInfo {
+  head?: { ref?: string };
+  base?: { ref?: string };
+}
+
+/** The PR itself as the requirements when its branch names no tracker ticket. */
+async function ticketFromPullRequest(repo: string, prNumber: number): Promise<TicketInfo | null> {
+  try {
+    const ticket = await getTicket(`${config.GITHUB_ORG}/${repo}#${prNumber}`);
+    // Links in a PR body point at related work, not at more branches to review.
+    return { ...ticket, attachmentUrls: [] };
+  } catch (error) {
+    logger.warn(`Could not read PR ${repo}#${prNumber} as a ticket:`, (error as Error).message);
+    return null;
+  }
+}
+
+/**
+ * Pasted links come in many spellings; downstream matching expects one.
+ * `http://`, `www.github.com` and surrounding `<…>` all mean the same page.
+ */
+export function normalizeInput(input: string): string {
+  return input
+    .trim()
+    .replace(/^<(.*)>$/, '$1')
+    .replace(/^https?:\/\/(?:www\.)?github\.com\//i, 'https://github.com/');
+}
+
 export interface ResolveOptions {
   /** Requirements typed by the user; replaces the ticket lookup entirely. */
   requirementsText?: string;
@@ -124,7 +170,7 @@ export async function resolveTargets(
   input: string,
   options: ResolveOptions = {},
 ): Promise<{ ticket: TicketInfo | null; targets: ResolvedTarget[] }> {
-  const raw = input.trim();
+  const raw = normalizeInput(input);
   if (!raw) throw new Error('Unsupported input: empty');
 
   const manual = options.requirementsText?.trim() ? manualTicket(options.requirementsText) : null;
@@ -146,6 +192,36 @@ export async function resolveTargets(
     throw new Error('A base branch can only be chosen for a local input: local:<repo>#<branch>.');
   }
 
+  // A pull request is exactly one branch. This must run before the ticket lookup:
+  // the GitHub tracker also accepts PR references, and as a ticket a PR fans out
+  // to every PR it links to and every branch containing its number.
+  const prRef = parsePullRequestRef(raw, org);
+  if (prRef) {
+    assertAllowedRepo(prRef.repo);
+    let pr: PullInfo | null = null;
+    try {
+      pr = await ghApi<PullInfo>(`repos/${org}/${prRef.repo}/pulls/${prRef.number}`);
+    } catch (error) {
+      // `owner/repo#N` may be an issue; only a PR URL is certain to name a PR.
+      if (prRef.certain) throw error;
+    }
+    if (pr?.head?.ref) {
+      const branch = pr.head.ref;
+      return {
+        ticket: manual
+          ?? (await ticketFromBranchName(branch))
+          ?? (await ticketFromPullRequest(prRef.repo, prRef.number)),
+        targets: [{
+          repo: prRef.repo,
+          branch,
+          baseBranch: pr.base?.ref ?? (await defaultBranch(prRef.repo)),
+          prNumber: prRef.number,
+        }],
+      };
+    }
+    if (prRef.certain) throw new Error(`Pull request ${prRef.repo}#${prRef.number} has no head branch`);
+  }
+
   // Pasted requirements replace the tracker, so the input only has to name a branch.
   if (!manual && looksLikeTicket(raw)) {
     const ticket = await getTicket(raw);
@@ -156,22 +232,6 @@ export async function resolveTargets(
       );
     }
     return { ticket, targets };
-  }
-
-  const prMatch = new RegExp(`^https://github\\.com/${org}/([^/]+)/pull/(\\d+)(?:[/?#].*)?$`, 'i').exec(raw);
-  if (prMatch) {
-    const repo = prMatch[1] as string;
-    const prNumber = Number(prMatch[2]);
-    assertAllowedRepo(repo);
-    const pr = await ghApi<{ head?: { ref?: string }; base?: { ref?: string } }>(
-      `repos/${org}/${repo}/pulls/${prNumber}`,
-    );
-    if (!pr.head?.ref) throw new Error(`Pull request ${repo}#${prNumber} has no head branch`);
-    const branch = pr.head.ref;
-    return {
-      ticket: manual ?? (await ticketFromBranchName(branch)),
-      targets: [{ repo, branch, baseBranch: pr.base?.ref ?? (await defaultBranch(repo)), prNumber }],
-    };
   }
 
   const treeMatch = new RegExp(`^https://github\\.com/${org}/([^/]+)/tree/(.+?)/?$`, 'i').exec(raw);

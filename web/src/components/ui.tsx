@@ -12,11 +12,16 @@ export function VerdictBadge({ verdict }: { verdict: Verdict | null }) {
   return <span className={`badge verdict-${verdict}`}>{VERDICT_LABEL[verdict]}</span>;
 }
 
-export function StatusPill({ status }: { status: ReviewStatus }) {
+/** `boxed` draws the pill with an outline and a steady dot, for headers. */
+export function StatusPill({ status, boxed = false }: { status: ReviewStatus; boxed?: boolean }) {
   const active = status === 'queued' || status === 'fetching' || status === 'reviewing';
   return (
-    <span className={`pill status-${status}`}>
-      {active && <span className="pulse" aria-hidden="true" />}
+    <span className={`pill status-${status}${boxed ? ' pill-boxed' : ''}`}>
+      {active ? (
+        <span className="pulse" aria-hidden="true" />
+      ) : (
+        boxed && <span className="pill-dot" aria-hidden="true" />
+      )}
       {status}
     </span>
   );

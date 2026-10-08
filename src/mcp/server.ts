@@ -129,14 +129,18 @@ export function createMcpServer({ api, env = process.env }: CreateServerOptions)
       'input forms:\n' +
       '- "ABC-123" ticket key of a configured tracker (or "jira:ABC-123", "linear:ABC-123" to pick the tracker); ' +
       'reviews every branch/PR linked to the ticket, one review per branch\n' +
-      '- "https://github.com/<org>/<repo>/pull/12" pull request URL, or a /tree/<branch> URL\n' +
+      '- "https://github.com/<org>/<repo>/pull/12" pull request URL (exactly that PR\'s branch), or a /tree/<branch> URL\n' +
+      '- "<org>/<repo>#12" the same pull request; when 12 is an issue, the GitHub issue as a ticket\n' +
+      '- "https://github.com/<org>/<repo>/issues/12" a GitHub issue as a ticket\n' +
       '- "my-service#feature/x" a pushed branch of an allowed repo\n' +
       '- "local:my-service#feature/x" a branch of the local clone, pushed or not (see list_local_repos); ' +
       '"local:my-service" = the checked-out branch\n' +
+      'GitHub links may also use http://, www.github.com, or <...> around them. ' +
       'When a ticket resolves to several branches, all of them are reviewed unless "targets" narrows it. ' +
       'Returns {reviews:[{id, repo, branch, base, reviewer, model, status, url}]}.',
     inputSchema: {
-      input: z.string().min(1).max(512).describe('Ticket key, PR URL, "repo#branch", or "local:repo#branch".'),
+      input: z.string().min(1).max(512)
+        .describe('Ticket key, PR or issue URL, "org/repo#12", "repo#branch", or "local:repo#branch".'),
       reviewer: z.enum(REVIEWER_NAMES).optional()
         .describe('Reviewer CLI (see list_reviewers). Default: the server default.'),
       model: z.string().min(1).max(64).optional()

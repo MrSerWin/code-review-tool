@@ -13,7 +13,11 @@ import { config } from './config.js';
 import { publish } from './events.js';
 import { sanitizeLogMessage } from './logSanitize.js';
 import { assertPristine, ensureImage, fetchCheckout, pruneCheckout } from './gitSandbox.js';
-import { runReview, type PreviousFinding } from './reviewRunner.js';
+import {
+  commandMatchesBin, inspectProcess, isOrphanReviewer, isPidAlive, killProcessGroups, parseRecordedGroups,
+  SELF, shouldRecover, type ProcessInfo, type RecordedGroup, type RecoveryCaller, type RunnerIdentity,
+} from './processOwnership.js';
+import { runReview, stopAllReviewers, type PreviousFinding } from './reviewRunner.js';
 import { writeReport } from './reportWriter.js';
 import type {
   LogLevel,
@@ -31,8 +35,12 @@ interface Job {
 
 const pending: number[] = [];
 const cancelling = new Set<number>();
+/** Running reviews already failed by `stopAllReviews`; their pipeline must not write again. */
+const interrupted = new Set<number>();
 const running = new Map<number, Job>();
 let workers = 0;
+/** Set by `stopAllReviews`: nothing new starts in this process. */
+let stopping = false;
 
 /**
  * How many reviews run at once. Each review fans out to five lens processes
@@ -40,8 +48,19 @@ let workers = 0;
  */
 const CONCURRENCY = config.REVIEW_CONCURRENCY;
 
-/** Queue a review row for processing, in-process. */
+/**
+ * Queue a review row for processing, in-process. The row is claimed for this
+ * process (`runner_pid`): from here on only this process may finish it, and
+ * another process's recovery leaves it alone while this one lives.
+ */
 export function enqueueReview(reviewId: number): void {
+  if (stopping) {
+    finishRow(reviewId, { status: 'failed', error: 'shutting down', finished_at: nowIso() });
+    log(reviewId, 'error', 'Not started: this process is shutting down.');
+    status(reviewId, 'failed');
+    return;
+  }
+  finishRow(reviewId, { runner_pid: SELF.pid, runner_started_at: SELF.startedAt, reviewer_pgids: null });
   pending.push(reviewId);
   log(reviewId, 'info', 'Queued.');
   status(reviewId, 'queued');
@@ -68,25 +87,125 @@ export function cancelReview(reviewId: number): boolean {
   return false;
 }
 
+export interface RecoveryDeps {
+  self: RunnerIdentity;
+  isAlive(pid: number): boolean;
+  /** `ps` for one pid; null when there is no such process. */
+  inspect(pid: number): ProcessInfo | null;
+  /** Whether a live process's command line is still the recorded reviewer binary. */
+  matches(command: string, bin: string): boolean;
+  /** SIGTERM-to-SIGKILL grace for orphaned reviewer processes. */
+  graceMs: number;
+}
+
+const DEFAULT_RECOVERY_DEPS: RecoveryDeps = {
+  self: SELF,
+  isAlive: isPidAlive,
+  inspect: inspectProcess,
+  matches: commandMatchesBin,
+  graceMs: 2_000,
+};
+
+export interface RecoveryResult {
+  /** Review ids marked failed. */
+  failed: number[];
+  /** Orphaned reviewer process groups that were signalled. */
+  killedGroups: number[];
+}
+
 /**
- * Rows left mid-flight by a crash or restart can never finish: nothing owns
- * their child process any more, so they are failed at startup.
+ * Fails in-flight rows whose owner can never finish them, and stops the
+ * reviewer processes such an owner left running.
+ *
+ * Every queued, fetching, or reviewing row belongs to the process that
+ * enqueued it (`runner_pid`, `runner_started_at`); its queue is in that
+ * process's memory. `shouldRecover` (processOwnership.ts) decides per row:
+ * rows of this process and rows of a live process are never touched; rows of
+ * a dead process are failed by whoever runs this; rows with no recorded owner
+ * (written before ownership existed) are failed only by the server, at its
+ * startup, never by the CLI, which cannot tell them from a live server's.
+ *
+ * The server runs this once at startup and the CLI once before it enqueues
+ * anything, so a CLI run no longer fails the server's reviews and a server
+ * restart no longer fails a running CLI's.
+ *
+ * For every failed row, the reviewer processes it recorded are stopped
+ * (SIGTERM, then SIGKILL after a grace period) when they are still alive,
+ * still lead their process group, still run the recorded binary, and started
+ * when the row says they did. Anything else is left alone: a pid may have
+ * been reused by an unrelated process.
  */
-export function recoverInterrupted(): void {
-  const stale = db
+export async function recoverInterrupted(
+  caller: RecoveryCaller,
+  overrides: Partial<RecoveryDeps> = {},
+): Promise<RecoveryResult> {
+  const deps: RecoveryDeps = { ...DEFAULT_RECOVERY_DEPS, ...overrides };
+  const active = db
     .prepare<[], ReviewRow>(
-      `SELECT * FROM reviews WHERE status IN ('queued', 'fetching', 'reviewing')`,
+      `SELECT * FROM reviews WHERE status IN ('queued', 'fetching', 'reviewing') ORDER BY id`,
     )
     .all();
-  for (const review of stale) {
+
+  const failed: number[] = [];
+  const orphans = new Map<number, RecordedGroup[]>();
+  for (const review of active) {
+    if (!shouldRecover(review, { caller, self: deps.self, isAlive: deps.isAlive })) continue;
     updateReview(review.id, {
       status: 'failed',
       error: 'interrupted by restart',
       finished_at: nowIso(),
     });
-    log(review.id, 'error', 'Interrupted by restart.');
+    log(
+      review.id,
+      'error',
+      review.runner_pid
+        ? `Interrupted: the process that ran it (pid ${review.runner_pid}) is gone.`
+        : 'Interrupted by restart.',
+    );
     status(review.id, 'failed');
+    failed.push(review.id);
+
+    const left = parseRecordedGroups(review.reviewer_pgids)
+      .filter((group) => isOrphanReviewer(group, deps.inspect(group.pgid), deps.matches));
+    if (left.length > 0) orphans.set(review.id, left);
+    finishRow(review.id, { reviewer_pgids: null });
   }
+
+  const pgids = [...orphans.values()].flat().map((g) => g.pgid);
+  const killedGroups = pgids.length > 0 ? await killProcessGroups(pgids, { graceMs: deps.graceMs }) : [];
+  for (const [reviewId, groups] of orphans) {
+    const names = groups.map((g) => `${g.bin} (pid ${g.pgid})`).join(', ');
+    log(reviewId, 'warn', `Stopped ${groups.length} reviewer process(es) still running from it: ${names}.`);
+  }
+  return { failed, killedGroups };
+}
+
+/**
+ * Shutdown: fail every queued and running review of this process with
+ * `reason`, stop every reviewer process it started (SIGTERM, then SIGKILL
+ * after `graceMs`), and refuse new work. The rows are written before any
+ * process is signalled, so they are correct even if the process is killed
+ * during the grace period.
+ */
+export async function stopAllReviews(reason: string, graceMs = 3_000): Promise<void> {
+  stopping = true;
+  const at = nowIso();
+  for (const reviewId of pending.splice(0)) {
+    finishRow(reviewId, { status: 'failed', error: reason, finished_at: at });
+    log(reviewId, 'error', `Interrupted before it started: ${reason}.`);
+    status(reviewId, 'failed');
+  }
+  for (const reviewId of running.keys()) {
+    interrupted.add(reviewId);
+    finishRow(reviewId, { status: 'failed', error: reason, finished_at: at });
+    log(reviewId, 'error', `Interrupted: ${reason}.`);
+    status(reviewId, 'failed');
+  }
+  // SIGTERM goes out synchronously here, before the aborts below: once the
+  // runner is stopping, an abort no longer SIGKILLs on its own.
+  const stopped = stopAllReviewers(graceMs);
+  for (const job of running.values()) job.controller.abort();
+  await stopped;
 }
 
 /** Top up the worker pool to `CONCURRENCY` while there is queued work. */
@@ -110,6 +229,7 @@ async function worker(): Promise<void> {
       } finally {
         running.delete(reviewId);
         cancelling.delete(reviewId);
+        interrupted.delete(reviewId);
       }
     }
   } finally {
@@ -177,7 +297,14 @@ async function processReview(reviewId: number, signal: AbortSignal): Promise<voi
     checkout,
     ticket,
     (level: LogLevel, message: string) => log(reviewId, level, message),
-    { previousFindings, signal, model: review.model ?? undefined, reviewer: review.reviewer ?? undefined },
+    {
+      previousFindings,
+      signal,
+      model: review.model ?? undefined,
+      reviewer: review.reviewer ?? undefined,
+      // Persisted so a later recovery can stop them if this process dies.
+      onProcessGroups: (groups) => finishRow(reviewId, { reviewer_pgids: JSON.stringify(groups) }),
+    },
   );
   throwIfCancelled(signal);
 
@@ -225,6 +352,8 @@ async function processReview(reviewId: number, signal: AbortSignal): Promise<voi
 }
 
 function handleFailure(reviewId: number, err: unknown): void {
+  // stopAllReviews already wrote the row; the error here is just the unwinding.
+  if (interrupted.has(reviewId)) return;
   const cancelled = cancelling.has(reviewId);
   const message = err instanceof Error ? err.message : String(err);
   const finalStatus = cancelled ? 'cancelled' : 'failed';

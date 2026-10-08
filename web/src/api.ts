@@ -5,7 +5,9 @@ import type {
   LocalReposPayload,
   Preview,
   PreviewDetailPayload,
+  PreviewRoleRequest,
   RecipesPayload,
+  RepoBranchesPayload,
   Review,
   ReviewDetailPayload,
   ReviewGroupsPayload,
@@ -87,10 +89,15 @@ export const api = {
   listPreviews: (params: Params = {}) =>
     req<{ previews: Preview[]; total: number }>(withQuery('/api/previews', params)),
   preview: (id: number) => req<PreviewDetailPayload>(`/api/previews/${id}`),
+  /** Remote branches of an allowed repository, default branch first; `q` filters by substring. */
+  repoBranches: (repo: string, q?: string) =>
+    req<RepoBranchesPayload>(withQuery(`/api/repos/${encodeURIComponent(repo)}/branches`, { q })),
   createPreview: (body: {
     reviewId?: number;
     ticket?: string;
     recipe?: string;
+    /** Branches picked by hand; roles left out follow the ticket, or their base branch without one. */
+    roles?: PreviewRoleRequest[];
     dumpMode?: DumpModeRequest;
   }) => req<{ preview: Preview }>('/api/previews', { method: 'POST', body: JSON.stringify(body) }),
   stopPreview: (id: number) =>
