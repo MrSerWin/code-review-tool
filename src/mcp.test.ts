@@ -12,8 +12,9 @@ import {
   ApiClient, ApiError, ApiUnreachableError, apiBaseUrl, DEFAULT_API_URL,
 } from './mcp/client.js';
 import {
-  compactFindings, compactGroup, compactLocalRepos, findingLocation, isTerminalStatus, mutationRefusal,
-  parseTargetSelector, reviewDetail, selectTargets, severityCounts, truncate, truncateReport,
+  compactFindings, compactGroup, compactLocalRepos, compactPreview, findingLocation, isPreviewSettled,
+  isTerminalStatus, mutationRefusal, parseTargetSelector, reviewDetail, selectTargets, severityCounts, truncate,
+  truncateReport, type PreviewPayload,
 } from './mcp/format.js';
 import type { FindingRow, ReviewGroup, ReviewRow } from './types.js';
 
@@ -284,6 +285,50 @@ test('an API error carries the status and the error field', async () => {
   });
 });
 
+function previewPayload(overrides: Partial<PreviewPayload> = {}): PreviewPayload {
+  return {
+    id: 5, review_id: null, recipe: 'my-app', ticket_key: 'ABC-123', url: 'http://127.0.0.1:41000',
+    status: 'queued', error: null, dump_mode: null, dump_source: null, credentials_hint: 'admin / admin',
+    created_at: '2026-01-01T00:00:00.000Z', ready_at: null, expires_at: null, stopped_at: null,
+    roles: [
+      {
+        role: 'backend', repo: 'my-service', branch: 'feature/abc-123-a', base: 'main', usedBase: false,
+        source: 'local', sha: 'a'.repeat(40), url: null,
+      },
+      { role: 'frontend', repo: 'my-frontend', branch: 'main', base: 'main', usedBase: true, url: 'https://x' },
+    ],
+    ports: { web: 41000 },
+    queuePosition: 0,
+    ...overrides,
+  };
+}
+
+test('a preview settles once ready or ended; only a ready one has a web_url and credentials', () => {
+  assert.equal(isPreviewSettled('ready'), true);
+  assert.equal(isPreviewSettled('failed'), true);
+  assert.equal(isPreviewSettled('starting'), false);
+  assert.equal(isPreviewSettled('stopping'), false);
+
+  const starting = compactPreview(previewPayload({ status: 'starting' }), {
+    page: 'http://ui/previews', logs: [{ message: 'migrating' }],
+  });
+  assert.equal(starting.web_url, null);
+  assert.equal(starting.progress, 'migrating');
+  assert.equal('credentials_hint' in starting, false);
+  assert.deepEqual(starting.roles, [
+    {
+      role: 'backend', repo: 'my-service', branch: 'feature/abc-123-a', base: 'main', used_base: false,
+      source: 'local', sha: 'a'.repeat(40),
+    },
+    { role: 'frontend', repo: 'my-frontend', branch: 'main', base: 'main', used_base: true, source: 'github', sha: null },
+  ]);
+
+  const ready = compactPreview(previewPayload({ status: 'ready' }), { page: 'http://ui/previews' });
+  assert.equal(ready.web_url, 'http://127.0.0.1:41000');
+  assert.equal(ready.credentials_hint, 'admin / admin');
+  assert.equal('progress' in ready, false);
+});
+
 // --- protocol: the real stdio server against a stub API -------------------------
 
 interface Stub {
@@ -299,6 +344,7 @@ async function startStub(pollsUntilDone = 2): Promise<Stub> {
   const posts: unknown[] = [];
   const gets: Stub['gets'] = [];
   const polls = new Map<number, number>();
+  let previewPolls = 0;
   const targets = [
     { repo: 'my-service', branch: 'feature/abc-123-a', baseBranch: 'main', prNumber: null },
     { repo: 'my-frontend', branch: 'feature/abc-123-b', baseBranch: 'main', prNumber: 7 },
@@ -344,6 +390,40 @@ async function startStub(pollsUntilDone = 2): Promise<Stub> {
             reviewer: body.reviewer ?? 'claude', model: body.model ?? 'opus',
           })),
         });
+      }
+      if (req.method === 'GET' && url.pathname === '/api/recipes') {
+        return send(res, 200, {
+          enabled: true,
+          dir: '/recipes',
+          recipes: [{
+            name: 'my-app', description: 'API + web', roles: [{ role: 'backend', repo: 'my-service' }],
+            ports: [{ id: 'web', internal: 2000, primary: true }],
+            database: { engine: 'postgres', version: '14', mode: 'auto' }, readyTimeoutSec: 600,
+          }],
+          errors: [],
+        });
+      }
+      if (req.method === 'POST' && url.pathname === '/api/previews') {
+        posts.push(JSON.parse(raw));
+        return send(res, 201, { preview: previewPayload() });
+      }
+      if (req.method === 'GET' && url.pathname === '/api/previews') {
+        gets.push({ path: url.pathname, query: Object.fromEntries(url.searchParams) });
+        return send(res, 200, {
+          previews: [previewPayload({ id: 6, status: 'ready' }), previewPayload({ id: 5, status: 'stopped' })],
+          total: 2,
+        });
+      }
+      if (req.method === 'GET' && url.pathname === '/api/previews/5') {
+        previewPolls += 1;
+        const status = previewPolls > pollsUntilDone ? 'ready' : 'starting';
+        return send(res, 200, {
+          preview: previewPayload({ status }),
+          logs: [{ id: previewPolls, preview_id: 5, ts: '', level: 'info', message: `step ${previewPolls}` }],
+        });
+      }
+      if (req.method === 'POST' && url.pathname === '/api/previews/5/stop') {
+        return send(res, 200, { preview: previewPayload({ status: 'stopped' }) });
       }
       const match = /^\/api\/reviews\/(\d+)$/.exec(url.pathname);
       if (req.method === 'GET' && match) {
@@ -403,9 +483,11 @@ test('stdio MCP server: list, start, get, and wait against a stub API', { timeou
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     assert.deepEqual(names, [
-      'cancel_review', 'detect_base', 'get_report', 'get_review', 'list_local_repos', 'list_review_groups',
-      'list_reviewers', 'list_reviews', 'rerun_review', 'start_review', 'wait_for_review',
+      'cancel_review', 'detect_base', 'get_preview', 'get_report', 'get_review', 'list_local_repos', 'list_previews',
+      'list_recipes', 'list_review_groups', 'list_reviewers', 'list_reviews', 'rerun_review', 'start_preview',
+      'start_review', 'stop_preview', 'wait_for_preview', 'wait_for_review',
     ]);
+    assert.match(tools.find((t) => t.name === 'start_preview')!.description ?? '', /local:<repo>#<branch>/);
     assert.match(tools.find((t) => t.name === 'wait_for_review')!.description ?? '', /call wait_for_review again/i);
 
     const reviewers = json(await client.callTool({ name: 'list_reviewers', arguments: {} }));
@@ -502,6 +584,59 @@ test('stdio MCP server: grouped history and the runs of one group', { timeout: 6
   }
 });
 
+test('stdio MCP server: recipes, start, wait, list, and stop a preview', { timeout: 60_000 }, async () => {
+  const stub = await startStub(1);
+  const client = await connect({ CODE_REVIEW_API_URL: stub.url });
+  try {
+    const recipes = json(await client.callTool({ name: 'list_recipes', arguments: {} }));
+    assert.equal(recipes.enabled, true);
+    assert.deepEqual(recipes.recipes[0].roles, [{ role: 'backend', repo: 'my-service' }]);
+    assert.equal(recipes.recipes[0].primary_port, 'web');
+
+    const nothing = await client.callTool({ name: 'start_preview', arguments: {} });
+    assert.equal(nothing.isError, true);
+    assert.match(text(nothing), /Give roles, review_id, or ticket/);
+
+    const started = json(await client.callTool({
+      name: 'start_preview',
+      arguments: {
+        recipe: 'my-app',
+        roles: [{ role: 'backend', branch: 'local:my-service#feature/abc-123-a' }, { role: 'frontend', local: true }],
+        review_id: 3,
+        dump_mode: 'clean',
+      },
+    }));
+    assert.equal(started.preview.id, 5);
+    assert.equal(started.preview.page, `${stub.url}/previews`);
+    assert.deepEqual(stub.posts.at(-1), {
+      recipe: 'my-app',
+      roles: [{ role: 'backend', branch: 'local:my-service#feature/abc-123-a' }, { role: 'frontend', local: true }],
+      reviewId: 3,
+      dumpMode: 'clean',
+    });
+
+    const waited = json(await client.callTool({ name: 'wait_for_preview', arguments: { id: 5, timeoutSec: 30, pollSec: 1 } }));
+    assert.equal(waited.finished, true);
+    assert.equal(waited.status, 'ready');
+    assert.equal(waited.web_url, 'http://127.0.0.1:41000');
+    assert.equal(waited.roles[0].source, 'local');
+
+    const got = json(await client.callTool({ name: 'get_preview', arguments: { id: 5, tail_logs: 1 } }));
+    assert.equal(got.logs.length, 1);
+
+    const live = json(await client.callTool({ name: 'list_previews', arguments: { status: 'live', review_id: 3 } }));
+    assert.deepEqual(live.previews.map((p: { id: number }) => p.id), [6]);
+    assert.equal(stub.gets.at(-1)?.query.reviewId, '3');
+
+    const stopped = json(await client.callTool({ name: 'stop_preview', arguments: { id: 5 } }));
+    assert.equal(stopped.stopped, true);
+    assert.equal(stopped.status, 'stopped');
+  } finally {
+    await client.close();
+    await stub.close();
+  }
+});
+
 test('stdio MCP server: guard inside a reviewer, and an unreachable API', { timeout: 60_000 }, async () => {
   const url = await closedPortUrl();
   const client = await connect({ CODE_REVIEW_API_URL: url, CODE_REVIEW_TOOL_REVIEWER: '1' });
@@ -510,6 +645,8 @@ test('stdio MCP server: guard inside a reviewer, and an unreachable API', { time
       ['start_review', { input: 'ABC-123' }],
       ['rerun_review', { id: 1 }],
       ['cancel_review', { id: 1 }],
+      ['start_preview', { ticket: 'ABC-123' }],
+      ['stop_preview', { id: 1 }],
     ] as const) {
       const result = await client.callTool({ name, arguments: args });
       assert.equal(result.isError, true, name);
