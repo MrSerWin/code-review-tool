@@ -34,7 +34,6 @@ const idSchema = z.number().int().positive().describe('Review id, as returned by
 const previewIdSchema = z.number().int().positive()
   .describe('Preview id, as returned by start_preview or list_previews.');
 
-export const PREVIEW_WAIT_DEFAULT_SEC = 120;
 
 const DUMP_MODES = ['auto', 'dump-dir', 'pg_dump', 'none', 'clean'] as const;
 
@@ -507,19 +506,19 @@ export function createMcpServer({ api, env = process.env }: CreateServerOptions)
     title: 'Wait for a preview',
     description:
       'Wait until a preview is ready or has ended (stopped, failed, expired), polling its status, for at most ' +
-      `timeoutSec seconds (default ${PREVIEW_WAIT_DEFAULT_SEC}, max ${WAIT_MAX_SEC}; keep it below your MCP tool ` +
+      `timeoutSec seconds (default ${WAIT_DEFAULT_SEC}, max ${WAIT_MAX_SEC}; keep it below your MCP tool ` +
       'timeout). Returns the same fields as get_preview plus "finished" and "waited_sec". If finished=false it is ' +
       'still starting: call wait_for_preview again with the same id. On failure the last log lines are included.',
     inputSchema: {
       id: previewIdSchema,
       timeoutSec: z.number().int().min(1).max(WAIT_MAX_SEC).optional()
-        .describe(`Longest time to wait, in seconds (default ${PREVIEW_WAIT_DEFAULT_SEC}).`),
+        .describe(`Longest time to wait, in seconds (default ${WAIT_DEFAULT_SEC}).`),
       pollSec: z.number().int().min(1).max(60).optional()
         .describe(`Seconds between status checks (default ${POLL_DEFAULT_SEC}).`),
     },
     annotations: { readOnlyHint: true, openWorldHint: false },
   }, ({ id, timeoutSec, pollSec }, extra) => guarded(async () => {
-    const timeoutMs = (timeoutSec ?? PREVIEW_WAIT_DEFAULT_SEC) * 1000;
+    const timeoutMs = (timeoutSec ?? WAIT_DEFAULT_SEC) * 1000;
     const pollMs = (pollSec ?? POLL_DEFAULT_SEC) * 1000;
     const started = Date.now();
     const deadline = started + timeoutMs;
