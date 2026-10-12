@@ -445,10 +445,7 @@ export default function ReviewDetail({ id }: { id: number }) {
         </Card>
       </div>
 
-      {/* Previews fetch from GitHub, where an unpushed branch does not exist. */}
-      {review.source !== 'local' && (
-        <PreviewPanel reviewId={review.id} repo={review.repo} branch={review.branch} />
-      )}
+      <PreviewPanel reviewId={review.id} repo={review.repo} branch={review.branch} source={review.source} />
 
       {comparison && finished && (
         <Card title={`Changes since run #${comparison.previousRunIndex}`}>

@@ -108,9 +108,11 @@ export function RoleChips({ roles }: { roles: PreviewRole[] }) {
     <ul className="role-list">
       {roles.map((r) => {
         const branch = r.usedBase ? r.base : r.branch;
+        const local = r.source === 'local';
+        const at = r.sha ? ` @ ${r.sha.slice(0, 7)}` : '';
         const title = r.usedBase
-          ? `${r.repo}: ${branch}. No ticket branch to run (never had one, or it is gone from the remote), so the base branch runs.`
-          : `${r.repo}: ${branch} (base ${r.base})`;
+          ? `${r.repo}: ${branch}${at}. No ticket branch to run (never had one, or it is gone from the remote), so the base branch runs.`
+          : `${r.repo}: ${branch}${at} (base ${r.base})${local ? ', copied from the local clone' : ''}`;
         return (
           <li key={r.role} className={`role-chip${r.usedBase ? ' role-base' : ''}`}>
             <span className="role-name" title={r.role}>
@@ -123,6 +125,11 @@ export function RoleChips({ roles }: { roles: PreviewRole[] }) {
             ) : (
               <span className="role-branch" title={title}>
                 {branch}
+              </span>
+            )}
+            {local && (
+              <span className="tag local role-source" title="Copied from the local clone; may not be pushed yet">
+                local
               </span>
             )}
             {r.usedBase && (

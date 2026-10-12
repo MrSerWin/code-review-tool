@@ -42,6 +42,8 @@ export default function Previews() {
   );
   // Custom mode: the branch typed per role; empty runs the role's base branch.
   const [branches, setBranches] = useState<Record<string, string>>({});
+  // Custom mode: roles copied from the local clone instead of GitHub.
+  const [localRoles, setLocalRoles] = useState<Record<string, boolean>>({});
 
   const load = useCallback(async () => {
     try {
@@ -155,7 +157,7 @@ export default function Previews() {
     e.preventDefault();
     if (startMode === 'custom') {
       // Only the roles given a branch; the rest run their base branch.
-      if (recipe) await launch({ roles: roleRequests(recipe.roles, branches) });
+      if (recipe) await launch({ roles: roleRequests(recipe.roles, branches, false, localRoles) });
       return;
     }
     if (ticket.trim()) await launch({ ticket: ticket.trim() });
@@ -232,7 +234,7 @@ export default function Previews() {
               <form className="launcher" onSubmit={(e) => void start(e)}>
                 <input
                   className="launcher-input"
-                  placeholder="ABC-123, PR URL, or repo#branch"
+                  placeholder="ABC-123, PR URL, repo#branch, or local:repo#branch"
                   value={ticket}
                   spellCheck={false}
                   onChange={(e) => setTicket(e.target.value)}
@@ -245,6 +247,7 @@ export default function Previews() {
               </form>
               <p className="muted">
                 Branches are resolved from the ticket. A repo without a branch of its own runs its base branch.
+                local:repo#branch runs an unpushed branch of a local clone.
               </p>
             </>
           ) : (
@@ -253,11 +256,14 @@ export default function Previews() {
                 roles={recipe.roles}
                 values={branches}
                 onChange={(role, value) => setBranches((prev) => ({ ...prev, [role]: value }))}
+                local={localRoles}
+                onLocalChange={(role, value) => setLocalRoles((prev) => ({ ...prev, [role]: value }))}
                 disabled={starting}
               />
               <div className="custom-launch-foot">
                 <p className="muted custom-launch-hint">
-                  Pick a branch for each repo, from any ticket. Leave one empty to run its base branch.
+                  Pick a branch for each repo, from any ticket. Leave one empty to run its base branch. Local copies
+                  the committed branch from the local clone, pushed or not; empty runs the checked-out branch.
                 </p>
                 <div className="custom-launch-actions">
                   {recipeSelect}
