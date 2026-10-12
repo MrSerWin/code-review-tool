@@ -19,9 +19,12 @@ const createBody = z
       .array(
         z.object({
           role: z.string().min(1).max(64),
-          // Empty or absent: the role runs its base branch.
-          branch: z.string().max(255).optional(),
+          // Empty or absent: the role runs its base branch (local: the clone's checked-out branch).
+          // "local:<repo>#<branch>" is the same as local: true with that branch.
+          branch: z.string().max(300).optional(),
           base: z.string().max(255).optional(),
+          // Copy the branch from the configured local clone (it may be unpushed) instead of GitHub.
+          local: z.boolean().optional(),
         }),
       )
       .max(20)
