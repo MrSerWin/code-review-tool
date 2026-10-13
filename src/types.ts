@@ -240,6 +240,10 @@ export interface PreviewRole {
   base: string;
   /** True when the repo had no branch for this ticket and its base branch is used. */
   usedBase: boolean;
+  /** 'local' when the branch is copied from the local clone (possibly unpushed); absent means 'github'. */
+  source?: ReviewSource;
+  /** The commit the preview runs, recorded once the checkout exists. */
+  sha?: string;
 }
 
 /** Mirrors a row of the `previews` table. */

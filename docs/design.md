@@ -656,8 +656,7 @@ Dark-first, compact. What each page offers is described in
   something on screen is running.
 - **Review detail** (`/review/:id`) — verdict banner with GitHub links,
   meta table, requirements, findings by severity, observations, the comparison
-  with the previous run, a live log fed by SSE, and the Preview card (not for
-  local runs). Actions: cancel, re-run with an optional reviewer and model,
+  with the previous run, a live log fed by SSE, and the Preview card. Actions: cancel, re-run with an optional reviewer and model,
   download report, copy report, delete.
 - **Ticket view** (`/ticket/:key`) — all runs of one group (`group_key`) across
   repositories, grouped by repo and branch, newest first.
@@ -681,8 +680,8 @@ in `mcp/format.ts`; the tool list is in
 **Recursion guard.** A reviewer CLI is the same kind of agent that might have
 this server configured. Each reviewer's argv keeps user MCP servers out of the
 run, and as a second line of defence `mutationRefusal()` makes `start_review`,
-`rerun_review`, and `cancel_review` refuse whenever `CODE_REVIEW_TOOL_REVIEWER`
-is set (and not `0`/`false`) in the MCP process's environment.
+`rerun_review`, `cancel_review`, `start_preview`, and `stop_preview` refuse
+whenever `CODE_REVIEW_TOOL_REVIEWER` is set (and not `0`/`false`) in the MCP process's environment.
 
 ## Preview environments (`src/preview/`)
 
@@ -703,16 +702,24 @@ until `PREVIEW_ENABLED` is set. No reviewer CLI is involved.
 | `store.ts` | `previews` and `preview_logs` rows |
 | `events.ts` | preview SSE bus, mirroring `src/events.ts` |
 
-**Roles.** `requestPreview()` refuses local reviews (an unpushed branch is not
-on GitHub), checks hand-picked roles against the recipe and their branches
-against the remote (one uncached retry, so a branch pushed a moment ago is
-found), then `resolveRoles()` plans one role per recipe repository:
+**Roles.** `requestPreview()` checks hand-picked roles against the recipe, their
+branches against the remote (one uncached retry, so a branch pushed a moment ago
+is found) and local roles (`local: true` or `local:<repo>#<branch>`) against
+their clone (`checkLocalOverrides()`, which also records the tip), then
+`resolveRoles()` plans one role per recipe repository:
 a hand-picked branch wins (empty = base branch); then the review's own branch
 for its repository; then the branches of the input, which is resolved with
 `resolveTargets()` — and when that input is a PR whose branch carries a tracker
 key, the ticket is resolved as well so its other repositories join, the PR's
 branch still winning for its own; otherwise the base branch, recorded as
-`usedBase`. When every role is hand-picked, no ticket is resolved.
+`usedBase`. When every role is hand-picked, no ticket is resolved. A role from a
+local override, a local review, or a `local:` input carries `source: 'local'`;
+`checkoutTarget()` turns it into a local `ResolvedTarget`, so the sandbox
+copies the clone's `refs/heads/<branch>` exactly as for a local review
+(committed state only, so a branch checked out in a worktree of the clone
+works). Every role records the commit it ran as `sha` in `roles_json` once its
+checkout exists; a local review checkout holding a working-tree snapshot is
+never reused.
 
 **Lifecycle.** `queued → preparing → starting → ready`, then `stopping →
 stopped`, or `failed` / `expired`. At most `PREVIEW_MAX_CONCURRENT` previews are

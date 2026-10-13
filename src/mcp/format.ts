@@ -7,7 +7,7 @@
  * pulls in nothing that reads configuration or secrets.
  */
 import type {
-  FindingRow, LogRow, RequirementRow, ReviewGroup, ReviewRow, ReviewStatus, Severity,
+  FindingRow, LogRow, PreviewRole, PreviewStatus, RequirementRow, ReviewGroup, ReviewRow, ReviewStatus, Severity,
 } from '../types.js';
 
 export const TERMINAL_STATUSES: readonly ReviewStatus[] = ['done', 'failed', 'cancelled'];
@@ -332,6 +332,109 @@ export function selectTargets<T extends TargetSelector>(
   return { chosen, unmatched };
 }
 
+// --- previews -----------------------------------------------------------------
+
+/** A preview is settled once it is ready to click or has ended; only then does waiting stop. */
+export const PREVIEW_END_STATUSES: readonly PreviewStatus[] = ['stopped', 'failed', 'expired'];
+export const PREVIEW_LIVE_STATUSES: readonly PreviewStatus[] = ['queued', 'preparing', 'starting', 'ready', 'stopping'];
+
+export function isPreviewSettled(status: string): boolean {
+  return status === 'ready' || (PREVIEW_END_STATUSES as readonly string[]).includes(status);
+}
+
+/** A preview as `GET /api/previews/:id` decorates it. */
+export interface PreviewPayload {
+  id: number;
+  review_id: number | null;
+  recipe: string;
+  ticket_key: string | null;
+  url: string | null;
+  status: PreviewStatus;
+  error: string | null;
+  dump_mode: string | null;
+  dump_source: string | null;
+  credentials_hint: string | null;
+  created_at: string;
+  ready_at: string | null;
+  expires_at: string | null;
+  stopped_at: string | null;
+  roles: (PreviewRole & { url?: string | null })[];
+  ports: Record<string, number>;
+  queuePosition?: number;
+}
+
+export function compactPreviewRole(r: PreviewPayload['roles'][number]) {
+  return {
+    role: r.role,
+    repo: r.repo,
+    // What actually runs: the base branch when the role had no branch of its own.
+    branch: r.usedBase ? r.base : r.branch,
+    base: r.base,
+    used_base: r.usedBase,
+    source: r.source ?? 'github',
+    sha: r.sha ?? null,
+  };
+}
+
+/**
+ * One preview, compact: what runs where, and how to reach it. `web_url` is the
+ * running app (only while ready); `page` is the tool's own page for it.
+ */
+export function compactPreview(
+  p: PreviewPayload,
+  opts: { page: string; logs?: readonly { message: string }[] } = { page: '' },
+) {
+  const ready = p.status === 'ready';
+  const last = opts.logs?.at(-1)?.message;
+  return {
+    id: p.id,
+    status: p.status,
+    recipe: p.recipe,
+    ticket: p.ticket_key,
+    review_id: p.review_id,
+    web_url: ready ? p.url : null,
+    roles: p.roles.map(compactPreviewRole),
+    ports: p.ports,
+    data: p.dump_mode,
+    error: truncate(p.error, 600),
+    queue_position: p.queuePosition || null,
+    created_at: p.created_at,
+    ready_at: p.ready_at,
+    expires_at: p.expires_at,
+    ...(ready && p.credentials_hint ? { credentials_hint: truncate(p.credentials_hint, 400) } : {}),
+    ...(!isPreviewSettled(p.status) && last ? { progress: truncate(last, 200) } : {}),
+    page: opts.page,
+  };
+}
+
+export interface RecipePayload {
+  name: string;
+  description: string | null;
+  roles: { role: string; repo: string }[];
+  ports: { id: string; primary?: boolean }[];
+  database: { engine: string; version: string | null; mode: string } | null;
+  readyTimeoutSec: number;
+}
+
+export function compactRecipes(payload: {
+  enabled: boolean;
+  recipes: RecipePayload[];
+  errors?: { name?: string; error: string }[];
+}) {
+  return {
+    enabled: payload.enabled,
+    recipes: payload.recipes.map((r) => ({
+      name: r.name,
+      description: truncate(r.description, 300),
+      roles: r.roles,
+      primary_port: r.ports.find((p) => p.primary)?.id ?? null,
+      database: r.database ? `${r.database.engine}${r.database.version ? ` ${r.database.version}` : ''} (${r.database.mode})` : null,
+      ready_timeout_sec: r.readyTimeoutSec,
+    })),
+    errors: (payload.errors ?? []).map((e) => e.error),
+  };
+}
+
 // --- recursion guard --------------------------------------------------------
 
 /** Set by the review runner in every reviewer CLI's environment. */
@@ -347,5 +450,5 @@ export function mutationRefusal(env: NodeJS.ProcessEnv = process.env): string | 
   const flag = (env[REVIEWER_ENV_FLAG] ?? '').trim();
   if (!flag || flag === '0' || /^false$/i.test(flag)) return null;
   return 'Refused: this MCP server is running inside a code-review-tool reviewer ' +
-    `(${REVIEWER_ENV_FLAG} is set). Reviews cannot start, re-run, or cancel reviews.`;
+    `(${REVIEWER_ENV_FLAG} is set). Reviews cannot start, re-run, or cancel reviews or previews.`;
 }

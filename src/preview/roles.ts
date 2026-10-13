@@ -2,12 +2,14 @@
  * Which branch each role of a preview runs. Pure and network-free: the engine
  * resolves tickets and default branches, this module only decides.
  */
+import { assertSafeName } from '../gitNames.js';
 import { ticketKeyFromBranch } from '../groupKey.js';
+import { LOCAL_PREFIX, parseLocalInput } from '../localRepos.js';
 import { parsePullRequestRef } from '../resolver.js';
 import type { PreviewRole, ResolvedTarget, TicketInfo } from '../types.js';
 
 /** A branch the resolver found, reduced to what a preview role needs. */
-export type RoleTarget = Pick<ResolvedTarget, 'repo' | 'branch' | 'baseBranch'>;
+export type RoleTarget = Pick<ResolvedTarget, 'repo' | 'branch' | 'baseBranch' | 'source'>;
 
 /**
  * The branches a preview can draw from: the ones the input itself named (a PR,
@@ -19,26 +21,67 @@ export function mergeTargets(explicit: RoleTarget[], ticket: RoleTarget[]): Role
   return [...explicit, ...ticket.filter((t) => !covered.has(t.repo))];
 }
 
-/** A branch picked by hand for one role, as the API receives it. */
+/**
+ * A branch picked by hand for one role, as the API receives it. A local role
+ * (`local: true`, or a branch written `local:<repo>#<branch>` like a review
+ * input) is copied from the configured local clone instead of GitHub.
+ */
 export interface RoleOverrideInput {
   role: string;
-  /** Empty or absent: the role runs its base branch. */
+  /** Empty or absent: the role runs its base branch (local: the clone's checked-out branch). */
   branch?: string | undefined;
   base?: string | undefined;
+  local?: boolean | undefined;
 }
 
-/** A checked override: a recipe role, its repository, and the branch (null = base branch). */
+/**
+ * A checked override: a recipe role, its repository, and the branch. A null
+ * branch runs the base branch, or for a local role the clone's checked-out
+ * branch until the engine resolves it.
+ */
 export interface RoleOverride {
   role: string;
   repo: string;
   branch: string | null;
   base?: string | undefined;
+  /** Present only for local roles. */
+  source?: 'local';
+  /** Local roles, once resolved: the branch tip in the clone. */
+  sha?: string;
+}
+
+/**
+ * The branch of one hand-picked role and whether it is local. A `local:` branch
+ * must name the role's own repository: `local:<repo>#<branch>`, or `local:<repo>`
+ * for the clone's checked-out branch.
+ */
+export function parseRoleBranch(
+  role: string,
+  repo: string,
+  rawBranch: string | undefined,
+  localFlag: boolean | undefined,
+): { branch: string | null; local: boolean } {
+  const trimmed = rawBranch?.trim() ?? '';
+  if (trimmed.toLowerCase().startsWith(LOCAL_PREFIX)) {
+    const parsed = parseLocalInput(trimmed);
+    if (!parsed) throw new Error(`Malformed local branch for role ${role}: ${JSON.stringify(trimmed)}`);
+    if (parsed.repo !== repo) {
+      throw new Error(
+        `Role ${role} runs repo ${repo}, but its branch names local:${parsed.repo}; use local:${repo}#<branch>`,
+      );
+    }
+    return { branch: parsed.branch, local: true };
+  }
+  const branch = trimmed || null;
+  if (localFlag && branch !== null) assertSafeName('branch', branch);
+  return { branch, local: Boolean(localFlag) };
 }
 
 /**
  * Checks hand-picked roles against the recipe: every role must be one of the
  * recipe's and appear once. Names are trimmed; an empty branch means "run the
- * base branch". Throws with a message fit for the user.
+ * base branch" (for a local role: the clone's checked-out branch). Throws with
+ * a message fit for the user.
  */
 export function normalizeOverrides(
   input: RoleOverrideInput[] | undefined,
@@ -57,9 +100,12 @@ export function normalizeOverrides(
     }
     if (seen.has(role)) throw new Error(`Role "${role}" is given more than once`);
     seen.add(role);
-    const branch = item.branch?.trim() || null;
+    const { branch, local } = parseRoleBranch(role, repo, item.branch, item.local);
     const base = item.base?.trim() || undefined;
-    out.push(base ? { role, repo, branch, base } : { role, repo, branch });
+    if (local && base !== undefined) assertSafeName('base branch', base);
+    const override: RoleOverride = base ? { role, repo, branch, base } : { role, repo, branch };
+    if (local) override.source = 'local';
+    out.push(override);
   }
   return out;
 }
@@ -69,12 +115,15 @@ export interface MissingBranch {
   repo: string;
   branch: string;
   kind: 'branch' | 'base';
+  /** Missing from the local clone rather than from the remote. */
+  local?: boolean;
 }
 
 /**
  * The hand-picked branches (and bases) that the remote does not have, given
  * repository -> its remote branch names. A repository missing from the map is
- * not checked here; the caller lists every repository it needs.
+ * not checked here; the caller lists every repository it needs. Local roles
+ * are checked against the clone instead and are skipped here.
  */
 export function missingOverrideBranches(
   overrides: RoleOverride[],
@@ -82,6 +131,7 @@ export function missingOverrideBranches(
 ): MissingBranch[] {
   const missing: MissingBranch[] = [];
   for (const o of overrides) {
+    if (o.source === 'local') continue;
     const heads = remote[o.repo];
     if (!heads) continue;
     if (o.branch !== null && !heads.includes(o.branch)) {
@@ -96,7 +146,8 @@ export function missingOverrideBranches(
 
 export function missingBranchMessage(missing: MissingBranch[]): string {
   return missing
-    .map((m) => `${m.kind === 'base' ? 'Base branch' : 'Branch'} ${m.branch} not found in repo ${m.repo} (role ${m.role})`)
+    .map((m) => `${m.kind === 'base' ? 'Base branch' : 'Branch'} ${m.branch} not found in `
+      + `${m.local ? 'the local clone of ' : ''}repo ${m.repo} (role ${m.role})`)
     .join('; ');
 }
 
@@ -125,9 +176,9 @@ export interface PlanRolesInput {
   /** repository -> its default branch. */
   defaultBranches: Record<string, string>;
   /** Branches picked by hand, per role; they win over everything else. A null branch runs the base branch. */
-  overrides?: { role: string; branch: string | null; base?: string | undefined }[] | undefined;
+  overrides?: Pick<RoleOverride, 'role' | 'branch' | 'base' | 'source' | 'sha'>[] | undefined;
   /** The reviewed branch, when the preview is started from a review. */
-  review?: { repo: string; branch: string; base_branch: string } | undefined;
+  review?: { repo: string; branch: string; base_branch: string; source?: 'github' | 'local' } | undefined;
   /** Branches the input named itself. */
   explicitTargets: RoleTarget[];
   /** Every branch of the ticket behind the input. */
@@ -149,21 +200,32 @@ export function planRoles(input: PlanRolesInput): PreviewRole[] {
     if (override) {
       const overrideBase = override.base ?? base;
       const branch = override.branch ?? overrideBase;
-      roles.push({ role, repo, branch, base: overrideBase, usedBase: branch === overrideBase });
+      const planned: PreviewRole = { role, repo, branch, base: overrideBase, usedBase: branch === overrideBase };
+      roles.push(withLocal(planned, override.source === 'local', override.sha));
       continue;
     }
     if (input.review && input.review.repo === repo) {
-      roles.push({ role, repo, branch: input.review.branch, base: input.review.base_branch, usedBase: false });
+      const planned: PreviewRole = {
+        role, repo, branch: input.review.branch, base: input.review.base_branch, usedBase: false,
+      };
+      roles.push(withLocal(planned, input.review.source === 'local'));
       continue;
     }
     const target = targets.find((t) => t.repo === repo);
     if (target) {
-      roles.push({ role, repo, branch: target.branch, base: target.baseBranch, usedBase: false });
+      const planned: PreviewRole = { role, repo, branch: target.branch, base: target.baseBranch, usedBase: false };
+      roles.push(withLocal(planned, target.source === 'local'));
       continue;
     }
     roles.push({ role, repo, branch: base, base, usedBase: true });
   }
   return roles;
+}
+
+/** Marks a role as copied from the local clone; GitHub roles carry no source field. */
+function withLocal(role: PreviewRole, local: boolean, sha?: string): PreviewRole {
+  if (!local) return role;
+  return sha ? { ...role, source: 'local', sha } : { ...role, source: 'local' };
 }
 
 /** `org/repo#N` or a PR URL: a pull request standing in for a ticket. */
