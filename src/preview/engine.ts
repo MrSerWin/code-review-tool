@@ -6,13 +6,15 @@ import {
   assertPristine, fetchCheckout, ghApi, lsRemoteHeads, sanitizeBranchForPath,
 } from '../gitSandbox.js';
 import { branchUrl } from '../githubLinks.js';
+import { ticketKeyFromBranch } from '../groupKey.js';
+import { branchRefs, parseLocalInput, resolveLocalBranch } from '../localRepos.js';
 import { logger } from '../logger.js';
 import { sanitizeLogMessage } from '../logSanitize.js';
 import { remoteBranches } from '../remoteBranches.js';
 import { resolveTargets } from '../resolver.js';
 import { buildSanitizedEnv, REVIEWER_MARKER_ENV } from '../reviewers/shared.js';
 import type {
-  DumpMode, LogLevel, PreviewRole, PreviewRow, PreviewStatus,
+  DumpMode, LogLevel, PreviewRole, PreviewRow, PreviewStatus, ResolvedTarget,
 } from '../types.js';
 import { resolveDumpSource } from './database.js';
 import { publishPreview } from './events.js';
@@ -20,8 +22,8 @@ import { allocatePorts } from './ports.js';
 import { findRecipe, loadRecipes, primaryPort, type Recipe } from './recipes.js';
 import {
   coversAllRoles, followUpTicketKey, missingBranchMessage, missingOverrideBranches, normalizeOverrides,
-  planRoles, previewLookupKey, ticketKeyFromBranches, trackerKeyOf, type RoleOverride, type RoleOverrideInput,
-  type RoleTarget,
+  planRoles, previewLookupKey, ticketKeyFromBranches, trackerKeyOf, type MissingBranch, type RoleOverride,
+  type RoleOverrideInput, type RoleTarget,
 } from './roles.js';
 import { runStep } from './steps.js';
 import {
@@ -67,7 +69,11 @@ export interface CreatePreviewRequest {
   reviewId?: number;
   ticket?: string;
   recipe?: string;
-  /** Branches picked by hand per role; an empty branch runs that role's base branch. */
+  /**
+   * Branches picked by hand per role; an empty branch runs that role's base
+   * branch. A local role (`local: true` or `local:<repo>#<branch>`) is copied
+   * from the configured local clone.
+   */
   roles?: RoleOverrideInput[];
   dumpMode?: 'auto' | 'dump-dir' | 'pg_dump' | 'none' | 'clean';
 }
@@ -81,12 +87,8 @@ export async function requestPreview(request: CreatePreviewRequest): Promise<Pre
   const recipe = pickRecipe(request.recipe);
   const review = request.reviewId !== undefined ? getReview(request.reviewId) : undefined;
   if (request.reviewId !== undefined && !review) throw new Error(`Review ${request.reviewId} not found`);
-  if (review?.source === 'local') {
-    // A preview fetches its branches from GitHub; an unpushed branch is not there.
-    throw new Error(
-      'Previews are not available for local (unpushed) reviews. Push the branch and preview it from a GitHub review.',
-    );
-  }
+  // A local review's branch is copied from the clone again, so it must still be there.
+  if (review?.source === 'local') await resolveLocalBranch(review.repo, review.branch);
 
   // Hand-picked branches are checked before anything is queued: a typo must
   // not quietly turn into a preview of the base branch.
@@ -149,10 +151,12 @@ async function remoteHeads(repos: string[], fresh: boolean): Promise<Record<stri
  * Every hand-picked role must belong to the recipe, and every hand-picked
  * branch must exist on its repository's remote. The listing is cached; a miss
  * is checked once more uncached, so a branch pushed a moment ago is found.
+ * Local roles are checked against their clone instead.
  */
 async function checkOverrides(recipe: Recipe, input: RoleOverrideInput[] | undefined): Promise<RoleOverride[]> {
   const overrides = normalizeOverrides(input, recipe.repos, recipe.name);
-  const named = overrides.filter((o) => o.branch !== null || o.base !== undefined);
+  await checkLocalOverrides(overrides);
+  const named = overrides.filter((o) => o.source !== 'local' && (o.branch !== null || o.base !== undefined));
   if (named.length === 0) return overrides;
   const repos = [...new Set(named.map((o) => o.repo))];
   let heads = await remoteHeads(repos, false);
@@ -163,6 +167,36 @@ async function checkOverrides(recipe: Recipe, input: RoleOverrideInput[] | undef
   }
   if (missing.length > 0) throw new Error(missingBranchMessage(missing));
   return overrides;
+}
+
+/**
+ * Resolves every local role against its clone, in place: the branch (the
+ * checked-out one when none was named) and its tip. A named base must exist in
+ * the clone, as a local branch or as origin's. Every miss is reported at once.
+ * Exported for tests; `paths` stands in for the configured clones.
+ */
+export async function checkLocalOverrides(overrides: RoleOverride[], paths?: Map<string, string>): Promise<void> {
+  const missing: MissingBranch[] = [];
+  for (const o of overrides) {
+    if (o.source !== 'local') continue;
+    let resolved;
+    try {
+      resolved = await resolveLocalBranch(o.repo, o.branch, paths);
+    } catch (err) {
+      if (o.branch === null || !/not found in the local clone/.test((err as Error).message)) throw err;
+      missing.push({ role: o.role, repo: o.repo, branch: o.branch, kind: 'branch', local: true });
+      continue;
+    }
+    o.branch = resolved.branch;
+    o.sha = resolved.sha;
+    if (o.base !== undefined) {
+      const refs = await branchRefs(resolved.repoPath, o.base);
+      if (!refs.localHead && !refs.originRef) {
+        missing.push({ role: o.role, repo: o.repo, branch: o.base, kind: 'base', local: true });
+      }
+    }
+  }
+  if (missing.length > 0) throw new Error(missingBranchMessage(missing));
 }
 
 const defaultBranchCache = new Map<string, string>();
@@ -178,7 +212,10 @@ async function defaultBranch(repo: string): Promise<string> {
 }
 
 interface ResolveRolesInput {
-  review?: { id: number; repo: string; branch: string; base_branch: string; ticket_key: string | null } | undefined;
+  review?: {
+    id: number; repo: string; branch: string; base_branch: string; ticket_key: string | null;
+    source?: 'github' | 'local';
+  } | undefined;
   /** What the user typed: a ticket key, a PR URL, or repo#branch. */
   ticket?: string | null | undefined;
   overrides?: RoleOverride[] | undefined;
@@ -196,6 +233,9 @@ async function targetsFor(key: string): Promise<{ targets: RoleTarget[]; tracker
     const { ticket, targets } = await resolveTargets(key);
     return { targets, trackerKey: trackerKeyOf(ticket, config.githubOrg) };
   } catch (err) {
+    // A local branch that is not in the clone is a typo, not a ticket without
+    // branches: previewing the base branch instead would hide it.
+    if (parseLocalInput(key)) throw err;
     logger.warn(`preview: no branches resolved for ${key}: ${(err as Error).message}`);
     return null;
   }
@@ -228,7 +268,10 @@ export async function resolveRoles(recipe: Recipe, input: ResolveRolesInput): Pr
     const first = await targetsFor(lookup);
     if (first) {
       explicitTargets = first.targets;
-      trackerKey = first.trackerKey;
+      // A local input (`local:<repo>#<branch>`) has no ticket of its own; the
+      // key its branch name carries brings in the ticket's other repositories.
+      const localBranch = parseLocalInput(lookup) ? first.targets[0]?.branch : undefined;
+      trackerKey = first.trackerKey ?? (localBranch ? ticketKeyFromBranch(localBranch) : null);
       const followUp = followUpTicketKey(lookup, first.trackerKey);
       if (followUp) ticketTargets = (await targetsFor(followUp))?.targets ?? [];
     }
@@ -411,25 +454,57 @@ async function prepareCheckouts(
     const reused = row.review_id !== null ? reviewCheckoutDir(row.review_id, role) : null;
     if (reused) {
       log(context.previewId, 'info', `Reusing the review checkout of ${role.repo} (${role.branch}).`);
-      context.borrowedCheckouts.push(reused);
-      checkouts[role.role] = reused;
+      context.borrowedCheckouts.push(reused.dir);
+      checkouts[role.role] = reused.dir;
+      if (reused.sha) role.sha = reused.sha;
+      updatePreview(context.previewId, { roles_json: JSON.stringify(roles) });
       continue;
     }
     // Persisted as soon as it is decided: the row is what the API and the UI
     // read, and a later step may fail before the loop ends.
-    if (await fallBackIfBranchGone(context, role)) {
+    if (role.source !== 'local' && await fallBackIfBranchGone(context, role)) {
       updatePreview(context.previewId, { roles_json: JSON.stringify(roles) });
     }
-    log(context.previewId, 'info', `Fetching ${role.repo} (${role.branch}) in the git sandbox.`);
+    log(
+      context.previewId,
+      'info',
+      role.source === 'local'
+        ? `Copying ${role.repo} (${role.branch}) from the local clone in the git sandbox.`
+        : `Fetching ${role.repo} (${role.branch}) in the git sandbox.`,
+    );
     const result = await fetchCheckout(
-      { repo: role.repo, branch: role.branch, baseBranch: role.base, prNumber: null },
+      checkoutTarget(role),
       PREVIEW_CHECKOUT_ID_BASE + context.previewId,
       (level, message) => log(context.previewId, level, message),
     );
     context.ownedCheckouts.push(result.dir);
     checkouts[role.role] = result.dir;
+    if (role.source === 'local' && role.sha && role.sha !== result.headSha) {
+      log(
+        context.previewId,
+        'info',
+        `${role.branch} moved since the preview was requested (${role.sha.slice(0, 7)} -> ${result.headSha.slice(0, 7)}); `
+          + 'running the new tip.',
+      );
+    }
+    role.sha = result.headSha;
+    updatePreview(context.previewId, { roles_json: JSON.stringify(roles) });
   }
   return checkouts;
+}
+
+/**
+ * What the sandbox checks out for a role. A local role is copied from the
+ * clone's `refs/heads/<branch>` (committed state only, never a working tree);
+ * every other role is fetched from GitHub.
+ */
+export function checkoutTarget(role: PreviewRole): ResolvedTarget {
+  const target: ResolvedTarget = { repo: role.repo, branch: role.branch, baseBranch: role.base, prNumber: null };
+  if (role.source === 'local') {
+    target.source = 'local';
+    target.includeWorkingTree = false;
+  }
+  return target;
 }
 
 /**
@@ -477,17 +552,22 @@ async function fallBackIfBranchGone(context: RunContext, role: PreviewRole): Pro
   return true;
 }
 
-/** The checkout a review left behind, when it is still on disk and matches the role. */
-function reviewCheckoutDir(reviewId: number, role: PreviewRole): string | null {
+/**
+ * The checkout a review left behind, when it is still on disk and matches the
+ * role. A local review that included uncommitted changes is not reused: its
+ * checkout holds a snapshot commit, and a preview runs committed state only.
+ */
+function reviewCheckoutDir(reviewId: number, role: PreviewRole): { dir: string; sha: string | null } | null {
   const review = getReview(reviewId);
   if (!review || review.repo !== role.repo || review.branch !== role.branch) return null;
+  if ((review.source === 'local') !== (role.source === 'local') || review.working_tree) return null;
   let dir: string;
   try {
     dir = path.join(config.dataDir, 'checkouts', role.repo, sanitizeBranchForPath(role.branch), String(reviewId));
   } catch {
     return null;
   }
-  return fs.existsSync(path.join(dir, '.git')) ? dir : null;
+  return fs.existsSync(path.join(dir, '.git')) ? { dir, sha: review.head_sha } : null;
 }
 
 interface StepEnvInput {
@@ -850,7 +930,9 @@ export function decoratePreview(row: PreviewRow): Record<string, unknown> {
     // The org lives only in the server config, so the GitHub link is built here.
     roles: safeRoles(row.roles_json).map((role) => ({
       ...role,
-      url: branchUrl(config.githubOrg, role.repo, role.usedBase ? role.base : role.branch),
+      source: role.source ?? 'github',
+      // A local branch may not exist on GitHub, so it gets no link.
+      url: role.source === 'local' ? null : branchUrl(config.githubOrg, role.repo, role.usedBase ? role.base : role.branch),
     })),
     ports: parsePorts(row.ports_json),
     queuePosition: queuePosition(row.id),

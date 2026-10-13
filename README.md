@@ -232,7 +232,8 @@ npm run review -- 'local:my-service#feat/b' --base feat/a     # diff against an 
   (the current one first, unpushed and ahead/behind marked). The **Base**
   field is prefilled with the detected parent and can be changed.
   `GET /api/local-repos` returns the same data.
-- Previews are not available for local reviews: a preview fetches from GitHub.
+- A local review's **Preview** card copies the reviewed branch from the clone
+  again; see [Local branches in a preview](#local-branches-in-a-preview).
 
 ## Usage
 
@@ -385,7 +386,7 @@ authentication. Errors come back as `{ "error": "…" }` with a 4xx or 5xx statu
 | GET | `/api/recipes` | | `{ enabled, dir, recipes, errors }`: loaded preview recipes, and every invalid one with the reason |
 | GET | `/api/previews` | `?reviewId=&ticket=&recipe=&limit=&offset=` | `{ previews, total }`, newest first; `limit` 1–500, default 50 |
 | GET | `/api/previews/:id` | | `{ preview, logs }` |
-| POST | `/api/previews` | `{ reviewId?, ticket?, recipe?, roles?, dumpMode? }` | `201 { preview }`, queued; `409` when previews are disabled |
+| POST | `/api/previews` | `{ reviewId?, ticket?, recipe?, roles?, dumpMode? }`; `roles: [{ role, branch?, base?, local? }]`, a local branch as `local: true` or `branch: "local:<repo>#<branch>"` | `201 { preview }`, queued; `400` when a role, branch or local branch does not exist; `409` when previews are disabled |
 | POST | `/api/previews/:id/stop` | | `{ preview }`: runs `down` |
 | DELETE | `/api/previews/:id` | | `{ ok: true }`: stops it first, then deletes the row and its scratch directory |
 | GET | `/api/previews/:id/events` | | server-sent events: `status`, `log`, and `ready` messages |
@@ -418,10 +419,19 @@ every tool returns an error saying so.
 | `list_review_groups` | `q?`, `status?` (`active`, `failed`, `done`), `limit?` (default 10, max 50), `offset?` | the history grouped by ticket (see [Grouping](#the-web-ui)), with the latest run of each branch, paged |
 | `cancel_review` | `id` | cancel a queued or running review |
 | `rerun_review` | `id`, `reviewer?`, `model?` | run a review again, optionally with another reviewer or model |
+| `list_recipes` | | preview recipes: name, roles (role -> repo), database, ready timeout; `enabled` is false when previews are off |
+| `start_preview` | `recipe?`, `roles?` (`[{role, branch?, base?, local?}]`), `review_id?`, `ticket?`, `dump_mode?` | start a [preview](#preview-environments-optional); a role runs a local branch with `branch: "local:<repo>#<branch>"` or `local: true`; returns the preview id at once |
+| `get_preview` | `id`, `tail_logs?` | status, `web_url` once ready, each role's branch, `source` (`github` / `local`) and commit, ports, data mode, expiry, error |
+| `wait_for_preview` | `id`, `timeoutSec?` (default 50, max 600), `pollSec?` (default 5) | poll until the preview is ready or has ended; returns `finished`, call again while it is `false` |
+| `stop_preview` | `id` | stop a preview and wait for its teardown |
+| `list_previews` | `review_id?`, `ticket?`, `recipe?`, `status?` (one status or `live`), `limit?` (default 20) | recent previews, newest first |
 
 A review takes minutes, so the usual flow is `start_review`, then
 `wait_for_review` in a loop, then `get_review` or `get_report`. Review results
-carry each review's page URL in the web UI.
+carry each review's page URL in the web UI. A preview follows the same pattern:
+`start_preview`, `wait_for_preview` until `finished`, open `web_url`, then
+`stop_preview`. `start_preview`, `stop_preview` and the review mutations are
+refused inside a reviewer.
 
 Build first (`npm run build`), then register the server. Use an absolute path to
 `node` if the agent is a GUI app that does not see your shell's `PATH` (nvm).
@@ -478,8 +488,8 @@ MCP dispatcher tools (`search_tool`, `use_tool`) disallowed, every MCP tool
 denied (`--deny 'mcp__*'`), and its Claude, Cursor, and managed MCP imports
 switched off. As a second line of defence each reviewer process gets
 `CODE_REVIEW_TOOL_REVIEWER=1`, and the MCP server refuses `start_review`,
-`rerun_review`, and `cancel_review` when it sees it; the read-only tools stay
-available.
+`rerun_review`, `cancel_review`, `start_preview`, and `stop_preview` when it
+sees it; the read-only tools stay available.
 
 ## Preview environments (optional)
 
@@ -508,13 +518,14 @@ for every variable a step receives and for running an app's background
 workers.
 
 **Starting one.** From a review page's **Preview** card, or from the
-**Previews** page with a ticket key, a PR URL, or `repo#branch`. Once a preview
-leaves the queue it goes through:
+**Previews** page with a ticket key, a PR URL, `repo#branch`, or
+`local:repo#branch`. Once a preview leaves the queue it goes through:
 
 1. **Checkouts.** Each role gets its branch (see below): the review's own
-   checkout when it is still on disk, otherwise a fresh fetch in the sandbox. A
-   branch that has since been deleted on the remote (merged, say) falls back to
-   its base branch, with a warning.
+   checkout when it is still on disk, otherwise a fresh fetch in the sandbox
+   (a local role is copied from the clone instead). A branch that has since
+   been deleted on the remote (merged, say) falls back to its base branch,
+   with a warning.
 2. **Ports.** One free host port per recipe port, from `PREVIEW_PORT_RANGE`.
 3. **Data.** The freshest source that works: a `pg_dump` of a live database
    (run with the host's `pg_dump`), otherwise the newest dump file in a
@@ -558,6 +569,32 @@ repository, or the request is refused before anything is queued. A role with
 an empty branch runs its base branch. A role left out runs, when a ticket or
 review is given too, the branch that resolves to, otherwise its base branch;
 when every role is given, no ticket is looked up at all.
+
+#### Local branches in a preview
+
+A role can run a branch of a [local clone](#reviewing-a-local-unpushed-branch)
+that was never pushed. The input follows the review convention:
+
+- API and MCP: `{ "role": "backend", "branch": "local:cytarian#feat/x" }`, or
+  `{ "role": "backend", "branch": "feat/x", "local": true }`. The repo in
+  `local:<repo>#…` must be the role's own. `local:<repo>` alone, or `local: true`
+  with no branch, runs the clone's checked-out branch.
+- UI: in **Custom branches** (or **Custom…** on a Preview card), tick **Local**
+  on a role; its branch list then comes from the clone, unpushed branches
+  marked.
+- A ticket input `local:<repo>#<branch>` works too: that branch runs for its
+  repo, and when its name carries a ticket key, the ticket's branches on GitHub
+  join for the other repos.
+- A local review's Preview card copies the reviewed branch from the clone.
+
+The branch is read through the main clone's refs, so a branch checked out in a
+`git worktree` of that clone works as well. The sandbox copies the committed
+tip (`refs/heads/<branch>`, read-only mount, as for a local review); uncommitted
+changes in the clone or any worktree are never included, and a review checkout
+that holds a working-tree snapshot is not reused. A branch or base missing from
+the clone is refused with a `400` before anything is queued. Each role records
+`source` (`github` or `local`) and the commit it ran (`sha`); the UI tags local
+roles **local** and shows no GitHub link for them.
 
 | variable | default | meaning |
 |---|---|---|

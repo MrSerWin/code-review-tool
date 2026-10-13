@@ -31,10 +31,13 @@ export default function PreviewPanel({
   reviewId,
   repo,
   branch,
+  source = 'github',
 }: {
   reviewId: number;
   repo: string;
   branch: string;
+  /** A local review's branch is copied from the clone again. */
+  source?: 'github' | 'local';
 }) {
   const [recipes, setRecipes] = useState<RecipesPayload | null>(null);
   const [preview, setPreview] = useState<Preview | null>(null);
@@ -48,6 +51,7 @@ export default function PreviewPanel({
   // Custom launch: branches picked per role instead of resolved from the ticket.
   const [custom, setCustom] = useState(false);
   const [branches, setBranches] = useState<Record<string, string>>({});
+  const [localRoles, setLocalRoles] = useState<Record<string, boolean>>({});
   const logEndRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -150,7 +154,7 @@ export default function PreviewPanel({
         reviewId,
         recipe: recipe.name,
         // Every role is sent: an empty one runs its base branch, not the ticket's branch.
-        ...(custom ? { roles: roleRequests(recipe.roles, branches, true) } : {}),
+        ...(custom ? { roles: roleRequests(recipe.roles, branches, true, localRoles) } : {}),
         ...(dumpMode === 'auto' ? {} : { dumpMode }),
       });
       setPreview(created);
@@ -175,15 +179,19 @@ export default function PreviewPanel({
       return;
     }
     const prefill: Record<string, string> = {};
+    const prefillLocal: Record<string, boolean> = {};
     for (const r of recipe.roles) {
       if (r.repo === repo) {
         prefill[r.role] = branch;
+        prefillLocal[r.role] = source === 'local';
         continue;
       }
       const last = preview?.roles.find((p) => p.role === r.role && p.repo === r.repo && !p.usedBase);
       prefill[r.role] = last?.branch ?? '';
+      prefillLocal[r.role] = last?.source === 'local';
     }
     setBranches(prefill);
+    setLocalRoles(prefillLocal);
     setCustom(true);
   };
 
@@ -279,10 +287,13 @@ export default function PreviewPanel({
             roles={recipe.roles}
             values={branches}
             onChange={(role, value) => setBranches((prev) => ({ ...prev, [role]: value }))}
+            local={localRoles}
+            onLocalChange={(role, value) => setLocalRoles((prev) => ({ ...prev, [role]: value }))}
             disabled={busy}
           />
           <p className="muted custom-launch-hint">
-            Start preview runs these branches. Leave one empty to run its base branch.
+            Start preview runs these branches. Leave one empty to run its base branch. Local copies the committed
+            branch from the local clone.
           </p>
         </div>
       )}
@@ -292,6 +303,15 @@ export default function PreviewPanel({
           <p className="muted">
             Runs {recipe.roles.map((r) => r.repo).join(' + ')} from this ticket&rsquo;s branches on a local
             port. A repo without a branch of its own runs its base branch.
+            {source === 'local' && (
+              <>
+                {' '}
+                <span className="tag local" title="Read from the local clone; may not be pushed yet">
+                  local run
+                </span>{' '}
+                {repo} is copied from the local clone (committed state).
+              </>
+            )}
           </p>
           <p className="muted mono">
             {branch} · {recipe.database ? `${recipe.database.engine} ${recipe.database.version ?? ''}` : 'no database'}{' '}

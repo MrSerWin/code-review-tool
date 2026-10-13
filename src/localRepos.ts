@@ -629,6 +629,39 @@ export async function resolveLocalTarget(input: LocalInput, options: LocalResolv
   };
 }
 
+export interface LocalBranchRef {
+  repoPath: string;
+  branch: string;
+  /** The branch tip in the clone right now. */
+  sha: string;
+}
+
+/**
+ * A branch of a configured clone, committed state only: `refs/heads/<branch>`
+ * of the clone. A branch checked out in a linked worktree (`git worktree add`)
+ * shares its refs with the main clone, so it resolves here too; the worktree's
+ * uncommitted files are never read. Null `branch` = the clone's checked-out branch.
+ */
+export async function resolveLocalBranch(
+  repo: string,
+  branch: string | null,
+  paths?: Map<string, string>,
+): Promise<LocalBranchRef> {
+  const repoPath = await localRepoPath(repo, paths);
+  const name = branch ?? (await currentBranch(repoPath));
+  if (!name) {
+    throw new Error(`The local clone of ${repo} has a detached HEAD; name the branch: local:${repo}#<branch>`);
+  }
+  assertSafeName('branch', name);
+  let sha: string;
+  try {
+    sha = await branchTip(repoPath, name);
+  } catch {
+    throw new Error(`Branch ${name} not found in the local clone of ${repo} (${repoPath})`);
+  }
+  return { repoPath, branch: name, sha };
+}
+
 /** For the UI: the detected parent of one branch of a configured clone. */
 export async function describeParent(repo: string, branch: string, paths?: Map<string, string>): Promise<{
   branch: string; base: string; reason: ParentReason; distance: number; defaultBase: string;

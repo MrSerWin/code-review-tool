@@ -15,6 +15,9 @@ export const REQUEST_TIMEOUT_MS = 30_000;
 /** Starting a review resolves the input first (tracker lookup, branch listing). */
 export const SLOW_REQUEST_MS = 90_000;
 
+/** Stopping a ready preview runs its teardown steps before the API answers. */
+export const STOP_PREVIEW_MS = 240_000;
+
 /** The API base URL from the environment, without a trailing slash. */
 export function apiBaseUrl(env: NodeJS.ProcessEnv = process.env): string {
   const raw = (env.CODE_REVIEW_API_URL ?? '').trim() || DEFAULT_API_URL;
@@ -95,6 +98,11 @@ export class ApiClient {
   /** A human link to one review in the web UI. */
   reviewUrl(id: number): string {
     return `${this.baseUrl}/review/${id}`;
+  }
+
+  /** Where a preview shows in the web UI: its review's page, else the previews page. */
+  previewPage(reviewId: number | null): string {
+    return reviewId ? this.reviewUrl(reviewId) : `${this.baseUrl}/previews`;
   }
 
   /** Raw request: returns the response body as text, or throws ApiError / ApiUnreachableError. */
@@ -184,5 +192,25 @@ export class ApiClient {
 
   rerun<T>(id: number, body: { reviewer?: string; model?: string }): Promise<T> {
     return this.requestJson<T>(`/api/reviews/${id}/rerun`, { method: 'POST', body });
+  }
+
+  recipes<T>(): Promise<T> {
+    return this.requestJson<T>('/api/recipes');
+  }
+
+  createPreview<T>(body: unknown): Promise<T> {
+    return this.requestJson<T>('/api/previews', { method: 'POST', body, timeoutMs: SLOW_REQUEST_MS });
+  }
+
+  preview<T>(id: number, signal?: AbortSignal): Promise<T> {
+    return this.requestJson<T>(`/api/previews/${id}`, { signal });
+  }
+
+  listPreviews<T>(params: Record<string, string | number | undefined>): Promise<T> {
+    return this.requestJson<T>(withQuery('/api/previews', params));
+  }
+
+  stopPreview<T>(id: number): Promise<T> {
+    return this.requestJson<T>(`/api/previews/${id}/stop`, { method: 'POST', timeoutMs: STOP_PREVIEW_MS });
   }
 }

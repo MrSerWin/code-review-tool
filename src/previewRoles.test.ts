@@ -225,3 +225,94 @@ test('overrides cover the recipe only when every role is listed', () => {
   assert.equal(coversAllRoles(both.slice(0, 1), recipeRepos), false);
   assert.equal(coversAllRoles([], recipeRepos), false);
 });
+
+test('a local role: local: true, or a branch written local:<repo>#<branch>', () => {
+  assert.deepEqual(
+    normalizeOverrides(
+      [
+        { role: 'backend', branch: ' feat/abc-1-api ', local: true },
+        { role: 'frontend', branch: 'local:my-web#feat/abc-1-ui', base: 'develop' },
+      ],
+      recipeRepos,
+    ),
+    [
+      { role: 'backend', repo: 'my-service', branch: 'feat/abc-1-api', source: 'local' },
+      { role: 'frontend', repo: 'my-web', branch: 'feat/abc-1-ui', base: 'develop', source: 'local' },
+    ],
+  );
+  // No branch: the clone's checked-out branch, resolved later by the engine.
+  assert.deepEqual(normalizeOverrides([{ role: 'frontend', branch: 'local:my-web' }], recipeRepos), [
+    { role: 'frontend', repo: 'my-web', branch: null, source: 'local' },
+  ]);
+  assert.deepEqual(normalizeOverrides([{ role: 'frontend', local: true }], recipeRepos), [
+    { role: 'frontend', repo: 'my-web', branch: null, source: 'local' },
+  ]);
+  // local: false is a plain GitHub role.
+  assert.deepEqual(normalizeOverrides([{ role: 'frontend', branch: 'x', local: false }], recipeRepos), [
+    { role: 'frontend', repo: 'my-web', branch: 'x' },
+  ]);
+});
+
+test('a local role must name its own repo and a safe branch', () => {
+  assert.throws(
+    () => normalizeOverrides([{ role: 'backend', branch: 'local:my-web#feat/x' }], recipeRepos),
+    /Role backend runs repo my-service, but its branch names local:my-web; use local:my-service#<branch>/,
+  );
+  assert.throws(() => normalizeOverrides([{ role: 'backend', branch: 'local:my-service#' }], recipeRepos), /Missing branch/);
+  assert.throws(
+    () => normalizeOverrides([{ role: 'backend', branch: '--upload-pack=x', local: true }], recipeRepos),
+    /Unsafe branch/,
+  );
+  assert.throws(
+    () => normalizeOverrides([{ role: 'backend', branch: 'feat/x', base: '../x', local: true }], recipeRepos),
+    /Unsafe base branch/,
+  );
+});
+
+test('local roles are not checked against the remote, and say "local clone" when missing', () => {
+  const overrides = normalizeOverrides([{ role: 'backend', branch: 'feat/unpushed', local: true }], recipeRepos);
+  assert.deepEqual(missingOverrideBranches(overrides, { 'my-service': ['main'] }), []);
+  assert.equal(
+    missingBranchMessage([{ role: 'backend', repo: 'my-service', branch: 'feat/x', kind: 'branch', local: true }]),
+    'Branch feat/x not found in the local clone of repo my-service (role backend)',
+  );
+});
+
+test('local overrides, a local review, and a local ticket target mark their roles as local', () => {
+  const fromOverride = planRoles({
+    recipeRepos,
+    defaultBranches,
+    overrides: [{ role: 'backend', branch: 'feat/abc-1-api', source: 'local', sha: 'a'.repeat(40) }],
+    explicitTargets: [],
+    ticketTargets: [t('my-web', 'feat/abc-1-ui')],
+  });
+  assert.deepEqual(fromOverride, [
+    {
+      role: 'backend', repo: 'my-service', branch: 'feat/abc-1-api', base: 'main', usedBase: false,
+      source: 'local', sha: 'a'.repeat(40),
+    },
+    { role: 'frontend', repo: 'my-web', branch: 'feat/abc-1-ui', base: 'main', usedBase: false },
+  ]);
+
+  const fromReview = planRoles({
+    recipeRepos,
+    defaultBranches,
+    review: { repo: 'my-web', branch: 'feat/abc-1-ui', base_branch: 'feat/abc-1-base', source: 'local' },
+    explicitTargets: [],
+    ticketTargets: [t('my-service', 'feat/abc-1-api')],
+  });
+  assert.equal(fromReview[0]?.source, undefined, 'the ticket branch of the other repo comes from GitHub');
+  assert.deepEqual(fromReview[1], {
+    role: 'frontend', repo: 'my-web', branch: 'feat/abc-1-ui', base: 'feat/abc-1-base', usedBase: false,
+    source: 'local',
+  });
+
+  const fromTarget = planRoles({
+    recipeRepos,
+    defaultBranches,
+    explicitTargets: [{ ...t('my-service', 'feat/abc-1-api'), source: 'local' }],
+    ticketTargets: [],
+  });
+  assert.equal(fromTarget[0]?.source, 'local');
+  assert.equal(fromTarget[1]?.usedBase, true);
+});

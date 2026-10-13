@@ -12,10 +12,10 @@ import { REVIEWER_NAMES } from '../reviewers/types.js';
 import type { ResolvedTarget, ReviewGroup, ReviewRow, TicketInfo } from '../types.js';
 import { ApiClient, ApiError, ApiUnreachableError } from './client.js';
 import {
-  ALL_STATUSES, ACTIVE_STATUSES, compactGroup, compactLocalRepos, compactReviewers, DEFAULT_MAX_BRANCHES,
-  DEFAULT_MAX_FINDINGS, DEFAULT_REPORT_MAX, isTerminalStatus, mutationRefusal, parseTargetSelector,
-  reviewDetail, reviewListRow, reviewRef, selectTargets, truncateReport,
-  type ReviewDetailPayload,
+  ALL_STATUSES, ACTIVE_STATUSES, compactGroup, compactLocalRepos, compactPreview, compactRecipes, compactReviewers,
+  DEFAULT_MAX_BRANCHES, DEFAULT_MAX_FINDINGS, DEFAULT_REPORT_MAX, isPreviewSettled, isTerminalStatus,
+  mutationRefusal, parseTargetSelector, PREVIEW_END_STATUSES, PREVIEW_LIVE_STATUSES, reviewDetail, reviewListRow, reviewRef,
+  selectTargets, truncateReport, type PreviewPayload, type RecipePayload, type ReviewDetailPayload,
 } from './format.js';
 
 const version = (createRequire(import.meta.url)('../../package.json') as { version?: string }).version ?? '0.0.0';
@@ -27,9 +27,15 @@ export const POLL_DEFAULT_SEC = 5;
 const INSTRUCTIONS = `code-review-tool runs read-only code reviews of git branches (GitHub or local clones) with a reviewer CLI (Claude Code, Codex, Cursor Agent, or Grok) and returns a verdict, a requirement checklist, and findings.
 Typical flow: start_review -> wait_for_review (repeat while finished=false) -> get_review / get_report.
 A review takes several minutes (often 5-20). Never start the same review twice to check on it: poll the id you got.
-For a branch that is not pushed yet, use list_local_repos to find the repo name and branch, then start_review with "local:<repo>#<branch>".`;
+For a branch that is not pushed yet, use list_local_repos to find the repo name and branch, then start_review with "local:<repo>#<branch>".
+Previews run a ticket's branches as a live app on a local port: list_recipes -> start_preview -> wait_for_preview (repeat while finished=false) -> open web_url -> stop_preview when done. A role can run a local (unpushed) branch: {role, branch: "local:<repo>#<branch>"} or {role, branch, local: true}.`;
 
 const idSchema = z.number().int().positive().describe('Review id, as returned by start_review or list_reviews.');
+const previewIdSchema = z.number().int().positive()
+  .describe('Preview id, as returned by start_preview or list_previews.');
+
+
+const DUMP_MODES = ['auto', 'dump-dir', 'pg_dump', 'none', 'clean'] as const;
 
 type ToolResult = CallToolResult;
 
@@ -404,6 +410,202 @@ export function createMcpServer({ api, env = process.env }: CreateServerOptions)
     return ok({
       review: reviewRef(review, api.reviewUrl(review.id)),
       next: 'Call wait_for_review with the new id until finished=true.',
+    });
+  }));
+
+  // --- previews ---------------------------------------------------------------
+
+  server.registerTool('list_recipes', {
+    title: 'List preview recipes',
+    description:
+      'The preview recipes configured on this code-review-tool: for each, its name, roles (role -> repo; use the ' +
+      'role names in start_preview), the database it loads, and how long it may take to become ready. ' +
+      '"enabled" is false when previews are switched off (PREVIEW_ENABLED).',
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  }, () => guarded(async () => ok(compactRecipes(await api.recipes<{
+    enabled: boolean; recipes: RecipePayload[]; errors?: { error: string }[];
+  }>()))));
+
+  server.registerTool('start_preview', {
+    title: 'Start a preview',
+    description:
+      'Start a live preview: the recipe\'s repos (e.g. backend + frontend) checked out at the chosen branches and ' +
+      'run on free local ports with their own database. Returns at once with the preview id; it takes minutes ' +
+      '(longer the first time dependencies change). Then call wait_for_preview(id) until finished=true and open ' +
+      'web_url. Stop it with stop_preview when done; it also expires on its own.\n' +
+      'Branches per role, in order of precedence:\n' +
+      '- roles: [{role, branch}] picks a branch by hand; an empty branch runs the role\'s base branch.\n' +
+      '- a local (unpushed) branch: {role, branch: "local:<repo>#<branch>"} or {role, branch: "<branch>", local: ' +
+      'true}; it is copied (committed state only) from the configured clone, so a branch checked out in a git ' +
+      'worktree of that clone works too. "local:<repo>" alone = the clone\'s checked-out branch. See ' +
+      'list_local_repos for repo names and branches.\n' +
+      '- review_id: the reviewed branch runs for its repo (a local review is copied from the clone again).\n' +
+      '- ticket: "ABC-123", a PR URL, "repo#branch", or "local:<repo>#<branch>"; the ticket\'s branches run for ' +
+      'the repos it touches.\n' +
+      'A role with no branch from any of these runs its base branch (used_base=true in the result).',
+    inputSchema: {
+      recipe: z.string().min(1).max(128).optional()
+        .describe('Recipe name (see list_recipes). Optional when only one recipe is configured.'),
+      roles: z.array(z.object({
+        role: z.string().min(1).max(64).describe('Role name from the recipe, e.g. "backend".'),
+        branch: z.string().max(300).optional()
+          .describe('Branch to run; "local:<repo>#<branch>" for a branch of the local clone. Empty: base branch.'),
+        base: z.string().max(255).optional().describe('Base branch of this role. Default: the repo default.'),
+        local: z.boolean().optional().describe('Copy the branch from the local clone instead of GitHub.'),
+      })).max(20).optional()
+        .describe('Branches picked by hand, one entry per role. Roles left out follow review_id / ticket.'),
+      review_id: z.number().int().positive().optional()
+        .describe('Preview the branch of this review (its repo), plus its ticket\'s branches for the other repos.'),
+      ticket: z.string().min(1).max(256).optional()
+        .describe('Ticket key, PR URL, "repo#branch", or "local:repo#branch" to resolve branches from.'),
+      dump_mode: z.enum(DUMP_MODES).optional()
+        .describe('Database contents: auto (default), pg_dump (fresh dump), dump-dir (stored dump), clean or none.'),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  }, (args) => guarded(async () => {
+    const refused = refusal();
+    if (refused) return fail(refused);
+    if (!args.roles?.length && args.review_id === undefined && !args.ticket) {
+      return fail('Give roles, review_id, or ticket: a preview needs at least one of them to pick branches.');
+    }
+    const body = {
+      ...(args.recipe ? { recipe: args.recipe } : {}),
+      ...(args.roles?.length ? { roles: args.roles } : {}),
+      ...(args.review_id !== undefined ? { reviewId: args.review_id } : {}),
+      ...(args.ticket ? { ticket: args.ticket } : {}),
+      ...(args.dump_mode ? { dumpMode: args.dump_mode } : {}),
+    };
+    const { preview } = await api.createPreview<{ preview: PreviewPayload }>(body);
+    return ok({
+      preview: compactPreview(preview, { page: api.previewPage(preview.review_id) }),
+      next: 'Call wait_for_preview with this id until finished=true, then open web_url.',
+    });
+  }));
+
+  server.registerTool('get_preview', {
+    title: 'Get a preview',
+    description:
+      'Status of one preview: queued | preparing | starting | ready | stopping | stopped | failed | expired, the ' +
+      'branch, source (github or local) and commit each role runs, web_url once ready, ports, data mode, ' +
+      'expiry, and "error" when it failed. "progress" is the latest log line while it works; tail_logs adds the ' +
+      'last log lines.',
+    inputSchema: {
+      id: previewIdSchema,
+      tail_logs: z.number().int().min(0).max(200).optional().describe('Log lines to include (default 0).'),
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  }, ({ id, tail_logs }) => guarded(async () => {
+    const { preview, logs } = await api.preview<{ preview: PreviewPayload; logs: { message: string }[] }>(id);
+    return ok({
+      ...compactPreview(preview, { page: api.previewPage(preview.review_id), logs }),
+      ...(tail_logs ? { logs: logs.slice(-tail_logs).map((l) => l.message) } : {}),
+    });
+  }));
+
+  server.registerTool('wait_for_preview', {
+    title: 'Wait for a preview',
+    description:
+      'Wait until a preview is ready or has ended (stopped, failed, expired), polling its status, for at most ' +
+      `timeoutSec seconds (default ${WAIT_DEFAULT_SEC}, max ${WAIT_MAX_SEC}; keep it below your MCP tool ` +
+      'timeout). Returns the same fields as get_preview plus "finished" and "waited_sec". If finished=false it is ' +
+      'still starting: call wait_for_preview again with the same id. On failure the last log lines are included.',
+    inputSchema: {
+      id: previewIdSchema,
+      timeoutSec: z.number().int().min(1).max(WAIT_MAX_SEC).optional()
+        .describe(`Longest time to wait, in seconds (default ${WAIT_DEFAULT_SEC}).`),
+      pollSec: z.number().int().min(1).max(60).optional()
+        .describe(`Seconds between status checks (default ${POLL_DEFAULT_SEC}).`),
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  }, ({ id, timeoutSec, pollSec }, extra) => guarded(async () => {
+    const timeoutMs = (timeoutSec ?? WAIT_DEFAULT_SEC) * 1000;
+    const pollMs = (pollSec ?? POLL_DEFAULT_SEC) * 1000;
+    const started = Date.now();
+    const deadline = started + timeoutMs;
+    const progressToken = extra._meta?.progressToken;
+    type Detail = { preview: PreviewPayload; logs: { message: string }[] };
+
+    let payload = await api.preview<Detail>(id, extra.signal);
+    while (!isPreviewSettled(payload.preview.status)) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      await sleep(Math.min(pollMs, remaining), extra.signal);
+      payload = await api.preview<Detail>(id, extra.signal);
+      if (progressToken !== undefined) {
+        const last = payload.logs.at(-1)?.message;
+        await extra.sendNotification({
+          method: 'notifications/progress',
+          params: {
+            progressToken,
+            progress: Math.round((Date.now() - started) / 1000),
+            total: Math.round(timeoutMs / 1000),
+            message: `preview ${id}: ${payload.preview.status}${last ? ` - ${last.slice(0, 120)}` : ''}`,
+          },
+        }).catch(() => { /* progress is best-effort */ });
+      }
+    }
+
+    const { preview, logs } = payload;
+    const finished = isPreviewSettled(preview.status);
+    return ok({
+      finished,
+      waited_sec: Math.round((Date.now() - started) / 1000),
+      ...compactPreview(preview, { page: api.previewPage(preview.review_id), logs }),
+      ...(preview.status === 'failed' ? { logs: logs.slice(-20).map((l) => l.message) } : {}),
+      ...(finished ? {} : { next: 'Still starting. Call wait_for_preview again with the same id.' }),
+    });
+  }));
+
+  server.registerTool('stop_preview', {
+    title: 'Stop a preview',
+    description:
+      'Stop a preview and tear it down: its processes and containers are stopped, its database and checkouts ' +
+      'removed, its ports freed. Waits for the teardown (up to a few minutes). A preview that has already ' +
+      'ended is left as it is.',
+    inputSchema: { id: previewIdSchema },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+  }, ({ id }) => guarded(async () => {
+    const refused = refusal();
+    if (refused) return fail(refused);
+    const { preview } = await api.stopPreview<{ preview: PreviewPayload | null }>(id);
+    if (!preview) return ok({ stopped: true, id });
+    const ended = (PREVIEW_END_STATUSES as readonly string[]).includes(preview.status);
+    return ok({
+      stopped: ended,
+      ...compactPreview(preview, { page: api.previewPage(preview.review_id) }),
+      ...(ended ? {} : { next: 'Teardown is still running; check get_preview in a moment.' }),
+    });
+  }));
+
+  server.registerTool('list_previews', {
+    title: 'List previews',
+    description:
+      'Recent previews, newest first: id, status, recipe, ticket, review_id, web_url (while ready), and per role ' +
+      'the branch, source (github or local) and commit. Filter by review_id, ticket, recipe, or status ("live" = ' +
+      'queued, preparing, starting, ready, or stopping).',
+    inputSchema: {
+      review_id: z.number().int().positive().optional(),
+      ticket: z.string().min(1).max(256).optional(),
+      recipe: z.string().min(1).max(128).optional(),
+      status: z.enum(['live', 'queued', 'preparing', 'starting', 'ready', 'stopping', 'stopped', 'failed', 'expired'])
+        .optional(),
+      limit: z.number().int().min(1).max(100).optional().describe('Rows to return (default 20).'),
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  }, ({ review_id, ticket, recipe, status, limit }) => guarded(async () => {
+    const want = limit ?? 20;
+    // The API has no status filter, so a filtered listing scans a wider window.
+    const { previews, total } = await api.listPreviews<{ previews: PreviewPayload[]; total: number }>({
+      reviewId: review_id, ticket, recipe, limit: status ? 500 : want,
+    });
+    const matches = (s: string): boolean =>
+      !status || (status === 'live' ? (PREVIEW_LIVE_STATUSES as readonly string[]).includes(s) : s === status);
+    const matching = previews.filter((p) => matches(p.status));
+    const rows = matching.slice(0, want);
+    return ok({
+      total: status ? matching.length : total,
+      shown: rows.length,
+      previews: rows.map((p) => compactPreview(p, { page: api.previewPage(p.review_id) })),
     });
   }));
 
