@@ -3,7 +3,7 @@ import { ghApi, lsRemoteHeads } from './gitSandbox.js';
 import { parseLocalInput, resolveLocalTarget } from './localRepos.js';
 import { logger } from './logger.js';
 import { parsePrUrls } from './prLinks.js';
-import { activeTrackerNames, getTicket, looksLikeTicket } from './trackers/index.js';
+import { activeTrackerNames, canonicalTicketInput, getTicket, looksLikeTicket } from './trackers/index.js';
 import { firstLine } from './trackers/types.js';
 import type { ResolvedTarget, TicketInfo } from './types.js';
 
@@ -223,8 +223,11 @@ export async function resolveTargets(
   }
 
   // Pasted requirements replace the tracker, so the input only has to name a branch.
-  if (!manual && looksLikeTicket(raw)) {
-    const ticket = await getTicket(raw);
+  // A tracker's issue link (Linear, Jira, YouTrack, Azure DevOps) stands for its
+  // key, with the tracker taken from the host: `linear:ABC-123`.
+  const ticketInput = canonicalTicketInput(raw);
+  if (!manual && looksLikeTicket(ticketInput)) {
+    const ticket = await getTicket(ticketInput);
     const targets = await targetsFromTicket(ticket);
     if (targets.length === 0) {
       throw new Error(
@@ -260,7 +263,7 @@ export async function resolveTargets(
     );
   }
   throw new Error(
-    `Unsupported input: ${JSON.stringify(raw)}. Use a ticket key of a configured tracker ` +
+    `Unsupported input: ${JSON.stringify(raw)}. Use a ticket key or issue link of a configured tracker ` +
       `(${active.join(', ')}), a pull request URL, a tree URL, or repo#branch. ` +
       'Requirements pasted by hand work without any tracker.',
   );

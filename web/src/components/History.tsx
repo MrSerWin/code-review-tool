@@ -2,8 +2,11 @@ import { useCallback, useEffect, useRef, useState, type MouseEvent } from 'react
 import { api } from '../api';
 import { Link, navigate } from '../router';
 import { readStored, writeStored } from '../storage';
-import type { Review, ReviewGroup, ReviewGroupBranch } from '../types';
-import { Card, Pager, StatusPill, VerdictBadge, fmtTime } from './ui';
+import { openTicketTitle } from '../tickets';
+import type { Review, ReviewGroup, ReviewGroupBranch, ReviewGroupRun, ReviewStatus, Verdict } from '../types';
+import {
+  BranchLink, Card, Pager, PrLink, StatusPill, TicketExternalLink, VerdictBadge, fmtTime,
+} from './ui';
 
 const ACTIVE = new Set(['queued', 'fetching', 'reviewing']);
 const VIEW_KEY = 'crt.historyView';
@@ -13,6 +16,8 @@ const RUNS_PER_PAGE = 25;
 const GROUP_RUNS_LIMIT = 100;
 const POLL_MS = 4000;
 const DEBOUNCE_MS = 300;
+/** Runs shown per branch of an expanded group before "N older" folds the rest. */
+const BRANCH_RUNS_SHOWN = 5;
 
 type View = 'groups' | 'runs';
 
@@ -189,15 +194,20 @@ export default function History({
           <>
             <div className="table-wrap">
               <table className="grid group-grid">
+                <colgroup>
+                  <col className="col-toggle" />
+                  <col />
+                  <col className="col-summary" />
+                  <col className="col-activity" />
+                </colgroup>
                 <thead>
                   <tr>
                     <th className="col-toggle">
                       <span className="sr-only">Expand</span>
                     </th>
                     <th>Ticket</th>
-                    <th>Branches</th>
-                    <th>Runs</th>
-                    <th>Last activity</th>
+                    <th>Branches · runs · outcome</th>
+                    <th className="col-activity">Last activity</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -231,6 +241,59 @@ export default function History({
   );
 }
 
+const plural = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`;
+
+const VERDICT_RANK: Record<Verdict, number> = { blocked: 0, changes_requested: 1, approve: 2 };
+const OUTCOME_LABEL: Record<string, string> = {
+  approve: 'approved',
+  changes_requested: 'changes requested',
+  blocked: 'blocked',
+  none: 'no verdict',
+};
+
+/** What one run came to: its verdict once done, else its status. */
+function RunOutcome({ run }: { run: Pick<ReviewGroupRun, 'status' | 'verdict'> }) {
+  return run.status === 'done' ? <VerdictBadge verdict={run.verdict} /> : <StatusPill status={run.status} />;
+}
+
+/**
+ * One badge for a whole group, judged on the latest run of each branch:
+ * something running wins; else the worst verdict (blocked, changes requested,
+ * approved); else, with nothing done, the latest status.
+ */
+function GroupOutcome({ group }: { group: ReviewGroup }) {
+  const heads = group.branches.map((b) => b.latest);
+  const active = Math.max(group.activeCount, heads.filter((h) => ACTIVE.has(h.status)).length);
+  if (active > 0) {
+    return (
+      <span className="pill status-reviewing">
+        <span className="pulse" aria-hidden="true" />
+        {active} active
+      </span>
+    );
+  }
+  const done = heads.filter((h) => h.status === 'done');
+  if (done.length > 0) {
+    const worst = done
+      .map((h) => h.verdict)
+      .sort((a, b) => (a ? VERDICT_RANK[a] : 3) - (b ? VERDICT_RANK[b] : 3))[0];
+    return <VerdictBadge verdict={worst ?? null} />;
+  }
+  const latest: ReviewStatus | undefined = heads[0]?.status;
+  return latest ? <StatusPill status={latest} /> : <span className="muted">—</span>;
+}
+
+/** "2 approved · 1 failed": how the latest runs of a group's branches ended, for a tooltip. */
+function outcomeBreakdown(group: ReviewGroup): string {
+  const counts = new Map<string, number>();
+  for (const { latest } of group.branches) {
+    const label = latest.status === 'done' ? OUTCOME_LABEL[latest.verdict ?? 'none'] ?? 'done' : latest.status;
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+  const parts = [...counts.entries()].map(([label, n]) => `${n} ${label}`);
+  return `Latest run per branch: ${parts.join(' · ')}`;
+}
+
 function GroupRow({
   group,
   panelId,
@@ -245,6 +308,7 @@ function GroupRow({
   reviewerLabel: ReviewerLabel;
 }) {
   const open = state !== undefined;
+  const branchCount = group.branches.length;
   return (
     <>
       <tr className={`row-link group-row${open ? ' row-open' : ''}`} onClick={onToggle}>
@@ -254,7 +318,7 @@ function GroupRow({
             className="chevron"
             aria-expanded={open}
             aria-controls={open ? panelId : undefined}
-            aria-label={`${open ? 'Hide' : 'Show'} runs of ${group.key}`}
+            aria-label={`${open ? 'Hide' : 'Show'} branches and runs of ${group.key}`}
             onClick={(e) => {
               e.stopPropagation();
               onToggle();
@@ -264,52 +328,46 @@ function GroupRow({
           </button>
         </td>
         <td className="group-cell">
-          <div className="group-key">
+          <div className="group-line">
             {group.isTicket ? (
-              <span onClick={stop}>
+              <span className="group-key" onClick={stop}>
                 <Link to={ticketPath(group.key)} className="mono" title={`Every run of ${group.key}`}>
                   {group.key}
                 </Link>
+                {group.ticketUrl && (
+                  <TicketExternalLink href={group.ticketUrl} label={openTicketTitle(group.ticketUrl, group.key)} />
+                )}
               </span>
             ) : (
               <span className="mono group-branch-key" title={group.key}>
                 {group.key}
               </span>
             )}
-            {group.activeCount > 0 && (
-              <span className="pill status-reviewing">
-                <span className="pulse" aria-hidden="true" />
-                {group.activeCount} active
+            {group.title && (
+              <span className="group-title muted" title={group.title}>
+                {group.title}
               </span>
             )}
           </div>
-          {group.title && (
-            <div className="group-title muted" title={group.title}>
-              {group.title}
-            </div>
-          )}
         </td>
-        <td>
-          <div className="chip-row">
-            {group.branches.map((b) => (
-              <BranchChip key={`${b.repo}#${b.branch}`} branch={b} />
-            ))}
-          </div>
+        <td className="group-summary" title={outcomeBreakdown(group)}>
+          <span className="group-counts muted">
+            {plural(branchCount, 'branch', 'branches')} · {plural(group.runCount, 'run', 'runs')}
+          </span>
+          <GroupOutcome group={group} />
+          <span className="group-when muted">{fmtTime(group.lastActivity)}</span>
         </td>
-        <td className="nowrap muted">
-          {group.runCount} {group.runCount === 1 ? 'run' : 'runs'}
-        </td>
-        <td className="nowrap muted">{fmtTime(group.lastActivity)}</td>
+        <td className="col-activity nowrap muted">{fmtTime(group.lastActivity)}</td>
       </tr>
       {open && (
         <tr className="group-runs" id={panelId}>
-          <td colSpan={5}>
+          <td colSpan={4}>
             {state.error && <p className="error-line">{state.error}</p>}
             {state.runs === null ? (
               !state.error && <p className="muted">Loading runs…</p>
             ) : (
               <>
-                <RunsTable runs={state.runs} showTicket={false} reviewerLabel={reviewerLabel} />
+                <BranchRuns group={group} runs={state.runs} reviewerLabel={reviewerLabel} />
                 {group.runCount > state.runs.length && (
                   <p className="muted group-runs-more">
                     Newest {state.runs.length} of {group.runCount} runs.{' '}
@@ -325,24 +383,114 @@ function GroupRow({
   );
 }
 
-/** One branch of a group: repo, branch, and the outcome of its latest run, linking to that run. */
-function BranchChip({ branch: b }: { branch: ReviewGroupBranch }) {
+interface BranchSection {
+  key: string;
+  repo: string;
+  branch: string;
+  head: ReviewGroupBranch | undefined;
+  runs: Review[];
+}
+
+/** The runs of an expanded group, one section per repo/branch in the group's order, newest run first. */
+function BranchRuns({
+  group,
+  runs,
+  reviewerLabel,
+}: {
+  group: ReviewGroup;
+  runs: Review[];
+  reviewerLabel: ReviewerLabel;
+}) {
+  const [unfolded, setUnfolded] = useState<Set<string>>(() => new Set());
+  const sections = new Map<string, BranchSection>();
+  for (const b of group.branches) {
+    const key = `${b.repo}#${b.branch}`;
+    sections.set(key, { key, repo: b.repo, branch: b.branch, head: b, runs: [] });
+  }
+  for (const r of runs) {
+    const key = `${r.repo}#${r.branch}`;
+    // A branch whose first run started after the group row was loaded still gets its section.
+    if (!sections.has(key)) sections.set(key, { key, repo: r.repo, branch: r.branch, head: undefined, runs: [] });
+    sections.get(key)!.runs.push(r);
+  }
+  const list = [...sections.values()].filter((s) => s.runs.length > 0);
+  if (list.length === 0) return <p className="muted">No runs.</p>;
+
   return (
-    <span className="branch-chip">
-      <span className="chip-main" onClick={stop}>
-        <Link
-          to={`/review/${b.latest.id}`}
-          className="chip-link"
-          title={`${b.repo} · ${b.branch} — open run #${b.latest.run_index}`}
-        >
-          <span className="chip-repo">{b.repo}</span>
-          <span className="chip-branch mono">{b.branch}</span>
-        </Link>
-      </span>
-      {b.source === 'local' && <span className="tag local">local</span>}
-      {b.latest.status === 'done' ? <VerdictBadge verdict={b.latest.verdict} /> : <StatusPill status={b.latest.status} />}
-      <span className="mono muted">#{b.latest.run_index}</span>
-    </span>
+    <div className="table-wrap">
+      <table className="grid branch-runs">
+        <colgroup>
+          <col className="col-run" />
+          <col className="col-outcome" />
+          <col className="col-reviewer" />
+          <col className="col-created" />
+        </colgroup>
+        <thead className="sr-only">
+          <tr>
+            <th>Run</th>
+            <th>Outcome</th>
+            <th>Reviewer</th>
+            <th>Created</th>
+          </tr>
+        </thead>
+        {list.map((s) => {
+          const newest = s.runs[0]!;
+          const links = s.head?.links ?? newest.links;
+          const prNumber = s.head?.prNumber ?? s.runs.find((r) => r.pr_number)?.pr_number ?? null;
+          const prUrl = links?.pr ?? s.runs.find((r) => r.links?.pr)?.links?.pr ?? null;
+          const local = (s.head?.source ?? newest.source) === 'local';
+          const open = unfolded.has(s.key);
+          const shown = open ? s.runs : s.runs.slice(0, BRANCH_RUNS_SHOWN);
+          const hidden = s.runs.length - shown.length;
+          return (
+            <tbody key={s.key}>
+              <tr className="branch-head">
+                <th colSpan={4} scope="rowgroup">
+                  <div className="branch-head-line">
+                    <span className="branch-repo">{s.repo}</span>
+                    <BranchLink branch={s.branch} href={links?.branch} local={local} className="branch-name" />
+                    {local && <span className="tag local">local</span>}
+                    {prUrl && <PrLink href={prUrl} number={prNumber} />}
+                    <span className="branch-head-outcome">
+                      <span className="muted">latest</span>
+                      <RunOutcome run={s.head?.latest ?? newest} />
+                    </span>
+                  </div>
+                </th>
+              </tr>
+              {shown.map((r) => (
+                <tr key={r.id} className="row-link" onClick={() => navigate(`/review/${r.id}`)}>
+                  <td className="mono" onClick={stop}>
+                    <Link to={`/review/${r.id}`}>#{r.run_index}</Link>
+                  </td>
+                  <td>
+                    <RunOutcome run={r} />
+                  </td>
+                  <td className="col-reviewer truncate-cell muted" title={r.model ?? undefined}>
+                    {r.reviewer ? reviewerLabel(r.reviewer) : '—'}
+                    {r.model && <span className="mono"> · {r.model}</span>}
+                  </td>
+                  <td className="muted nowrap">{fmtTime(r.created_at)}</td>
+                </tr>
+              ))}
+              {hidden > 0 && (
+                <tr className="branch-more">
+                  <td colSpan={4}>
+                    <button
+                      type="button"
+                      className="link-like"
+                      onClick={() => setUnfolded((prev) => new Set(prev).add(s.key))}
+                    >
+                      {plural(hidden, 'older run', 'older runs')}
+                    </button>
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          );
+        })}
+      </table>
+    </div>
   );
 }
 
@@ -357,7 +505,7 @@ function RunsTable({
 }) {
   return (
     <div className="table-wrap">
-      <table className="grid">
+      <table className="grid runs-grid">
         <thead>
           <tr>
             {showTicket && <th>Ticket</th>}
@@ -365,8 +513,7 @@ function RunsTable({
             <th>Branch</th>
             <th>Reviewer</th>
             <th>Run</th>
-            <th>Verdict</th>
-            <th>Status</th>
+            <th>Outcome</th>
             <th>Created</th>
           </tr>
         </thead>
@@ -374,11 +521,11 @@ function RunsTable({
           {runs.map((r) => (
             <tr key={r.id} className="row-link" onClick={() => navigate(`/review/${r.id}`)}>
               {showTicket && (
-                <td onClick={stop}>
+                <td className="ticket-cell" onClick={stop}>
                   <TicketCell review={r} />
                 </td>
               )}
-              <td>
+              <td className="nowrap">
                 {r.repo}
                 {r.source === 'local' && (
                   <>
@@ -387,18 +534,20 @@ function RunsTable({
                   </>
                 )}
               </td>
-              <td className="mono truncate" title={r.branch}>
-                {r.branch}
+              <td>
+                <div className="branch-cell">
+                  <BranchLink branch={r.branch} href={r.links?.branch} local={r.source === 'local'} />
+                  {r.links?.pr && <PrLink href={r.links.pr} number={r.pr_number} />}
+                </div>
               </td>
-              <td>{r.reviewer ? reviewerLabel(r.reviewer) : '—'}</td>
+              <td className="nowrap" title={r.model ?? undefined}>
+                {r.reviewer ? reviewerLabel(r.reviewer) : '—'}
+              </td>
               <td className="mono" onClick={stop}>
                 <Link to={`/review/${r.id}`}>#{r.run_index}</Link>
               </td>
-              <td>
-                <VerdictBadge verdict={r.verdict} />
-              </td>
-              <td>
-                <StatusPill status={r.status} />
+              <td className="nowrap">
+                <RunOutcome run={r} />
               </td>
               <td className="muted nowrap">{fmtTime(r.created_at)}</td>
             </tr>
@@ -412,7 +561,7 @@ function RunsTable({
 function TicketCell({ review: r }: { review: Review }) {
   if (r.ticket_key) {
     return (
-      <Link to={ticketPath(r.ticket_key)} className="mono">
+      <Link to={ticketPath(r.ticket_key)} className="mono" title={r.ticket_key}>
         {r.ticket_key}
       </Link>
     );
@@ -421,7 +570,7 @@ function TicketCell({ review: r }: { review: Review }) {
   const key = ticketLikeGroup(r);
   if (key) {
     return (
-      <Link to={ticketPath(key)} className="mono muted" title="Key found in the branch name">
+      <Link to={ticketPath(key)} className="mono muted" title={`${key} — key found in the branch name`}>
         {key}
       </Link>
     );

@@ -6,10 +6,12 @@ import {
   RequirementStatusTag,
   SeverityTag,
   StatusPill,
+  TicketExternalLink,
   fmtDuration,
   fmtTime,
 } from '../components/ui';
 import { Link, navigate } from '../router';
+import { openTicketLabel, openTicketTitle } from '../tickets';
 import type {
   Finding,
   LogLine,
@@ -227,6 +229,12 @@ export default function ReviewDetail({ id }: { id: number }) {
     ? (BANNER[review.verdict] ?? review.verdict).split(' — ')
     : [running ? 'Review in progress' : `Run ${review.status}`];
   const modelsListId = `rerun-models-${rerunReviewer}`;
+  // The ticket in its tracker; pasted requirements have none. A PR read as its
+  // own ticket already has its PR button.
+  const ticketUrl = review.ticket_url?.trim() || null;
+  const sameUrl = (a: string, b: string): boolean => a.replace(/\/+$/, '') === b.replace(/\/+$/, '');
+  const ticketButton = ticketUrl && !(links?.pr && sameUrl(links.pr, ticketUrl)) ? ticketUrl : null;
+  const ticketLabel = openTicketLabel(ticketUrl);
 
   return (
     <div className="stack">
@@ -254,19 +262,21 @@ export default function ReviewDetail({ id }: { id: number }) {
               run #{review.run_index}
             </span>
           </div>
-          {links && (
+          {(links || ticketButton) && (
             <div className="banner-links">
-              {links.pr && (
+              {links?.pr && (
                 <a className="link-btn link-btn-pr" href={links.pr} target="_blank" rel="noreferrer">
                   PR #{review.pr_number}
                   <span className="link-arrow" aria-hidden="true">↗</span>
                 </a>
               )}
-              <a className="link-btn" href={links.branch} target="_blank" rel="noreferrer">
-                Branch
-                <span className="link-arrow" aria-hidden="true">↗</span>
-              </a>
-              {links.compare && (
+              {links && (
+                <a className="link-btn" href={links.branch} target="_blank" rel="noreferrer">
+                  Branch
+                  <span className="link-arrow" aria-hidden="true">↗</span>
+                </a>
+              )}
+              {links?.compare && (
                 <a
                   className="link-btn"
                   href={links.compare}
@@ -278,7 +288,19 @@ export default function ReviewDetail({ id }: { id: number }) {
                   <span className="link-arrow" aria-hidden="true">↗</span>
                 </a>
               )}
-              {review.source === 'local' && (
+              {ticketButton && (
+                <a
+                  className="link-btn link-btn-ticket"
+                  href={ticketButton}
+                  target="_blank"
+                  rel="noreferrer"
+                  title={openTicketTitle(ticketButton, review.ticket_key)}
+                >
+                  {ticketLabel}
+                  <span className="link-arrow" aria-hidden="true">↗</span>
+                </a>
+              )}
+              {links && review.source === 'local' && (
                 <span className="banner-note" title="Read from the local clone; GitHub shows only what is pushed">
                   local run — GitHub may lag
                 </span>
@@ -368,9 +390,16 @@ export default function ReviewDetail({ id }: { id: number }) {
             <dd>
               {review.ticket_key ? (
                 <>
-                  <Link to={`/ticket/${encodeURIComponent(review.ticket_key)}`} className="mono">
+                  <Link
+                    to={`/ticket/${encodeURIComponent(review.ticket_key)}`}
+                    className="mono"
+                    title={`Every run of ${review.ticket_key}`}
+                  >
                     {review.ticket_key}
-                  </Link>{' '}
+                  </Link>
+                  {ticketUrl && (
+                    <TicketExternalLink href={ticketUrl} label={openTicketTitle(ticketUrl, review.ticket_key)} />
+                  )}{' '}
                   <span className="muted">{review.ticket_title}</span>
                 </>
               ) : (

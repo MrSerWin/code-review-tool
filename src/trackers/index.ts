@@ -5,10 +5,12 @@ import { githubProvider } from './github.js';
 import { jiraProvider } from './jira.js';
 import { linearProvider } from './linear.js';
 import { missingEnvError, TRACKER_NAMES, type TicketProvider, type TrackerName } from './types.js';
+import { ticketInputFromUrl, type TicketUrlHosts } from './urls.js';
 import { youtrackProvider } from './youtrack.js';
 
 export type { TicketProvider, TrackerName } from './types.js';
 export { TRACKER_NAMES } from './types.js';
+export { ticketRefFromUrl, type TicketUrlRef } from './urls.js';
 
 const PROVIDERS: readonly TicketProvider[] = Object.freeze([
   linearProvider,
@@ -31,6 +33,21 @@ function isTrackerName(value: string): value is TrackerName {
   return (TRACKER_NAMES as readonly string[]).includes(value);
 }
 
+/** The hosts of self-hosted trackers, whose issue links count as theirs too. */
+export function configuredTicketHosts(): TicketUrlHosts {
+  return { jira: config.JIRA_BASE_URL, youtrack: config.YOUTRACK_BASE_URL, azure: config.AZURE_ORG_URL };
+}
+
+/**
+ * A tracker's issue link becomes the explicit `tracker:KEY` it names
+ * (`https://linear.app/acme/issue/ABC-123/x` -> `linear:ABC-123`), so it
+ * resolves like the key, without the ambiguity of a bare key that several
+ * trackers share. Anything else is returned unchanged.
+ */
+export function canonicalTicketInput(input: string): string {
+  return ticketInputFromUrl(input, configuredTicketHosts()) ?? input;
+}
+
 /** `jira:ABC-123` — an explicit provider, plus the reference to hand it. */
 export function splitPrefix(input: string): { name: TrackerName | null; ref: string } {
   const match = /^([A-Za-z][A-Za-z0-9]*):(.+)$/.exec(input.trim());
@@ -49,11 +66,12 @@ function defaultProvider(candidates: TicketProvider[]): TicketProvider | null {
 
 /**
  * The provider that should answer for this input, or null when none claims it.
- * Explicit prefix first, then the only active provider that matches, then
- * `DEFAULT_TRACKER` when several do. An ambiguity is an error, never a guess.
+ * An issue link names its tracker by its host, like a prefix. Explicit prefix
+ * first, then the only active provider that matches, then `DEFAULT_TRACKER`
+ * when several do. An ambiguity is an error, never a guess.
  */
 export function selectProvider(input: string): { provider: TicketProvider; ref: string } | null {
-  const { name, ref } = splitPrefix(input);
+  const { name, ref } = splitPrefix(canonicalTicketInput(input));
 
   if (name) {
     const provider = PROVIDERS.find((p) => p.name === name);

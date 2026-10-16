@@ -1,6 +1,7 @@
 import { config } from '../config.js';
 import { collectPrUrls } from '../prLinks.js';
 import type { TicketInfo } from '../types.js';
+import { ticketRefFromUrl } from './urls.js';
 import {
   assertConfigured, parseIssueKey, readJson, trimSlash, type TicketProvider,
 } from './types.js';
@@ -22,13 +23,13 @@ function baseUrl(): string {
   return trimSlash(config.YOUTRACK_BASE_URL as string);
 }
 
-/** `ABC-123`, or an issue URL ending in one. */
+/** `ABC-123`, or an issue link on YouTrack Cloud or the configured YouTrack host. */
 function parseId(input: string): string | null {
   const raw = input.trim();
   const direct = parseIssueKey(raw);
   if (direct) return `${direct.project.toUpperCase()}-${direct.number}`;
-  const url = /^https?:\/\/[^\s]*\/(?:issue|youtrack\/issue)\/([A-Za-z][A-Za-z0-9_]*-\d+)(?:[/?#].*)?$/i.exec(raw);
-  return url ? (url[1] as string).toUpperCase() : null;
+  const ref = ticketRefFromUrl(raw, { youtrack: config.YOUTRACK_BASE_URL });
+  return ref?.tracker === 'youtrack' ? ref.key : null;
 }
 
 /** The State field, whatever shape the custom field value happens to have. */

@@ -337,7 +337,8 @@ interface GroupAggregateRow {
   ticket_url: string | null;
 }
 
-type BranchHeadRow = ReviewGroupBranch['latest'] & Pick<ReviewRow, 'group_key' | 'repo' | 'branch' | 'source'>;
+type BranchHeadRow = ReviewGroupBranch['latest']
+  & Pick<ReviewRow, 'group_key' | 'repo' | 'branch' | 'source' | 'pr_number'>;
 
 /**
  * The review history grouped by `group_key`, most recently active group first,
@@ -403,14 +404,20 @@ export function listReviewGroups(filter: ListGroupsFilter = {}): { groups: Revie
 
   const heads = db
     .prepare(
-      `SELECT group_key, repo, branch, source, id, run_index, status, verdict, can_merge, reviewer, model, created_at
+      `SELECT h.group_key, h.repo, h.branch, h.source, h.id, h.run_index, h.status, h.verdict, h.can_merge,
+              h.reviewer, h.model, h.created_at,
+              -- A re-run found through the ticket may not know the PR an earlier run was started from.
+              (SELECT p.pr_number FROM reviews p
+                WHERE p.group_key = h.group_key AND p.repo = h.repo AND p.branch = h.branch
+                  AND p.pr_number IS NOT NULL
+                ORDER BY p.id DESC LIMIT 1) AS pr_number
        FROM (
          SELECT r.*, ROW_NUMBER() OVER (
                   PARTITION BY group_key, repo, branch ORDER BY created_at DESC, id DESC) AS rn
          FROM reviews r WHERE group_key IN (${rows.map(() => '?').join(', ')})
-       )
-       WHERE rn = 1
-       ORDER BY created_at DESC, id DESC`,
+       ) h
+       WHERE h.rn = 1
+       ORDER BY h.created_at DESC, h.id DESC`,
     )
     .all(...rows.map((r) => r.key)) as BranchHeadRow[];
 
@@ -421,6 +428,7 @@ export function listReviewGroups(filter: ListGroupsFilter = {}): { groups: Revie
       repo: head.repo,
       branch: head.branch,
       source: head.source,
+      prNumber: head.pr_number ?? null,
       latest: {
         id: head.id,
         run_index: head.run_index,

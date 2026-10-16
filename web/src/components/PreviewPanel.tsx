@@ -36,7 +36,7 @@ export default function PreviewPanel({
   reviewId: number;
   repo: string;
   branch: string;
-  /** A local review's branch is copied from the clone again. */
+  /** A local review's branch runs from its review checkout while that is on disk, else from the clone again. */
   source?: 'github' | 'local';
 }) {
   const [recipes, setRecipes] = useState<RecipesPayload | null>(null);
@@ -267,7 +267,13 @@ export default function PreviewPanel({
             </>
           )}
           {live && (
-            <button className="btn ghost" type="button" onClick={() => void stop()} disabled={busy}>
+            <button
+              className="btn ghost"
+              type="button"
+              onClick={() => void stop()}
+              disabled={busy || preview?.status === 'stopping'}
+              title={preview?.status === 'stopping' ? 'Teardown is running' : undefined}
+            >
               Stop
             </button>
           )}
@@ -309,7 +315,8 @@ export default function PreviewPanel({
                 <span className="tag local" title="Read from the local clone; may not be pushed yet">
                   local run
                 </span>{' '}
-                {repo} is copied from the local clone (committed state).
+                {repo} runs the reviewed commit while the review&rsquo;s checkout is on disk, otherwise the
+                branch is copied from the local clone again (committed state).
               </>
             )}
           </p>

@@ -9,7 +9,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import {
-  ApiClient, ApiError, ApiUnreachableError, apiBaseUrl, DEFAULT_API_URL,
+  ApiClient, ApiError, ApiNoAnswerError, ApiUnreachableError, apiBaseUrl, DEFAULT_API_URL,
 } from './mcp/client.js';
 import {
   compactFindings, compactGroup, compactLocalRepos, compactPreview, findingLocation, isPreviewSettled,
@@ -51,14 +51,14 @@ function reviewGroup(overrides: Partial<ReviewGroup> = {}): ReviewGroup {
     lastActivity: '2026-01-02T00:00:00.000Z', runCount: 3, activeCount: 1,
     branches: [
       {
-        repo: 'my-frontend', branch: 'feature/abc-123-ui', source: 'local',
+        repo: 'my-frontend', branch: 'feature/abc-123-ui', source: 'local', prNumber: null,
         latest: {
           id: 12, run_index: 2, status: 'reviewing', verdict: null, can_merge: null,
           reviewer: 'claude', model: 'opus', created_at: '2026-01-02T00:00:00.000Z',
         },
       },
       {
-        repo: 'my-service', branch: 'feature/abc-123-api', source: 'github',
+        repo: 'my-service', branch: 'feature/abc-123-api', source: 'github', prNumber: 7,
         latest: {
           id: 10, run_index: 1, status: 'done', verdict: 'approve', can_merge: 1,
           reviewer: 'claude', model: 'opus', created_at: '2026-01-01T00:00:00.000Z',
@@ -269,8 +269,87 @@ test('an unreachable API is reported as such, with the restart hint', async () =
     assert.ok(err instanceof ApiUnreachableError);
     assert.match(err.message, new RegExp(`not reachable at ${url.replace(/[.]/g, '\\.')}`));
     assert.match(err.message, /launchctl kickstart/);
+    assert.match(err.message, /Never restart the server while previews or reviews are live/);
     return true;
   });
+  // A mutating call to a closed port is just as unreachable: nothing could have taken it.
+  await assert.rejects(api.stopPreview(5), ApiUnreachableError);
+});
+
+/** A server that takes every request and then answers late, or drops the connection. */
+async function startSlowServer(mode: 'late' | 'drop'): Promise<{ url: string; seen: string[]; close: () => Promise<void> }> {
+  const seen: string[] = [];
+  const server = http.createServer((req, res) => {
+    seen.push(`${req.method} ${req.url}`);
+    if (mode === 'drop') {
+      req.socket.destroy();
+      return;
+    }
+    const timer = setTimeout(() => res.end('{}'), 5_000);
+    res.on('close', () => clearTimeout(timer));
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as AddressInfo;
+  return {
+    url: `http://127.0.0.1:${port}`,
+    seen,
+    close: () => new Promise<void>((resolve) => {
+      server.closeAllConnections();
+      server.close(() => resolve());
+    }),
+  };
+}
+
+test('a slow answer is "still working", never the restart hint', async () => {
+  const slow = await startSlowServer('late');
+  try {
+    const api = new ApiClient(slow.url);
+    // A teardown or a ticket lookup that outlasts the client's patience.
+    await assert.rejects(
+      api.requestJson('/api/previews/5/stop', { method: 'POST', timeoutMs: 200 }),
+      (err: unknown) => {
+        assert.ok(err instanceof ApiNoAnswerError, String(err));
+        assert.match(err.message, /accepted POST \/api\/previews\/5\/stop but sent no answer within 200ms/);
+        assert.match(err.message, /still working on it\. Do not retry and do not restart the server/);
+        assert.match(err.message, /check the outcome with get_preview or list_previews/);
+        assert.match(err.message, /Never restart the server while previews or reviews are live/);
+        assert.doesNotMatch(err.message, /kickstart|not reachable|Is the server running/);
+        return true;
+      },
+    );
+    await assert.rejects(api.requestJson('/api/reviews', { method: 'POST', body: {}, timeoutMs: 200 }), (err: unknown) => {
+      assert.ok(err instanceof ApiNoAnswerError);
+      assert.match(err.message, /check the outcome with list_reviews \(new reviews show there/);
+      return true;
+    });
+    // A read only says the server is busy.
+    await assert.rejects(api.requestJson('/api/previews/5', { timeoutMs: 200 }), (err: unknown) => {
+      assert.ok(err instanceof ApiNoAnswerError);
+      assert.match(err.message, /accepted GET \/api\/previews\/5 but sent no answer within 200ms; it is busy, not down/);
+      assert.doesNotMatch(err.message, /kickstart/);
+      return true;
+    });
+    assert.equal(slow.seen.length, 3, 'every request reached the server');
+  } finally {
+    await slow.close();
+  }
+});
+
+test('a connection dropped mid-request may have taken effect: no restart hint, no retry', async () => {
+  const dropping = await startSlowServer('drop');
+  try {
+    const api = new ApiClient(dropping.url);
+    await assert.rejects(api.createPreview({ ticket: 'ABC-123' }), (err: unknown) => {
+      assert.ok(err instanceof ApiNoAnswerError, String(err));
+      assert.match(err.message, /accepted POST \/api\/previews but the connection dropped before it answered/);
+      assert.match(err.message, /check the outcome with list_previews \(a new preview shows there/);
+      assert.match(err.message, /Do not retry/);
+      assert.doesNotMatch(err.message, /kickstart/);
+      return true;
+    });
+  } finally {
+    await dropping.close();
+  }
 });
 
 test('an API error carries the status and the error field', async () => {
@@ -424,6 +503,13 @@ async function startStub(pollsUntilDone = 2): Promise<Stub> {
       }
       if (req.method === 'POST' && url.pathname === '/api/previews/5/stop') {
         return send(res, 200, { preview: previewPayload({ status: 'stopped' }) });
+      }
+      // The API answers a stop at once; the teardown ends a moment later.
+      if (req.method === 'POST' && url.pathname === '/api/previews/7/stop') {
+        return send(res, 200, { preview: previewPayload({ id: 7, status: 'stopping' }) });
+      }
+      if (req.method === 'GET' && url.pathname === '/api/previews/7') {
+        return send(res, 200, { preview: previewPayload({ id: 7, status: 'stopped' }), logs: [] });
       }
       const match = /^\/api\/reviews\/(\d+)$/.exec(url.pathname);
       if (req.method === 'GET' && match) {
@@ -631,6 +717,16 @@ test('stdio MCP server: recipes, start, wait, list, and stop a preview', { timeo
     const stopped = json(await client.callTool({ name: 'stop_preview', arguments: { id: 5 } }));
     assert.equal(stopped.stopped, true);
     assert.equal(stopped.status, 'stopped');
+
+    // Still stopping when the API answers: the tool waits for the teardown to end.
+    const waitedStop = json(await client.callTool({ name: 'stop_preview', arguments: { id: 7, timeoutSec: 10 } }));
+    assert.equal(waitedStop.stopped, true);
+    assert.equal(waitedStop.status, 'stopped');
+    // Not waiting at all: it says the teardown goes on, and how to follow it.
+    const atOnce = json(await client.callTool({ name: 'stop_preview', arguments: { id: 7, timeoutSec: 0 } }));
+    assert.equal(atOnce.stopped, false);
+    assert.equal(atOnce.status, 'stopping');
+    assert.match(atOnce.next, /check get_preview later\. Do not restart the server/);
   } finally {
     await client.close();
     await stub.close();

@@ -113,6 +113,24 @@ test('groups: pagination keeps the total', () => {
   assert.deepEqual(past.groups, []);
 });
 
+test('group branches carry the newest PR number any of their runs knew', () => {
+  seed();
+  store.createReview({
+    ticket_key: 'ABC-123', repo: 'my-service', branch: 'feature/abc-123-api', base_branch: 'main',
+    pr_number: 41, status: 'done', verdict: 'approve', created_at: at(41),
+  });
+  // A later run found through the ticket's branch scan does not know the PR.
+  store.createReview({
+    ticket_key: 'ABC-123', repo: 'my-service', branch: 'feature/abc-123-api', base_branch: 'main',
+    status: 'done', verdict: 'blocked', created_at: at(42),
+  });
+  const abc = store.listReviewGroups({ limit: 20 }).groups.find((g) => g.key === 'ABC-123')!;
+  const api = abc.branches.find((b) => b.repo === 'my-service')!;
+  assert.equal(api.prNumber, 41);
+  assert.equal(api.latest.verdict, 'blocked');
+  assert.equal(abc.branches.find((b) => b.repo === 'my-frontend')!.prNumber, null);
+});
+
 test('runs of one group, newest first, by exact group key', () => {
   seed();
   const { reviews, total } = store.listReviews({ group: 'ABC-123', limit: 100 });

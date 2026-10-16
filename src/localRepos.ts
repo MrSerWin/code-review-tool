@@ -14,6 +14,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { ALLOWED_REPOS, assertAllowedRepo, config } from './config.js';
 import { assertSafeName, isSafeName } from './gitNames.js';
+import { logger } from './logger.js';
 import type { BaseReason, ResolvedTarget } from './types.js';
 
 const REPO_NAME_SAFE = /^[A-Za-z0-9._-]+$/;
@@ -150,7 +151,9 @@ export async function isGitWorkTree(dir: string): Promise<boolean> {
 
 /**
  * The local clone of an allowed repository, or a clear error. The path must
- * be a plain directory mountable into Docker (no `,` or `:` in it).
+ * be a plain directory mountable into Docker (no `,` or `:` in it). Errors name
+ * the repository, never the path: they reach the API and MCP clients. The path
+ * goes to the server log instead.
  */
 export async function localRepoPath(repo: string, paths: Map<string, string> = localRepoPaths()): Promise<string> {
   if (!REPO_NAME_SAFE.test(repo) || repo === '.' || repo === '..') {
@@ -161,8 +164,14 @@ export async function localRepoPath(repo: string, paths: Map<string, string> = l
   if (!dir) {
     throw new Error(`No local clone is configured for ${repo}. Set LOCAL_REPOS_DIR (or LOCAL_REPOS) in .env.`);
   }
-  if (/[,:]/.test(dir)) throw new Error(`Local clone path of ${repo} cannot contain "," or ":": ${dir}`);
-  if (!(await isGitWorkTree(dir))) throw new Error(`Local clone of ${repo} is not a git work tree: ${dir}`);
+  if (/[,:]/.test(dir)) {
+    logger.warn(`local clone of ${repo}: path cannot contain "," or ":": ${dir}`);
+    throw new Error(`The configured path of the local clone of ${repo} cannot contain "," or ":"; see the server log.`);
+  }
+  if (!(await isGitWorkTree(dir))) {
+    logger.warn(`local clone of ${repo}: not a git work tree: ${dir}`);
+    throw new Error(`The local clone of ${repo} was not found or is not a git work tree; see the server log.`);
+  }
   return dir;
 }
 
@@ -657,7 +666,8 @@ export async function resolveLocalBranch(
   try {
     sha = await branchTip(repoPath, name);
   } catch {
-    throw new Error(`Branch ${name} not found in the local clone of ${repo} (${repoPath})`);
+    logger.info(`local clone of ${repo} (${repoPath}): no branch ${name}`);
+    throw new Error(`Branch ${name} not found in the local clone of ${repo}`);
   }
   return { repoPath, branch: name, sha };
 }

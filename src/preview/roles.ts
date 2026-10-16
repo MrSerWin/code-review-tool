@@ -6,7 +6,11 @@ import { assertSafeName } from '../gitNames.js';
 import { ticketKeyFromBranch } from '../groupKey.js';
 import { LOCAL_PREFIX, parseLocalInput } from '../localRepos.js';
 import { parsePullRequestRef } from '../resolver.js';
+import { TRACKER_NAMES } from '../trackers/types.js';
 import type { PreviewRole, ResolvedTarget, TicketInfo } from '../types.js';
+
+/** `linear:`, `jira:`, … in front of a ticket key. */
+const TRACKER_PREFIX = new RegExp(`^(?:${TRACKER_NAMES.join('|')}):`, 'i');
 
 /** A branch the resolver found, reduced to what a preview role needs. */
 export type RoleTarget = Pick<ResolvedTarget, 'repo' | 'branch' | 'baseBranch' | 'source'>;
@@ -222,6 +226,21 @@ export function planRoles(input: PlanRolesInput): PreviewRole[] {
   return roles;
 }
 
+/**
+ * The planned roles that run the reviewed branch because no override picked
+ * one: the precedence of `planRoles`, where a hand-picked role (even one naming
+ * the same branch) wins over the review.
+ */
+export function rolesFromReview<R extends Pick<PreviewRole, 'role' | 'repo' | 'branch'>>(
+  roles: R[],
+  overrides: Pick<RoleOverride, 'role'>[],
+  review: { repo: string; branch: string } | undefined,
+): R[] {
+  if (!review) return [];
+  const picked = new Set(overrides.map((o) => o.role));
+  return roles.filter((r) => !picked.has(r.role) && r.repo === review.repo && r.branch === review.branch);
+}
+
 /** Marks a role as copied from the local clone; GitHub roles carry no source field. */
 function withLocal(role: PreviewRole, local: boolean, sha?: string): PreviewRole {
   if (!local) return role;
@@ -267,6 +286,9 @@ export function trackerKeyOf(ticket: Pick<TicketInfo, 'key' | 'provider'> | null
  * PR whose branch names ABC-123), when the input was not that ticket already.
  */
 export function followUpTicketKey(lookup: string, trackerKey: string | null): string | null {
-  if (!trackerKey || trackerKey.toLowerCase() === lookup.trim().toLowerCase()) return null;
+  if (!trackerKey) return null;
+  // `jira:ABC-12` (or an issue link, canonicalized to that) already was ABC-12.
+  const typed = lookup.trim().replace(TRACKER_PREFIX, '');
+  if (trackerKey.toLowerCase() === typed.toLowerCase()) return null;
   return trackerKey;
 }

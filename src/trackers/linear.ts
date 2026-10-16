@@ -1,6 +1,7 @@
 import { config } from '../config.js';
 import type { TicketInfo } from '../types.js';
 import { assertConfigured, parseIssueKey, type TicketProvider } from './types.js';
+import { ticketRefFromUrl } from './urls.js';
 
 const LINEAR_API = 'https://api.linear.app/graphql';
 
@@ -54,8 +55,10 @@ async function linearQuery<T>(query: string, variables: Record<string, unknown>)
   return payload.data;
 }
 
+/** `ABC-123`, or a `linear.app/<workspace>/issue/ABC-123` link. */
 export function parseTicketKey(key: string): { team: string; number: number } | null {
-  const parsed = parseIssueKey(key);
+  const ref = ticketRefFromUrl(key);
+  const parsed = parseIssueKey(ref?.tracker === 'linear' ? ref.key : key);
   if (!parsed || !/^[A-Za-z]+$/.test(parsed.project)) return null;
   return { team: parsed.project.toUpperCase(), number: parsed.number };
 }

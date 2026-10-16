@@ -1,6 +1,6 @@
 import { useEffect, useId, useMemo, useState } from 'react';
 import { api } from '../api';
-import type { LocalRepo, LocalReposPayload, PreviewRoleRequest, RepoBranchesPayload } from '../types';
+import type { LocalBranch, LocalRepo, LocalReposPayload, PreviewRoleRequest, RepoBranchesPayload } from '../types';
 
 /** How long a branch listing is reused before it is asked for again. */
 const LISTING_TTL_MS = 60_000;
@@ -40,15 +40,52 @@ function loadLocalRepos(): Promise<LocalReposPayload | null> {
   return listing;
 }
 
+/** How far a local branch is from its remote: never pushed, ahead, upstream deleted, or in sync. */
+type PushState = { kind: 'unpushed' } | { kind: 'ahead'; ahead: number } | { kind: 'gone' } | { kind: 'pushed' };
+
+function pushState(b: LocalBranch): PushState {
+  if (!b.upstream) return { kind: 'unpushed' };
+  if (b.ahead) return { kind: 'ahead', ahead: b.ahead };
+  if (b.unpushed) return { kind: 'gone' };
+  return { kind: 'pushed' };
+}
+
 /** A local branch as the picker shows it: name plus whether it is pushed. */
 export function localBranchLabel(repo: LocalRepo, name: string): string {
   const b = repo.branches.find((x) => x.name === name);
   const marks: string[] = [];
   if (name === repo.currentBranch) marks.push('checked out');
-  if (b && !b.upstream) marks.push('unpushed');
-  else if (b?.ahead) marks.push(`ahead ${b.ahead}`);
-  else if (b?.unpushed) marks.push('upstream gone');
+  const state = b ? pushState(b) : null;
+  if (state?.kind === 'unpushed') marks.push('unpushed');
+  else if (state?.kind === 'ahead') marks.push(`ahead ${state.ahead}`);
+  else if (state?.kind === 'gone') marks.push('upstream gone');
   return marks.length ? `${name} (${marks.join(', ')})` : name;
+}
+
+/** The note under a chosen local branch. */
+function pushNote(b: LocalBranch): string {
+  const state = pushState(b);
+  if (state.kind === 'ahead') return `${state.ahead} unpushed commit(s)`;
+  if (state.kind === 'gone') return 'upstream gone';
+  return state.kind;
+}
+
+const LOCAL_PREFIX = 'local:';
+
+/**
+ * A branch typed as `local:<repo>#<branch>` (or `local:<repo>`): the server
+ * reads it as a local role whatever the Local box says, so the input does too.
+ * `branch` is '' for the clone's checked-out branch; null when the value is not
+ * a local one.
+ */
+export function parseLocalPrefix(value: string): { repo: string; branch: string } | null {
+  const trimmed = value.trim();
+  if (!trimmed.toLowerCase().startsWith(LOCAL_PREFIX)) return null;
+  const rest = trimmed.slice(LOCAL_PREFIX.length);
+  const hash = rest.indexOf('#');
+  return hash < 0
+    ? { repo: rest.trim(), branch: '' }
+    : { repo: rest.slice(0, hash).trim(), branch: rest.slice(hash + 1).trim() };
 }
 
 /**
@@ -186,19 +223,24 @@ function BranchRow({
     return source.branches.filter((b) => !needle || b.toLowerCase().includes(needle)).slice(0, MAX_OPTIONS);
   }, [source, query]);
 
-  const typed = value.trim();
+  // `local:<repo>#<branch>` makes the role local on the server whatever the box
+  // says, so it does here too: the clone answers for it, not the remote.
+  const prefix = parseLocalPrefix(value);
+  const isLocal = local || prefix !== null;
+  const wrongRepo = prefix !== null && prefix.repo !== repo ? prefix.repo : null;
+  const typed = prefix ? prefix.branch : value.trim();
   // Only a complete answer can say a branch does not exist; the server checks again on start.
-  const unknown = local
+  const unknown = wrongRepo === null && (isLocal
     ? typed !== '' && clone !== null && !clone.branches.some((b) => b.name === typed)
-    : typed !== '' && typed === query && source !== null && !source.truncated && !source.branches.includes(typed);
+    : typed !== '' && typed === query && source !== null && !source.truncated && !source.branches.includes(typed));
   const base = listing?.defaultBranch;
   const localOptions = useMemo(() => {
-    if (!local || !clone) return [];
+    if (!isLocal || !clone) return [];
     const needle = typed.toLowerCase();
     return clone.branches
       .filter((b) => !needle || b.name === typed || b.name.toLowerCase().includes(needle))
       .slice(0, MAX_OPTIONS);
-  }, [local, clone, typed]);
+  }, [isLocal, clone, typed]);
   const placeholder = local
     ? clone?.currentBranch
       ? `checked-out branch (${clone.currentBranch})`
@@ -206,7 +248,7 @@ function BranchRow({
     : base
       ? `base branch (${base})`
       : 'base branch';
-  const selected = local ? clone?.branches.find((b) => b.name === typed) : undefined;
+  const selected = isLocal ? clone?.branches.find((b) => b.name === typed) : undefined;
 
   return (
     <div className={`role-branch${onLocalChange ? ' role-branch-local' : ''}`}>
@@ -218,15 +260,17 @@ function BranchRow({
         <label
           className="local-check role-local"
           title={
-            clone
-              ? `Copy the branch from the local clone ${clone.path} (committed state, pushed or not)`
-              : `No local clone of ${repo} is configured (LOCAL_REPOS)`
+            prefix
+              ? 'The local: prefix makes this role local'
+              : clone
+                ? `Copy the branch from the local clone ${clone.path} (committed state, pushed or not)`
+                : `No local clone of ${repo} is configured (LOCAL_REPOS)`
           }
         >
           <input
             type="checkbox"
-            checked={local}
-            disabled={disabled || (!clone && !local)}
+            checked={isLocal}
+            disabled={disabled || prefix !== null || (!clone && !local)}
             onChange={(e) => onLocalChange(e.target.checked)}
           />
           Local
@@ -243,28 +287,33 @@ function BranchRow({
           spellCheck={false}
           autoComplete="off"
           disabled={disabled}
-          aria-invalid={unknown || undefined}
-          aria-describedby={unknown ? `${id}-hint` : undefined}
+          aria-invalid={unknown || wrongRepo !== null || undefined}
+          aria-describedby={unknown || wrongRepo !== null ? `${id}-hint` : undefined}
         />
         <datalist id={`${id}-list`}>
-          {local && clone
+          {isLocal && clone
             ? localOptions.map((b) => (
-                <option key={b.name} value={b.name}>
+                // A suggestion keeps the prefix it was typed with, so picking one keeps the role local.
+                <option key={b.name} value={prefix ? `${LOCAL_PREFIX}${repo}#${b.name}` : b.name}>
                   {localBranchLabel(clone, b.name)}
                 </option>
               ))
             : options.map((b) => <option key={b} value={b} />)}
         </datalist>
+        {wrongRepo !== null && (
+          <span id={`${id}-hint`} className="role-branch-hint">
+            {role} runs {repo}: write local:{repo}#&lt;branch&gt;, not local:{wrongRepo}
+          </span>
+        )}
         {unknown && (
           <span id={`${id}-hint`} className="role-branch-hint">
-            No branch {typed} in {local ? 'the local clone of ' : ''}
+            No branch {typed} in {isLocal ? 'the local clone of ' : ''}
             {repo}
           </span>
         )}
-        {local && selected && !unknown && (
+        {isLocal && selected && !unknown && (
           <span className="role-branch-note muted">
-            {selected.upstream ? (selected.ahead ? `${selected.ahead} unpushed commit(s)` : 'pushed') : 'unpushed'} ·{' '}
-            {selected.lastCommit.sha.slice(0, 7)}
+            {pushNote(selected)} · {selected.lastCommit.sha.slice(0, 7)}
           </span>
         )}
       </div>

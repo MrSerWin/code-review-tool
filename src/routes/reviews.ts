@@ -23,7 +23,7 @@ import {
   updateReview,
 } from '../db.js';
 import { compareFindings, toComparable } from '../findingCompare.js';
-import { githubLinks } from '../githubLinks.js';
+import { githubLinks, rowLinks } from '../githubLinks.js';
 import { subscribe } from '../events.js';
 import { cancelReview, enqueueReview } from '../queue.js';
 import { resolveTargets } from '../resolver.js';
@@ -155,7 +155,9 @@ export async function reviewRoutes(app: FastifyInstance): Promise<void> {
     const parsed = listQuery.safeParse(req.query);
     if (!parsed.success) return reply.code(400).send({ error: 'Invalid query' });
     const { limit = 50, offset = 0, ...rest } = parsed.data;
-    return listReviews({ ...rest, limit, offset });
+    const { reviews, total } = listReviews({ ...rest, limit, offset });
+    // GitHub pages of each row's branch and PR: the UI does not know the organization.
+    return { reviews: reviews.map((r) => ({ ...r, links: rowLinks(config.GITHUB_ORG, r) })), total };
   });
 
   // The history grouped by ticket (see groupKey.ts), most recently active first.
@@ -163,7 +165,17 @@ export async function reviewRoutes(app: FastifyInstance): Promise<void> {
     const parsed = groupsQuery.safeParse(req.query);
     if (!parsed.success) return reply.code(400).send({ error: 'Invalid query' });
     const { limit = 20, offset = 0, ...rest } = parsed.data;
-    return listReviewGroups({ ...rest, limit, offset });
+    const { groups, total } = listReviewGroups({ ...rest, limit, offset });
+    return {
+      total,
+      groups: groups.map((g) => ({
+        ...g,
+        branches: g.branches.map((b) => ({
+          ...b,
+          links: rowLinks(config.GITHUB_ORG, { repo: b.repo, branch: b.branch, pr_number: b.prNumber }),
+        })),
+      })),
+    };
   });
 
   app.get('/api/reviews/:id', async (req, reply) => {

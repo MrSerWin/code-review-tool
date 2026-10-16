@@ -10,6 +10,7 @@ import Fastify from 'fastify';
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'crt-tickets-'));
 process.env.DATA_DIR = dataDir;
 const { ticketRoutes } = await import('./routes/tickets.js');
+const { config } = await import('./config.js');
 
 const app = Fastify({ logger: false });
 await app.register(ticketRoutes);
@@ -50,4 +51,21 @@ test('inputs over 512 characters and empty inputs are refused', async () => {
   assert.equal(tooLong.statusCode, 400);
   const empty = await app.inject({ method: 'GET', url: '/api/tickets/' });
   assert.equal(empty.statusCode, 400);
+});
+
+test('a tracker issue link resolves as its tracker, even when that tracker is not configured', async (t) => {
+  // Configured, the link would be fetched; this test must stay offline.
+  if (config.YOUTRACK_BASE_URL && config.YOUTRACK_TOKEN) return t.skip('YouTrack is configured in .env');
+  const res = await app.inject({
+    method: 'GET',
+    url: ticketPath('https://acme.youtrack.cloud/issue/ABC-123/add-export'),
+  });
+  assert.equal(res.statusCode, 404);
+  assert.match(res.json().error, /youtrack tracker is not configured.*YOUTRACK_BASE_URL/);
+});
+
+test('an issue-like link on an unrelated host is not a ticket', async () => {
+  const res = await app.inject({ method: 'GET', url: ticketPath('https://example.com/issue/ABC-123') });
+  assert.equal(res.statusCode, 404);
+  assert.match(res.json().error, /^Unsupported input/);
 });

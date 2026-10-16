@@ -60,6 +60,14 @@ export interface Review {
   finished_at: string | null;
   /** What the history groups this run under: ticket key, a key from the branch name, or repo#branch. */
   group_key?: string | null;
+  /** GitHub pages of the run's branch and PR; list endpoints only, absent from older servers. */
+  links?: RowLinks;
+}
+
+/** The GitHub pages a row of a run table links to. */
+export interface RowLinks {
+  branch: string;
+  pr: string | null;
 }
 
 /** The latest run of one branch of a review group. */
@@ -78,7 +86,11 @@ export interface ReviewGroupBranch {
   repo: string;
   branch: string;
   source: 'github' | 'local';
+  /** The newest PR number any run of this branch in the group knew; absent from older servers. */
+  prNumber?: number | null;
   latest: ReviewGroupRun;
+  /** Absent from older servers. */
+  links?: RowLinks;
 }
 
 /** One row of GET /api/review-groups. */

@@ -3,6 +3,7 @@ import { logger } from '../logger.js';
 import { collectPrUrls } from '../prLinks.js';
 import type { TicketInfo } from '../types.js';
 import { adfToText } from './adf.js';
+import { ticketRefFromUrl } from './urls.js';
 import {
   assertConfigured, basicAuth, parseIssueKey, readJson, trimSlash, type TicketProvider,
 } from './types.js';
@@ -37,13 +38,13 @@ function authHeaders(): Record<string, string> {
   return { Authorization: basicAuth(config.JIRA_EMAIL as string, config.JIRA_API_TOKEN as string) };
 }
 
-/** `ABC-123`, or a browse//jira/software URL that ends in one. */
+/** `ABC-123`, or an issue link on an Atlassian site or the configured Jira host. */
 function parseKey(input: string): string | null {
   const raw = input.trim();
   const direct = parseIssueKey(raw);
   if (direct) return `${direct.project.toUpperCase()}-${direct.number}`;
-  const url = /^https?:\/\/[^/]+\/(?:browse|jira\/software\/[^?]*?\/issues)\/([A-Za-z][A-Za-z0-9_]*-\d+)/.exec(raw);
-  return url ? (url[1] as string).toUpperCase() : null;
+  const ref = ticketRefFromUrl(raw, { jira: config.JIRA_BASE_URL });
+  return ref?.tracker === 'jira' ? ref.key : null;
 }
 
 /**

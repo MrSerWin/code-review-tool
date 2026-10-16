@@ -129,6 +129,13 @@ export default function Previews() {
   // A single recipe needs no picking: run it implicitly.
   const recipe = recipes?.recipes.find((r) => r.name === recipeName) ?? recipes?.recipes[0] ?? null;
 
+  // Local ticks are keyed by role name; another recipe's role of the same name
+  // may run a repo without a local clone.
+  const recipeKey = recipe?.name ?? null;
+  useEffect(() => {
+    setLocalRoles({});
+  }, [recipeKey]);
+
   const switchStartMode = (next: StartMode): void => {
     setStartMode(next);
     writeStored(START_MODE_KEY, next);
@@ -234,7 +241,7 @@ export default function Previews() {
               <form className="launcher" onSubmit={(e) => void start(e)}>
                 <input
                   className="launcher-input"
-                  placeholder="ABC-123, PR URL, repo#branch, or local:repo#branch"
+                  placeholder="ABC-123 or its link, PR URL, repo#branch, or local:repo#branch"
                   value={ticket}
                   spellCheck={false}
                   onChange={(e) => setTicket(e.target.value)}
@@ -365,7 +372,8 @@ export default function Previews() {
                               className="btn ghost btn-sm"
                               type="button"
                               onClick={() => void stop(p)}
-                              disabled={busy === p.id}
+                              disabled={busy === p.id || p.status === 'stopping'}
+                              title={p.status === 'stopping' ? 'Teardown is running' : undefined}
                             >
                               Stop
                             </button>
