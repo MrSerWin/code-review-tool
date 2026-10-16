@@ -155,11 +155,19 @@ are set, and a missing one is reported only when you actually use it.
 
 | tracker | prefix | variables | recognises |
 |---|---|---|---|
-| Linear | `linear:` | `LINEAR_API_KEY` | `ABC-123` |
-| Jira Cloud | `jira:` | `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN` | `ABC-123`, a `/browse/ABC-123` URL |
+| Linear | `linear:` | `LINEAR_API_KEY` | `ABC-123`, `https://linear.app/<workspace>/issue/ABC-123[/<slug>]` |
+| Jira Cloud | `jira:` | `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN` | `ABC-123`, `https://<site>.atlassian.net/browse/ABC-123`, a board link with `?selectedIssue=ABC-123` |
 | GitHub Issues | `github:` | none beyond `GITHUB_ORG` and `REVIEW_GH_TOKEN` | `my-org/my-service#123`, an issue URL |
-| Azure DevOps | `azure:` | `AZURE_ORG_URL`, `AZURE_PROJECT`, `AZURE_PAT` | `123`, `#123`, a `_workitems/edit/123` URL |
-| YouTrack | `youtrack:` | `YOUTRACK_BASE_URL`, `YOUTRACK_TOKEN` | `ABC-123`, an `/issue/ABC-123` URL |
+| Azure DevOps | `azure:` | `AZURE_ORG_URL`, `AZURE_PROJECT`, `AZURE_PAT` | `123`, `#123`, `https://dev.azure.com/<org>/<project>/_workitems/edit/123` (or `<org>.visualstudio.com`, or a board link with `?workitem=123`) |
+| YouTrack | `youtrack:` | `YOUTRACK_BASE_URL`, `YOUTRACK_TOKEN` | `ABC-123`, `https://<host>/issue/ABC-123[/<slug>]` |
+
+An issue link is read as the key it names, and its host says which tracker it
+belongs to, so a link never needs a prefix or `DEFAULT_TRACKER`. A link only
+counts on a host of its tracker: `linear.app`, `*.atlassian.net`,
+`*.youtrack.cloud`, `*.myjetbrains.com`, `dev.azure.com`, `*.visualstudio.com`,
+or the host of the configured `JIRA_BASE_URL`, `YOUTRACK_BASE_URL`, or
+`AZURE_ORG_URL` (a self-hosted tracker). `http://`, `www.`, a trailing slash, a
+query, a fragment, and `<…>` around it are all fine.
 
 Linear, Jira, and YouTrack all read `ABC-123` the same way. If more than one of
 them is configured, set `DEFAULT_TRACKER` to the one that should win, or say it
@@ -256,7 +264,7 @@ Every entry point — the UI, the CLI, `POST /api/reviews`, and the MCP
 
 | input | what is reviewed |
 |---|---|
-| `ABC-123`, or `jira:ABC-123` to pick the tracker | every branch of the ticket: the pull requests it links to (each against its PR base), plus every branch of an allowed repository whose name contains the key (any case, dash optional: `abc123`) or equals the ticket's branch name (against the default branch). One review per branch |
+| `ABC-123`, or `jira:ABC-123` to pick the tracker, or the ticket's issue link ([which](#ticket-trackers)) | every branch of the ticket: the pull requests it links to (each against its PR base), plus every branch of an allowed repository whose name contains the key (any case, dash optional: `abc123`) or equals the ticket's branch name (against the default branch). One review per branch |
 | `https://github.com/my-org/my-service/pull/12` (trailing `/files`, `?…`, `#…` allowed) | exactly that pull request's head branch, against the PR's base branch |
 | `my-org/my-service#12` (optionally `github:my-org/my-service#12`) | that pull request's branch, as above; when number 12 is an issue rather than a PR, the issue is read as a GitHub Issues ticket and its branches are collected as for `ABC-123` |
 | an issue URL, `https://github.com/my-org/my-service/issues/12` | the GitHub issue as a ticket, as for `ABC-123` |
@@ -281,15 +289,26 @@ the requirements inferred from the change.
 
 - **Reviews** (`/`) — the launcher and the history. Pick **GitHub** or
   **Local**, a reviewer, and a model (all three remembered per browser). A ticket key
-  is resolved first: the ticket, the tracker that answered, and every branch it
-  found are shown with checkboxes, and **Start review** starts one run per
-  picked branch. Any other input starts right away.
-- **History** — **By ticket** (default, 20 groups a page) shows one row per
-  group, with a chip per branch carrying its latest run's verdict or status;
-  a row expands to that group's runs. **All runs** is the flat list, 25 runs a
+  or issue link is resolved first (a link is named under the field as you
+  paste it, e.g. "Linear ticket ABC-123"): the ticket, the tracker that
+  answered, and every branch it found are shown with checkboxes, and **Start
+  review** starts one run per picked branch. Any other input starts right away.
+- **History** — **By ticket** (default, 20 groups a page) shows one compact row
+  per group: the key (linking to the ticket page, with ↗ to the tracker), the
+  title, `N branches · M runs`, one outcome badge, and the last activity. The
+  badge is "N active" while anything runs, else the worst latest verdict of its
+  branches (blocked, then changes requested, then approved), else the latest
+  status; its tooltip has the breakdown. A row expands to its branches, each
+  with its GitHub links and latest outcome, and that branch's runs newest
+  first (five, then "N older runs"). **All runs** is the flat list, 25 runs a
   page. The filter matches ticket key and title, repository, branch, and group
   key. The chosen view is remembered, and the list refreshes every 4 s while
   something on screen is running.
+- **Links in run tables** — in every table of runs (All runs, an expanded
+  group, the ticket page) the branch opens on GitHub in a new tab and
+  **PR #n ↗** opens its pull request when the run knows one, while the row and
+  the run number open the review page. A local run's branch link warns that it
+  may not be pushed.
 - **Review page** (`/review/<id>`) — the verdict banner, links to GitHub
   (**PR #n** when the run knows its pull request, **Branch**, and **Diff**:
   GitHub's compare view of `base...branch`; the head and base shas link to
@@ -297,7 +316,9 @@ the requirements inferred from the change.
   observations, what changed since the previous finished run of the branch
   (resolved, new, persistent findings), the live log, and the **Preview** card.
   A local run is marked "local run — GitHub may lag", since GitHub only shows
-  what is pushed. Actions: **Cancel** while it runs; afterwards **Re-run**,
+  what is pushed. **Open in Linear** (or Jira, YouTrack, Azure DevOps, GitHub)
+  opens the ticket in its tracker, and the ticket key in the Run card has a ↗
+  to it as well; neither shows for pasted requirements. Actions: **Cancel** while it runs; afterwards **Re-run**,
   **Download**, **Copy report**, and **Delete**.
 - **Ticket page** (`/ticket/<key>`) — every run of one group across
   repositories, grouped by repository and branch, newest first.
@@ -375,8 +396,8 @@ authentication. Errors come back as `{ "error": "…" }` with a 4xx or 5xx statu
 | GET | `/api/local-repos/:repo/parent` | `?branch=` | `{ branch, base, reason, distance, defaultBase }`: the detected parent; `reason` is `ancestor`, `fork-point`, or `default` |
 | GET | `/api/tickets/<input>` | | `{ ticket, targets }`: what any [input](#inputs) resolves to, without starting anything (URL-encode the input, slashes included; at most 512 characters, as for `POST /api/reviews`) |
 | POST | `/api/reviews` | `{ input, targets?, reviewer?, model?, requirementsText?, includeWorkingTree?, baseBranch? }` | `201 { reviews }`: one queued run per target; `targets` narrows a ticket to some of its branches |
-| GET | `/api/reviews` | `?q=&ticket=&repo=&branch=&group=&limit=&offset=` | `{ reviews, total }`, newest first; `limit` 1–500, default 50 |
-| GET | `/api/review-groups` | `?q=&status=active\|failed\|done&limit=&offset=` | `{ groups, total }`, most recently active group first; `limit` 1–100, default 20 |
+| GET | `/api/reviews` | `?q=&ticket=&repo=&branch=&group=&limit=&offset=` | `{ reviews, total }`, newest first; `limit` 1–500, default 50; each row has `links: { branch, pr }`, its GitHub URLs (`pr` null without a PR number) |
+| GET | `/api/review-groups` | `?q=&status=active\|failed\|done&limit=&offset=` | `{ groups, total }`, most recently active group first; `limit` 1–100, default 20; each branch has `prNumber` (the newest any of its runs knew) and `links: { branch, pr }` |
 | GET | `/api/reviews/:id` | | `{ review, requirements, findings, observations, logs, comparison, links }`; `links` holds the GitHub URLs (`repo`, `branch`, `pr`, `compare`, `head`, `base`) |
 | GET | `/api/reviews/:id/report` | | the Markdown report (`text/markdown`) |
 | GET | `/api/reviews/:id/events` | | server-sent events: `status`, `log`, and `done` messages |
@@ -387,7 +408,7 @@ authentication. Errors come back as `{ "error": "…" }` with a 4xx or 5xx statu
 | GET | `/api/previews` | `?reviewId=&ticket=&recipe=&limit=&offset=` | `{ previews, total }`, newest first; `limit` 1–500, default 50 |
 | GET | `/api/previews/:id` | | `{ preview, logs }` |
 | POST | `/api/previews` | `{ reviewId?, ticket?, recipe?, roles?, dumpMode? }`; `roles: [{ role, branch?, base?, local? }]`, a local branch as `local: true` or `branch: "local:<repo>#<branch>"` | `201 { preview }`, queued; `400` when a role, branch or local branch does not exist; `409` when previews are disabled |
-| POST | `/api/previews/:id/stop` | | `{ preview }`: runs `down` |
+| POST | `/api/previews/:id/stop` | | `{ preview }` at once, `stopping` while `down` runs in the background (follow it with `GET /api/previews/:id`); a second stop joins the running one; an ended preview is returned as it is |
 | DELETE | `/api/previews/:id` | | `{ ok: true }`: stops it first, then deletes the row and its scratch directory |
 | GET | `/api/previews/:id/events` | | server-sent events: `status`, `log`, and `ready` messages |
 
@@ -423,7 +444,7 @@ every tool returns an error saying so.
 | `start_preview` | `recipe?`, `roles?` (`[{role, branch?, base?, local?}]`), `review_id?`, `ticket?`, `dump_mode?` | start a [preview](#preview-environments-optional); a role runs a local branch with `branch: "local:<repo>#<branch>"` or `local: true`; returns the preview id at once |
 | `get_preview` | `id`, `tail_logs?` | status, `web_url` once ready, each role's branch, `source` (`github` / `local`) and commit, ports, data mode, expiry, error |
 | `wait_for_preview` | `id`, `timeoutSec?` (default 50, max 600), `pollSec?` (default 5) | poll until the preview is ready or has ended; returns `finished`, call again while it is `false` |
-| `stop_preview` | `id` | stop a preview and wait for its teardown |
+| `stop_preview` | `id`, `timeoutSec?` (default 50, max 600) | stop a preview; waits up to `timeoutSec` for its teardown, which goes on in the server after that (`stopped=false`) |
 | `list_previews` | `review_id?`, `ticket?`, `recipe?`, `status?` (one status or `live`), `limit?` (default 20) | recent previews, newest first |
 
 A review takes minutes, so the usual flow is `start_review`, then
@@ -475,10 +496,15 @@ grok mcp add code-review -- node <path-to-repo>/dist/mcp.js
 
 Grok also picks up servers registered for Claude Code and Cursor.
 
-When the API is unreachable, the error suggests
-`launchctl kickstart -k gui/$UID/com.code-review-tool.server`; that only applies
-if you run the server as a launchd agent with that label. Otherwise start it
-however you normally do.
+When the API is unreachable (nothing listens at the address), the error
+suggests `launchctl kickstart -k gui/$UID/com.code-review-tool.server`; that only
+applies if you run the server as a launchd agent with that label. Otherwise
+start it however you normally do. A request the server accepted but did not
+answer in time (a slow ticket lookup, say), or whose connection dropped, is
+reported as still working, without that hint: check `get_preview`,
+`list_previews` or `list_reviews` instead of retrying. Never restart the server
+while previews or reviews are live; a restart tears down every live preview and
+fails every running review.
 
 **Reviews cannot use it.** The reviewer CLIs are the same agents, so every
 review run keeps MCP servers out: Claude Code runs with `--strict-mcp-config`
@@ -522,8 +548,9 @@ workers.
 `local:repo#branch`. Once a preview leaves the queue it goes through:
 
 1. **Checkouts.** Each role gets its branch (see below): the review's own
-   checkout when it is still on disk, otherwise a fresh fetch in the sandbox
-   (a local role is copied from the clone instead). A branch that has since
+   checkout when it is still on disk (for a local role only when it holds the
+   very commit the role runs), otherwise a fresh fetch in the sandbox (a local
+   role is copied from the clone instead). A branch that has since
    been deleted on the remote (merged, say) falls back to its base branch,
    with a warning.
 2. **Ports.** One free host port per recipe port, from `PREVIEW_PORT_RANGE`.
@@ -575,7 +602,7 @@ when every role is given, no ticket is looked up at all.
 A role can run a branch of a [local clone](#reviewing-a-local-unpushed-branch)
 that was never pushed. The input follows the review convention:
 
-- API and MCP: `{ "role": "backend", "branch": "local:cytarian#feat/x" }`, or
+- API and MCP: `{ "role": "backend", "branch": "local:my-service#feat/x" }`, or
   `{ "role": "backend", "branch": "feat/x", "local": true }`. The repo in
   `local:<repo>#…` must be the role's own. `local:<repo>` alone, or `local: true`
   with no branch, runs the clone's checked-out branch.
@@ -585,13 +612,18 @@ that was never pushed. The input follows the review convention:
 - A ticket input `local:<repo>#<branch>` works too: that branch runs for its
   repo, and when its name carries a ticket key, the ticket's branches on GitHub
   join for the other repos.
-- A local review's Preview card copies the reviewed branch from the clone.
+- A local review's Preview card runs the reviewed commit from the review's
+  checkout while that is on disk; otherwise the branch is copied from the clone
+  again at its current tip, so it must still be there. Roles picked by hand
+  never need the reviewed branch: **Custom…** works after it was pushed and
+  pruned.
 
 The branch is read through the main clone's refs, so a branch checked out in a
 `git worktree` of that clone works as well. The sandbox copies the committed
 tip (`refs/heads/<branch>`, read-only mount, as for a local review); uncommitted
 changes in the clone or any worktree are never included, and a review checkout
-that holds a working-tree snapshot is not reused. A branch or base missing from
+that holds a working-tree snapshot, or an older commit than the branch tip
+picked by hand, is not reused. A branch or base missing from
 the clone is refused with a `400` before anything is queued. Each role records
 `source` (`github` or `local`) and the commit it ran (`sha`); the UI tags local
 roles **local** and shows no GitHub link for them.

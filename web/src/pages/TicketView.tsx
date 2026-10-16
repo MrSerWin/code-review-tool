@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../api';
-import { Card, StatusPill, VerdictBadge, fmtTime } from '../components/ui';
-import { navigate } from '../router';
+import { BranchLink, Card, PrLink, StatusPill, VerdictBadge, fmtTime } from '../components/ui';
+import { Link, navigate } from '../router';
+import { openTicketLabel, openTicketTitle } from '../tickets';
 import type { Review } from '../types';
 
 const ACTIVE = new Set(['queued', 'fetching', 'reviewing']);
@@ -62,8 +63,15 @@ export default function TicketView({ ticketKey }: { ticketKey: string }) {
         <h1 className="mono">{ticketKey}</h1>
         <p className="muted">{title}</p>
         {url && (
-          <a className="btn ghost" href={url} target="_blank" rel="noreferrer">
-            Open ticket
+          <a
+            className="link-btn"
+            href={url}
+            target="_blank"
+            rel="noreferrer"
+            title={openTicketTitle(url, ticketKey)}
+          >
+            {openTicketLabel(url)}
+            <span className="link-arrow" aria-hidden="true">↗</span>
           </a>
         )}
       </header>
@@ -71,7 +79,7 @@ export default function TicketView({ ticketKey }: { ticketKey: string }) {
       {groups.size === 0 && <p className="muted">No runs for this ticket.</p>}
 
       {[...groups.entries()].map(([key, rows]) => (
-        <Card key={key} title={<span className="mono">{key}</span>}>
+        <Card key={key} title={<BranchTitle rows={rows} />}>
           <div className="table-wrap">
             <table className="grid">
               <thead>
@@ -88,7 +96,9 @@ export default function TicketView({ ticketKey }: { ticketKey: string }) {
               <tbody>
                 {rows.map((r) => (
                   <tr key={r.id} className="row-link" onClick={() => navigate(`/review/${r.id}`)}>
-                    <td className="mono">#{r.run_index}</td>
+                    <td className="mono" onClick={(e) => e.stopPropagation()}>
+                      <Link to={`/review/${r.id}`}>#{r.run_index}</Link>
+                    </td>
                     <td>
                       <VerdictBadge verdict={r.verdict} />
                     </td>
@@ -112,5 +122,20 @@ export default function TicketView({ ticketKey }: { ticketKey: string }) {
         </Card>
       ))}
     </div>
+  );
+}
+
+/** `repo · branch ↗ · PR #12 ↗`: one branch of the ticket, with its GitHub pages. Rows are newest first. */
+function BranchTitle({ rows }: { rows: Review[] }) {
+  const newest = rows[0]!;
+  const withPr = rows.find((r) => r.links?.pr);
+  const local = newest.source === 'local';
+  return (
+    <span className="branch-title">
+      <span className="branch-repo">{newest.repo}</span>
+      <BranchLink branch={newest.branch} href={newest.links?.branch} local={local} />
+      {local && <span className="tag local">local</span>}
+      {withPr?.links?.pr && <PrLink href={withPr.links.pr} number={withPr.pr_number} />}
+    </span>
   );
 }

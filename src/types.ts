@@ -157,6 +157,8 @@ export interface ReviewGroupBranch {
   branch: string;
   /** Source of the latest run; local and GitHub runs of one repo/branch share a run sequence. */
   source: ReviewSource;
+  /** The newest pull request number any run of this branch in the group knew. */
+  prNumber: number | null;
   latest: ReviewGroupRun;
 }
 

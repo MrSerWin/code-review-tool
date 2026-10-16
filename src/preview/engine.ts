@@ -3,7 +3,7 @@ import path from 'node:path';
 import { config } from '../config.js';
 import { getReview } from '../db.js';
 import {
-  assertPristine, fetchCheckout, ghApi, lsRemoteHeads, sanitizeBranchForPath,
+  assertPristine, checkoutDir, fetchCheckout, ghApi, lsRemoteHeads,
 } from '../gitSandbox.js';
 import { branchUrl } from '../githubLinks.js';
 import { ticketKeyFromBranch } from '../groupKey.js';
@@ -13,8 +13,9 @@ import { sanitizeLogMessage } from '../logSanitize.js';
 import { remoteBranches } from '../remoteBranches.js';
 import { resolveTargets } from '../resolver.js';
 import { buildSanitizedEnv, REVIEWER_MARKER_ENV } from '../reviewers/shared.js';
+import { canonicalTicketInput } from '../trackers/index.js';
 import type {
-  DumpMode, LogLevel, PreviewRole, PreviewRow, PreviewStatus, ResolvedTarget,
+  DumpMode, LogLevel, PreviewRole, PreviewRow, PreviewStatus, ResolvedTarget, ReviewRow,
 } from '../types.js';
 import { resolveDumpSource } from './database.js';
 import { publishPreview } from './events.js';
@@ -22,8 +23,8 @@ import { allocatePorts } from './ports.js';
 import { findRecipe, loadRecipes, primaryPort, type Recipe } from './recipes.js';
 import {
   coversAllRoles, followUpTicketKey, missingBranchMessage, missingOverrideBranches, normalizeOverrides,
-  planRoles, previewLookupKey, ticketKeyFromBranches, trackerKeyOf, type MissingBranch, type RoleOverride,
-  type RoleOverrideInput, type RoleTarget,
+  planRoles, previewLookupKey, rolesFromReview, ticketKeyFromBranches, trackerKeyOf, type MissingBranch,
+  type RoleOverride, type RoleOverrideInput, type RoleTarget,
 } from './roles.js';
 import { runStep } from './steps.js';
 import {
@@ -87,8 +88,6 @@ export async function requestPreview(request: CreatePreviewRequest): Promise<Pre
   const recipe = pickRecipe(request.recipe);
   const review = request.reviewId !== undefined ? getReview(request.reviewId) : undefined;
   if (request.reviewId !== undefined && !review) throw new Error(`Review ${request.reviewId} not found`);
-  // A local review's branch is copied from the clone again, so it must still be there.
-  if (review?.source === 'local') await resolveLocalBranch(review.repo, review.branch);
 
   // Hand-picked branches are checked before anything is queued: a typo must
   // not quietly turn into a preview of the base branch.
@@ -96,9 +95,11 @@ export async function requestPreview(request: CreatePreviewRequest): Promise<Pre
 
   const { roles, ticketKey } = await resolveRoles(recipe, {
     review,
-    ticket: request.ticket,
+    // An issue link is looked up as the key it names: `linear:ABC-123`.
+    ticket: request.ticket?.trim() ? canonicalTicketInput(request.ticket.trim()) : request.ticket,
     overrides,
   });
+  await checkReviewRoles(roles, overrides, review);
 
   const row = createPreview({
     review_id: review?.id ?? null,
@@ -197,6 +198,40 @@ export async function checkLocalOverrides(overrides: RoleOverride[], paths?: Map
     }
   }
   if (missing.length > 0) throw new Error(missingBranchMessage(missing));
+}
+
+type ReviewForReuse = Pick<ReviewRow, 'id' | 'repo' | 'branch' | 'source' | 'working_tree' | 'head_sha'>;
+
+/**
+ * The roles that run a local review's branch (no override picked theirs).
+ * Each reuses the review's checkout while it is on disk; only without one is
+ * the branch copied from the clone again, so only then must it still be there.
+ * A preview that picks every role by hand never reads the reviewed branch, so
+ * a branch pushed and pruned since, or a clone no longer configured, cannot
+ * block it. A role copied again gets the tip it will run as `sha`, in place.
+ * Exported for tests; `paths` stands in for the configured clones.
+ */
+export async function checkReviewRoles(
+  roles: PreviewRole[],
+  overrides: RoleOverride[],
+  review: ReviewForReuse | undefined,
+  paths?: Map<string, string>,
+): Promise<void> {
+  if (review?.source !== 'local') return;
+  for (const role of rolesFromReview(roles, overrides, review)) {
+    if (role.source !== 'local' || reviewCheckoutDir(review, role)) continue;
+    let tip;
+    try {
+      tip = await resolveLocalBranch(review.repo, review.branch, paths);
+    } catch (err) {
+      const why = (err as Error).message.replace(/\.$/, '');
+      throw new Error(
+        `Cannot run the reviewed branch for role ${role.role}: ${why}. The review's checkout is gone, so the `
+          + `branch would be copied from the local clone again; pick a branch for role ${role.role} by hand instead.`,
+      );
+    }
+    role.sha = tip.sha;
+  }
 }
 
 const defaultBranchCache = new Map<string, string>();
@@ -450,8 +485,9 @@ async function prepareCheckouts(
   roles: PreviewRole[],
 ): Promise<Record<string, string>> {
   const checkouts: Record<string, string> = {};
+  const review = row.review_id !== null ? getReview(row.review_id) : undefined;
   for (const role of roles) {
-    const reused = row.review_id !== null ? reviewCheckoutDir(row.review_id, role) : null;
+    const reused = review ? reviewCheckoutDir(review, role) : null;
     if (reused) {
       log(context.previewId, 'info', `Reusing the review checkout of ${role.repo} (${role.branch}).`);
       context.borrowedCheckouts.push(reused.dir);
@@ -472,12 +508,15 @@ async function prepareCheckouts(
         ? `Copying ${role.repo} (${role.branch}) from the local clone in the git sandbox.`
         : `Fetching ${role.repo} (${role.branch}) in the git sandbox.`,
     );
-    const result = await fetchCheckout(
-      checkoutTarget(role),
-      PREVIEW_CHECKOUT_ID_BASE + context.previewId,
-      (level, message) => log(context.previewId, level, message),
-    );
-    context.ownedCheckouts.push(result.dir);
+    const target = checkoutTarget(role);
+    const checkoutId = PREVIEW_CHECKOUT_ID_BASE + context.previewId;
+    // Owned before the clone starts: a fetch that throws halfway (a branch that
+    // moved while it was copied, a base that is gone) has already created the
+    // directory, and teardown removes only the checkouts listed here.
+    const dir = checkoutDir(target, checkoutId);
+    if (!context.ownedCheckouts.includes(dir)) context.ownedCheckouts.push(dir);
+    const result = await fetchCheckout(target, checkoutId, (level, message) => log(context.previewId, level, message));
+    if (!context.ownedCheckouts.includes(result.dir)) context.ownedCheckouts.push(result.dir);
     checkouts[role.role] = result.dir;
     if (role.source === 'local' && role.sha && role.sha !== result.headSha) {
       log(
@@ -553,17 +592,27 @@ async function fallBackIfBranchGone(context: RunContext, role: PreviewRole): Pro
 }
 
 /**
- * The checkout a review left behind, when it is still on disk and matches the
- * role. A local review that included uncommitted changes is not reused: its
- * checkout holds a snapshot commit, and a preview runs committed state only.
+ * Whether a review's checkout may stand in for a role: same repository, branch
+ * and source, and a finished fetch (`head_sha`). A local review that included
+ * uncommitted changes never qualifies: its checkout holds a snapshot commit,
+ * and a preview runs committed state only. The checkout sits at the reviewed
+ * commit, so a local role resolved to a tip (`sha`: a branch picked by hand,
+ * or the reviewed branch copied again) reuses it only when that tip is the
+ * reviewed commit; otherwise the role is copied fresh and runs the tip.
+ * Pure; exported for tests.
  */
-function reviewCheckoutDir(reviewId: number, role: PreviewRole): { dir: string; sha: string | null } | null {
-  const review = getReview(reviewId);
-  if (!review || review.repo !== role.repo || review.branch !== role.branch) return null;
-  if ((review.source === 'local') !== (role.source === 'local') || review.working_tree) return null;
+export function canReuseReviewCheckout(review: ReviewForReuse, role: PreviewRole): boolean {
+  if (review.repo !== role.repo || review.branch !== role.branch || !review.head_sha) return false;
+  if ((review.source === 'local') !== (role.source === 'local') || review.working_tree) return false;
+  return role.source !== 'local' || role.sha === undefined || role.sha === review.head_sha;
+}
+
+/** The checkout a review left behind, when it is still on disk and may stand in for the role. */
+function reviewCheckoutDir(review: ReviewForReuse, role: PreviewRole): { dir: string; sha: string | null } | null {
+  if (!canReuseReviewCheckout(review, role)) return null;
   let dir: string;
   try {
-    dir = path.join(config.dataDir, 'checkouts', role.repo, sanitizeBranchForPath(role.branch), String(reviewId));
+    dir = checkoutDir(role, review.id);
   } catch {
     return null;
   }
@@ -773,10 +822,23 @@ async function teardown(context: RunContext, reason: PreviewStatus): Promise<voi
 
 // --- stop, delete, reaper, recovery ---
 
-export async function stopPreview(previewId: number, finalStatus: PreviewStatus = 'stopped'): Promise<void> {
+/** Teardowns of ready (or orphaned) previews in progress, by id; a second stop joins the first. */
+const teardowns = new Map<number, Promise<void>>();
+
+/**
+ * Asks a preview to stop and returns as soon as its row says so: a queued
+ * preview ends at once, one still starting is aborted (its worker tears it
+ * down), and a ready one is marked `stopping` while `down` runs in the
+ * background, which can take minutes. `done` settles once that teardown is
+ * over (at once when a worker owns the preview) and never rejects. Throws when
+ * the preview does not exist or its teardown context cannot be rebuilt.
+ */
+export function beginStop(previewId: number, finalStatus: PreviewStatus = 'stopped'): { done: Promise<void> } {
   const row = getPreview(previewId);
   if (!row) throw new Error(`Preview ${previewId} not found`);
-  if (['stopped', 'failed', 'expired'].includes(row.status)) return;
+  if (['stopped', 'failed', 'expired'].includes(row.status)) return { done: Promise.resolve() };
+  const inFlight = teardowns.get(previewId);
+  if (inFlight) return { done: inFlight };
 
   stopRequested.set(previewId, finalStatus);
 
@@ -786,22 +848,39 @@ export async function stopPreview(previewId: number, finalStatus: PreviewStatus 
     log(previewId, 'warn', 'Stopped before it started.');
     finish(previewId, finalStatus);
     stopRequested.delete(previewId);
-    return;
+    return { done: Promise.resolve() };
   }
 
   const active = running.get(previewId);
   if (active) {
     setStatus(previewId, 'stopping');
     active.controller.abort();
-    return; // the worker's catch runs teardown and writes the final status
+    // The worker's catch runs teardown and writes the final status.
+    return { done: Promise.resolve() };
   }
 
-  // Ready (or orphaned) preview: nothing owns it, tear it down here.
+  // Ready (or orphaned) preview: nothing owns it, so it is torn down here.
   setStatus(previewId, 'stopping');
   const context = rebuildContext(row);
-  await teardown(context, finalStatus);
-  finish(previewId, finalStatus);
-  stopRequested.delete(previewId);
+  // Started on the next microtask, so the entry exists before any of it runs.
+  const done = Promise.resolve().then(async () => {
+    try {
+      await teardown(context, finalStatus);
+    } catch (err) {
+      log(previewId, 'error', `Teardown failed: ${(err as Error).message}`);
+    } finally {
+      finish(previewId, finalStatus);
+      stopRequested.delete(previewId);
+      teardowns.delete(previewId);
+    }
+  });
+  teardowns.set(previewId, done);
+  return { done };
+}
+
+/** Stops a preview and waits for its teardown (see `beginStop`). */
+export async function stopPreview(previewId: number, finalStatus: PreviewStatus = 'stopped'): Promise<void> {
+  await beginStop(previewId, finalStatus).done;
 }
 
 export async function deletePreview(previewId: number): Promise<void> {

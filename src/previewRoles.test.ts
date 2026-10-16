@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   coversAllRoles, followUpTicketKey, mergeTargets, missingBranchMessage, missingOverrideBranches, normalizeOverrides,
-  planRoles, previewLookupKey, ticketKeyFromBranches, trackerKeyOf, type RoleTarget,
+  planRoles, previewLookupKey, rolesFromReview, ticketKeyFromBranches, trackerKeyOf, type RoleTarget,
 } from './preview/roles.js';
 
 const ORG = 'my-org';
@@ -107,6 +107,10 @@ test('only a real tracker ticket counts as a tracker key', () => {
 test('a second lookup only when the tracker key differs from the input', () => {
   assert.equal(followUpTicketKey('https://github.com/my-org/my-service/pull/689', 'ABC-12'), 'ABC-12');
   assert.equal(followUpTicketKey('abc-12', 'ABC-12'), null);
+  // A tracker prefix (also what an issue link is canonicalized to) names the same ticket.
+  assert.equal(followUpTicketKey('linear:ABC-12', 'ABC-12'), null);
+  assert.equal(followUpTicketKey('jira:abc-12', 'ABC-12'), null);
+  assert.equal(followUpTicketKey('linear:ABC-13', 'ABC-12'), 'ABC-12');
   assert.equal(followUpTicketKey('ABC-12', null), null);
 });
 
@@ -315,4 +319,19 @@ test('local overrides, a local review, and a local ticket target mark their role
   });
   assert.equal(fromTarget[0]?.source, 'local');
   assert.equal(fromTarget[1]?.usedBase, true);
+});
+
+test('the roles that run the reviewed branch are the ones no override picked', () => {
+  const review = { repo: 'my-service', branch: 'feat/abc-1-api', base_branch: 'main', source: 'local' as const };
+  const roles = planRoles({
+    recipeRepos: { api: 'my-service', worker: 'my-service', frontend: 'my-web' },
+    defaultBranches,
+    overrides: [{ role: 'worker', branch: 'feat/abc-1-api' }, { role: 'frontend', branch: null }],
+    review,
+    explicitTargets: [],
+    ticketTargets: [],
+  });
+  // `worker` names the same branch, but by hand: only `api` follows the review.
+  assert.deepEqual(rolesFromReview(roles, [{ role: 'worker' }, { role: 'frontend' }], review).map((r) => r.role), ['api']);
+  assert.deepEqual(rolesFromReview(roles, [], undefined), []);
 });

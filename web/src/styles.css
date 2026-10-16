@@ -957,47 +957,118 @@ table.grid td.col-toggle { width: 28px; padding-right: 0; }
 .chevron[aria-expanded='true'] .chevron-icon { margin: -3px 0 0; transform: rotate(45deg); }
 @media (prefers-reduced-motion: reduce) { .chevron-icon { transition: none; } }
 
-.group-key { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
-.group-branch-key,
-.group-title {
-  display: block;
-  max-width: 24rem;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.group-title { margin-top: 2px; }
+/* Fixed layout: the ticket column takes what the others leave, so long titles truncate instead of widening. */
+table.group-grid { table-layout: fixed; }
+.group-grid col.col-toggle { width: 32px; }
+.group-grid col.col-summary { width: 18.5rem; }
+.group-grid col.col-activity { width: 9.5rem; }
+.group-grid > tbody > tr.group-row > td { vertical-align: middle; }
 
-.chip-row { display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-2); }
-.branch-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
+.group-line { display: flex; align-items: baseline; gap: var(--space-2); min-width: 0; }
+.group-key { flex: 0 1 auto; min-width: 0; display: inline-flex; align-items: baseline; gap: var(--space-1); }
+/* A long key (a PR group, repo#branch) truncates; a short one keeps its width and the title takes the rest. */
+.group-key > a,
+.group-branch-key { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.group-key .ext-link { flex: none; }
+.group-title { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.group-summary { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.group-summary > * + * { margin-left: var(--space-2); }
+.group-counts { display: inline-block; min-width: 9rem; font-size: var(--fs-sm); }
+/* Last activity moves into the summary cell when its own column is hidden. */
+.group-when { display: none; font-size: var(--fs-xs); }
+
+/* A ticket's tracker page, next to its key. */
+.ext-link { margin-left: 2px; padding: 0 2px; border-radius: var(--radius-sm); color: var(--fg-faint); font-size: var(--fs-xs); line-height: 1; }
+.ext-link:hover { color: var(--accent); text-decoration: none; }
+.ext-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* Branch on GitHub and its pull request, in every run table. */
+.branch-link {
+  display: inline-block;
   max-width: 100%;
-  padding: 1px var(--space-2);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--bg-sunken);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+a.branch-link { color: var(--accent); }
+.pr-link {
+  flex: none;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+  padding: 0 var(--space-1);
+  border: 1px solid color-mix(in srgb, var(--violet) 45%, var(--border));
+  border-radius: var(--radius-sm);
+  color: var(--violet);
+  font-family: var(--font-mono);
   font-size: var(--fs-xs);
   white-space: nowrap;
 }
-.chip-main { display: inline-flex; min-width: 0; }
-.chip-link { display: inline-flex; align-items: baseline; gap: var(--space-1); min-width: 0; color: var(--fg); }
-.chip-link:hover { text-decoration: none; }
-.chip-link:hover .chip-branch { text-decoration: underline; }
-.chip-repo { color: var(--fg-dim); }
-.chip-branch {
+.pr-link:hover { border-color: var(--violet); text-decoration: none; }
+.pr-link:hover .link-arrow { color: inherit; }
+.branch-cell { display: flex; align-items: baseline; gap: var(--space-2); min-width: 0; }
+/* A ticket page card per branch: the title carries the branch's GitHub pages. */
+.branch-title {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-2);
+  min-width: 0;
+  font-size: var(--fs-sm);
+  letter-spacing: 0;
+  text-transform: none;
+}
+.branch-title .branch-link { min-width: 0; }
+.branch-cell .branch-link { flex: 0 1 auto; min-width: 0; max-width: 28ch; }
+.runs-grid td { vertical-align: middle; }
+.runs-grid .ticket-cell > a {
   display: inline-block;
-  max-width: 22ch;
+  max-width: 20ch;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
   vertical-align: bottom;
-  color: var(--accent);
-  font-size: var(--fs-xs);
 }
+
+/* An expanded group: one section per branch, its runs underneath, newest first. */
+table.branch-runs { table-layout: fixed; }
+.branch-runs col.col-run { width: 4.5rem; }
+.branch-runs col.col-outcome { width: 11rem; }
+.branch-runs col.col-created { width: 9.5rem; }
+table.grid.branch-runs tr.branch-head > th {
+  padding: var(--space-2) var(--space-2) var(--space-1);
+  border-bottom: 1px solid var(--border);
+  color: var(--fg);
+  font-size: var(--fs-sm);
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+}
+table.grid.branch-runs tbody + tbody tr.branch-head > th { padding-top: var(--space-4); }
+.branch-head-line { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); min-width: 0; }
+.branch-repo { color: var(--fg-dim); }
+.branch-head-line .branch-name { flex: 0 1 auto; min-width: 0; max-width: 48ch; }
+.branch-head-outcome { margin-left: auto; display: inline-flex; align-items: center; gap: var(--space-2); font-size: var(--fs-xs); }
+table.grid.branch-runs td { padding: 6px var(--space-2); vertical-align: middle; }
+table.grid.branch-runs tbody:last-child tr:last-child td { border-bottom: none; }
+.truncate-cell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+tr.branch-more > td { padding: 2px var(--space-2) var(--space-1); }
+.link-like {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+.link-like:hover { text-decoration: underline; }
+.link-like:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 tr.group-runs > td {
-  padding: var(--space-1) var(--space-2) var(--space-3) calc(28px + var(--space-2));
+  padding: var(--space-1) var(--space-2) var(--space-3) calc(32px + var(--space-2));
   background: var(--bg-sunken);
 }
 .group-runs-more { margin: var(--space-2) 0 0; font-size: var(--fs-xs); }
@@ -1011,7 +1082,24 @@ tr.group-runs > td {
 }
 
 @media (max-width: 860px) {
-  .group-branch-key, .group-title { max-width: 14rem; }
-  .chip-branch { max-width: 14ch; }
   tr.group-runs > td { padding-left: var(--space-2); }
+  .branch-runs .col-reviewer { display: none; }
+}
+
+@media (max-width: 640px) {
+  /* Narrow: the summary stacks counts, outcome, and last activity; that column goes. */
+  /* The column stays (width 0) so the expanded row's colspan still matches the column count. */
+  .group-grid col.col-activity { width: 0; }
+  .group-grid th.col-activity, .group-grid td.col-activity { display: none; }
+  .group-grid col.col-summary { width: 9.5rem; }
+  .group-summary { white-space: normal; }
+  .group-summary > * + * { margin-left: 0; }
+  .group-counts, .group-when { display: block; min-width: 0; }
+  .group-summary .badge, .group-summary .pill { margin: 2px 0; }
+  .group-line { flex-wrap: wrap; row-gap: 2px; }
+  .group-title { flex-basis: 100%; }
+  .branch-runs col.col-outcome { width: 9.5rem; }
+  .branch-runs col.col-created { width: 8rem; }
+  .branch-runs col.col-run { width: 3rem; }
+  .branch-cell { flex-wrap: wrap; }
 }

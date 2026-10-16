@@ -45,3 +45,19 @@ export function githubLinks(org: string, review: LinkSource): GithubLinks {
     base: review.base_sha ? `${repoUrl}/commit/${review.base_sha}` : null,
   };
 }
+
+/** The two GitHub pages a row of a run table links to; kept small, rows come by the hundred. */
+export interface RowLinks {
+  branch: string;
+  pr: string | null;
+}
+
+export function rowLinks(
+  org: string,
+  row: { repo: string; branch: string; pr_number: number | null | undefined },
+): RowLinks {
+  return {
+    branch: branchUrl(org, row.repo, row.branch),
+    pr: row.pr_number ? `${repoPageUrl(org, row.repo)}/pull/${row.pr_number}` : null,
+  };
+}

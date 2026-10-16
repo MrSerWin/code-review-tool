@@ -8,7 +8,7 @@ document links there instead of repeating it.
 ## What it does
 
 Input is a ticket key (`ABC-123`, optionally prefixed with its tracker as in
-`jira:ABC-123`), a GitHub pull request, a tree URL, `repo#branch`, or
+`jira:ABC-123`) or the ticket's issue link, a GitHub pull request, a tree URL, `repo#branch`, or
 `local:repo#branch` for a branch of a local clone — optionally with
 requirements pasted by hand instead of a ticket (every form:
 [README › Inputs](../README.md#inputs)). The tool resolves that into one or
@@ -42,7 +42,7 @@ src/
   reviewers/anthropicStream.ts  reviewers/codexStream.ts
   trackers/index.ts  trackers/types.ts  trackers/adf.ts  trackers/html.ts
   trackers/linear.ts  trackers/jira.ts  trackers/github.ts
-  trackers/azure.ts  trackers/youtrack.ts
+  trackers/azure.ts  trackers/youtrack.ts  trackers/urls.ts
   routes/reviews.ts  routes/tickets.ts  routes/repos.ts  routes/previews.ts
   preview/recipes.ts  preview/roles.ts  preview/ports.ts  preview/database.ts
   preview/steps.ts  preview/engine.ts  preview/store.ts  preview/events.ts
@@ -227,6 +227,23 @@ are active. For one input it picks, in order:
 
 If several match and `DEFAULT_TRACKER` names none of them, that is an error
 listing the candidates and how to disambiguate. Guessing is never an option.
+
+Issue links are read by `trackers/urls.ts` (`ticketRefFromUrl()`, pure: the
+self-hosted hosts are passed in). `canonicalTicketInput()` in the registry turns
+a link into the explicit `tracker:KEY` it names before step 1, so a link
+resolves like a prefixed key: `linear.app/<ws>/issue/ABC-123/<slug>` →
+`linear:ABC-123`; `<site>.atlassian.net/browse/ABC-123`, `…?selectedIssue=ABC-123`
+and `…/issues/ABC-123` → `jira:ABC-123`; `/issue/ABC-123` on YouTrack →
+`youtrack:ABC-123`; `_workitems/edit/123` or `?workitem=123` on Azure DevOps →
+`azure:#123`. A link maps only on a host of its tracker (`linear.app`,
+`*.atlassian.net`, `*.youtrack.cloud`, `*.myjetbrains.com`, `dev.azure.com`,
+`*.visualstudio.com`, or the host of `JIRA_BASE_URL`, `YOUTRACK_BASE_URL`,
+`AZURE_ORG_URL`), so an unrelated page with `/issue/ABC-1` in its path is not a
+ticket; the providers' own URL parsing goes through the same function. An
+unconfigured tracker's link is the usual "not configured" error. GitHub issue
+links stay with the GitHub provider, and pull request links with the resolver's
+PR step. `web/src/tickets.ts` mirrors the patterns for the launcher (judging an
+unknown host by its path, since only the server knows the configured hosts).
 GitHub Issues need no variables beyond the ones the sandbox already requires,
 so that provider is always active; every other tracker is opt-in. Configuring
 none of them is not an error: the input then simply has to name a branch, with
@@ -256,7 +273,8 @@ returns `{ ticket, targets }`. The input is first normalized by
    `<org>/<repo>#<n>` that is not a PR falls through to step 3 as a GitHub
    issue; a PR URL whose lookup fails is an error.
 3. **Ticket key** — anything the registry claims (skipped when requirements
-   were pasted). The ticket is fetched through its provider, then targets are
+   were pasted), after `canonicalTicketInput()` has turned an issue link into
+   `tracker:KEY`. The ticket is fetched through its provider, then targets are
    collected from, in order:
    - pull request links, asking GitHub for each PR's head and base branch;
    - a remote branch scan: `git ls-remote --heads` on every allowlisted repo,
@@ -550,7 +568,8 @@ outside 2–10 characters are skipped, see `NOT_A_PROJECT`), else `repo#branch`.
 `syncGroupKeys()` re-derives every row at startup, so a change to the rules
 reaches old rows. `listReviewGroups()` aggregates in SQL: per group the last
 activity, run count, active count, the latest title and ticket URL, and the
-latest run of every repo/branch ("head"). The status filter is judged per
+latest run of every repo/branch ("head"), with the newest PR number any run of
+that branch in the group knew (a re-run found by the branch scan may not). The status filter is judged per
 group: `active` — any run is queued, fetching, or reviewing; `failed` — any
 head failed; `done` — nothing active or failed and at least one head is done.
 
@@ -620,7 +639,10 @@ fallback, and the API under `/api` (routes in `src/server.ts` and
 against the branch's previous finished run, matched on severity, file, line,
 and title (`findingCompare.ts`) into `resolved`, `new`, and `persistent` — and
 `links`, the GitHub URLs built by `githubLinks.ts` from the configured
-organization (the UI cannot know it).
+organization (the UI cannot know it). The list endpoints add a smaller
+`links: { branch, pr }` (`rowLinks()`) to every row of `GET /api/reviews` and to
+every branch of `GET /api/review-groups`, so run tables can link to GitHub; the
+MCP formatters pick their fields explicitly and are unaffected.
 
 ## Report writer (`src/reportWriter.ts`)
 
@@ -650,16 +672,27 @@ Dark-first, compact. What each page offers is described in
   first and shows the ticket, a chip naming the tracker that answered, and the
   branches with checkboxes; the chosen targets are posted. **Paste requirements
   instead** sends `requirementsText` and skips the ticket lookup. The history
-  has two views, **By ticket** (`/api/review-groups`, 20 groups a page,
-  expanding inline to a group's runs) and **All runs** (`/api/reviews`, 25 a
-  page); the chosen view is remembered, and both refresh every 4 s while
-  something on screen is running.
-- **Review detail** (`/review/:id`) — verdict banner with GitHub links,
+  has two views, **By ticket** (`/api/review-groups`, 20 groups a page) and
+  **All runs** (`/api/reviews`, 25 a page); the chosen view is remembered, and
+  both refresh every 4 s while something on screen is running. A group row is
+  compact — key, title, `N branches · M runs`, one outcome badge (active, else
+  the worst latest verdict, else the latest status), last activity — in a
+  fixed-layout table whose ticket column takes the free width; below 640 px the
+  last-activity column folds into the summary cell. Expanding a row loads its
+  runs lazily and shows them per branch (one `<tbody>` each: a header with the
+  branch's GitHub and PR links and latest outcome, then its runs newest first,
+  five before "N older runs"). Every run table links the branch and PR to
+  GitHub in a new tab, while rows and run numbers open the review page. An
+  issue link in the launcher is recognized client-side (`web/src/tickets.ts`),
+  named under the field, and resolved like a key.
+- **Review detail** (`/review/:id`) — verdict banner with GitHub links and the
+  ticket in its tracker ("Open in Linear", labelled from the `ticket_url` host),
   meta table, requirements, findings by severity, observations, the comparison
   with the previous run, a live log fed by SSE, and the Preview card. Actions: cancel, re-run with an optional reviewer and model,
   download report, copy report, delete.
 - **Ticket view** (`/ticket/:key`) — all runs of one group (`group_key`) across
-  repositories, grouped by repo and branch, newest first.
+  repositories, grouped by repo and branch, newest first; each branch card
+  links the branch and its PR to GitHub.
 - **Previews** (`/previews`, only when enabled) — start a preview from a ticket
   or from custom branches per role, and follow every preview.
 
@@ -682,6 +715,15 @@ this server configured. Each reviewer's argv keeps user MCP servers out of the
 run, and as a second line of defence `mutationRefusal()` makes `start_review`,
 `rerun_review`, `cancel_review`, `start_preview`, and `stop_preview` refuse
 whenever `CODE_REVIEW_TOOL_REVIEWER` is set (and not `0`/`false`) in the MCP process's environment.
+
+**Failures are told apart.** `ApiUnreachableError` means nothing listens at
+the address (connection refused, unknown host, no route); only it suggests
+starting the server. A request the server accepted but did not answer in time,
+or whose connection dropped halfway, is an `ApiNoAnswerError`: the server is
+busy, and a mutating request (starting a preview, say) may well have taken
+effect, so the message says to check `get_*` / `list_*` instead of retrying,
+and never to restart: a restart tears down every live preview and fails every
+running review. Both messages carry that warning.
 
 ## Preview environments (`src/preview/`)
 
@@ -719,7 +761,14 @@ copies the clone's `refs/heads/<branch>` exactly as for a local review
 (committed state only, so a branch checked out in a worktree of the clone
 works). Every role records the commit it ran as `sha` in `roles_json` once its
 checkout exists; a local review checkout holding a working-tree snapshot is
-never reused.
+never reused. A role that follows a local review (no override picked it)
+reuses the review's checkout, the reviewed commit, while it is on disk; only
+without one is the branch copied from the clone again, so only then must it
+still exist there (`checkReviewRoles()`, before anything is queued). A preview
+that picks every role by hand never reads the reviewed branch. A local role
+resolved to a tip (a hand-picked branch, or the reviewed branch copied again)
+reuses a review checkout only when the review ran that very commit
+(`canReuseReviewCheckout()`); otherwise it is copied fresh and runs the tip.
 
 **Lifecycle.** `queued → preparing → starting → ready`, then `stopping →
 stopped`, or `failed` / `expired`. At most `PREVIEW_MAX_CONCURRENT` previews are
@@ -760,7 +809,15 @@ every command runs even if an earlier one failed, and it runs even when
 (environment and checkouts) is written to
 `<DATA_DIR>/previews/<id>/preview-context.json`. After teardown a reused review
 checkout is verified pristine with `assertPristine`; checkouts the preview
-fetched itself are removed, and so is a dump taken for it.
+fetched itself are removed, and so is a dump taken for it. A checkout counts
+as the preview's own from before its clone starts (`checkoutDir()`), so a
+fetch that fails halfway leaves no directory behind.
+
+**Stopping.** `POST /api/previews/:id/stop` answers as soon as the row says
+`stopping` (`beginStop()`): `down` can take minutes and goes on in the
+background, and the row turns `stopped` when it is done. A second stop while
+one is running joins it instead of running `down` again. Deleting a preview,
+the TTL reaper, and the restart recovery still wait for the teardown.
 
 **Restarts.** `recoverOrphanPreviews()` runs at server start: every preview
 still `queued`, `preparing`, `starting`, `ready`, or `stopping` is torn down

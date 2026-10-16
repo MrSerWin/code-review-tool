@@ -3,6 +3,7 @@ import { logger } from '../logger.js';
 import { collectPrUrls } from '../prLinks.js';
 import type { TicketInfo } from '../types.js';
 import { htmlToText } from './html.js';
+import { ticketRefFromUrl } from './urls.js';
 import { assertConfigured, basicAuth, readJson, trimSlash, type TicketProvider } from './types.js';
 
 const API_VERSION = '7.0';
@@ -32,13 +33,13 @@ function authHeaders(): Record<string, string> {
   return { Authorization: basicAuth('', config.AZURE_PAT as string) };
 }
 
-/** A bare work item id, `#123`, or a `_workitems/edit/123` URL. */
+/** A bare work item id, `#123`, or a work item link on Azure DevOps or the configured server. */
 function parseId(input: string): number | null {
   const raw = input.trim();
   const bare = /^#?(\d+)$/.exec(raw);
   if (bare) return Number(bare[1]);
-  const url = /^https?:\/\/[^\s]*\/_workitems\/edit\/(\d+)(?:[/?#].*)?$/i.exec(raw);
-  return url ? Number(url[1]) : null;
+  const ref = ticketRefFromUrl(raw, { azure: config.AZURE_ORG_URL });
+  return ref?.tracker === 'azure' ? Number(ref.key.slice(1)) : null;
 }
 
 async function comments(id: number): Promise<{ author: string; body: string }[]> {

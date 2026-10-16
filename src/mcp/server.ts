@@ -10,7 +10,7 @@ import { z } from 'zod';
 // Names only: this module imports nothing (no config, no secrets).
 import { REVIEWER_NAMES } from '../reviewers/types.js';
 import type { ResolvedTarget, ReviewGroup, ReviewRow, TicketInfo } from '../types.js';
-import { ApiClient, ApiError, ApiUnreachableError } from './client.js';
+import { ApiClient, ApiError, ApiNoAnswerError, ApiUnreachableError } from './client.js';
 import {
   ALL_STATUSES, ACTIVE_STATUSES, compactGroup, compactLocalRepos, compactPreview, compactRecipes, compactReviewers,
   DEFAULT_MAX_BRANCHES, DEFAULT_MAX_FINDINGS, DEFAULT_REPORT_MAX, isPreviewSettled, isTerminalStatus,
@@ -23,12 +23,15 @@ const version = (createRequire(import.meta.url)('../../package.json') as { versi
 export const WAIT_DEFAULT_SEC = 50;
 export const WAIT_MAX_SEC = 600;
 export const POLL_DEFAULT_SEC = 5;
+/** How often stop_preview checks whether the teardown has ended. */
+const STOP_POLL_MS = 2_000;
 
 const INSTRUCTIONS = `code-review-tool runs read-only code reviews of git branches (GitHub or local clones) with a reviewer CLI (Claude Code, Codex, Cursor Agent, or Grok) and returns a verdict, a requirement checklist, and findings.
 Typical flow: start_review -> wait_for_review (repeat while finished=false) -> get_review / get_report.
 A review takes several minutes (often 5-20). Never start the same review twice to check on it: poll the id you got.
 For a branch that is not pushed yet, use list_local_repos to find the repo name and branch, then start_review with "local:<repo>#<branch>".
-Previews run a ticket's branches as a live app on a local port: list_recipes -> start_preview -> wait_for_preview (repeat while finished=false) -> open web_url -> stop_preview when done. A role can run a local (unpushed) branch: {role, branch: "local:<repo>#<branch>"} or {role, branch, local: true}.`;
+Previews run a ticket's branches as a live app on a local port: list_recipes -> start_preview -> wait_for_preview (repeat while finished=false) -> open web_url -> stop_preview when done. A role can run a local (unpushed) branch: {role, branch: "local:<repo>#<branch>"} or {role, branch, local: true}.
+A request that times out reached a busy server: do not retry a start, and never restart the server while previews or reviews are live (a restart tears them down); check get_preview / list_previews / list_reviews instead.`;
 
 const idSchema = z.number().int().positive().describe('Review id, as returned by start_review or list_reviews.');
 const previewIdSchema = z.number().int().positive()
@@ -52,7 +55,7 @@ async function guarded(body: () => Promise<ToolResult>): Promise<ToolResult> {
   try {
     return await body();
   } catch (err) {
-    if (err instanceof ApiUnreachableError) return fail(err.message);
+    if (err instanceof ApiUnreachableError || err instanceof ApiNoAnswerError) return fail(err.message);
     if (err instanceof ApiError) return fail(`code-review-tool API error (HTTP ${err.status}): ${err.message}`);
     return fail(err instanceof Error ? err.message : String(err));
   }
@@ -135,18 +138,21 @@ export function createMcpServer({ api, env = process.env }: CreateServerOptions)
       'input forms:\n' +
       '- "ABC-123" ticket key of a configured tracker (or "jira:ABC-123", "linear:ABC-123" to pick the tracker); ' +
       'reviews every branch/PR linked to the ticket, one review per branch\n' +
+      '- the ticket\'s issue link, read as its key: "https://linear.app/<workspace>/issue/ABC-123/<slug>", ' +
+      '"https://<site>.atlassian.net/browse/ABC-123" (or a board link with ?selectedIssue=ABC-123), ' +
+      '"https://<host>/issue/ABC-123" (YouTrack), "https://dev.azure.com/<org>/<project>/_workitems/edit/123"\n' +
       '- "https://github.com/<org>/<repo>/pull/12" pull request URL (exactly that PR\'s branch), or a /tree/<branch> URL\n' +
       '- "<org>/<repo>#12" the same pull request; when 12 is an issue, the GitHub issue as a ticket\n' +
       '- "https://github.com/<org>/<repo>/issues/12" a GitHub issue as a ticket\n' +
       '- "my-service#feature/x" a pushed branch of an allowed repo\n' +
       '- "local:my-service#feature/x" a branch of the local clone, pushed or not (see list_local_repos); ' +
       '"local:my-service" = the checked-out branch\n' +
-      'GitHub links may also use http://, www.github.com, or <...> around them. ' +
+      'Links may also use http://, www., or <...> around them. ' +
       'When a ticket resolves to several branches, all of them are reviewed unless "targets" narrows it. ' +
       'Returns {reviews:[{id, repo, branch, base, reviewer, model, status, url}]}.',
     inputSchema: {
       input: z.string().min(1).max(512)
-        .describe('Ticket key, PR or issue URL, "org/repo#12", "repo#branch", or "local:repo#branch".'),
+        .describe('Ticket key or issue link, PR URL, "org/repo#12", "repo#branch", or "local:repo#branch".'),
       reviewer: z.enum(REVIEWER_NAMES).optional()
         .describe('Reviewer CLI (see list_reviewers). Default: the server default.'),
       model: z.string().min(1).max(64).optional()
@@ -439,8 +445,11 @@ export function createMcpServer({ api, env = process.env }: CreateServerOptions)
       'true}; it is copied (committed state only) from the configured clone, so a branch checked out in a git ' +
       'worktree of that clone works too. "local:<repo>" alone = the clone\'s checked-out branch. See ' +
       'list_local_repos for repo names and branches.\n' +
-      '- review_id: the reviewed branch runs for its repo (a local review is copied from the clone again).\n' +
-      '- ticket: "ABC-123", a PR URL, "repo#branch", or "local:<repo>#<branch>"; the ticket\'s branches run for ' +
+      '- review_id: the reviewed branch runs for its repo, from the review\'s checkout (the reviewed commit) while ' +
+      'it is still on disk, else fetched again (a local review: copied from the clone at its current tip, so the ' +
+      'branch must still be there). A role picked by hand never needs the reviewed branch.\n' +
+      '- ticket: "ABC-123" or its issue link, a PR URL, "repo#branch", or "local:<repo>#<branch>"; the ticket\'s ' +
+      'branches run for ' +
       'the repos it touches.\n' +
       'A role with no branch from any of these runs its base branch (used_base=true in the result).',
     inputSchema: {
@@ -456,8 +465,8 @@ export function createMcpServer({ api, env = process.env }: CreateServerOptions)
         .describe('Branches picked by hand, one entry per role. Roles left out follow review_id / ticket.'),
       review_id: z.number().int().positive().optional()
         .describe('Preview the branch of this review (its repo), plus its ticket\'s branches for the other repos.'),
-      ticket: z.string().min(1).max(256).optional()
-        .describe('Ticket key, PR URL, "repo#branch", or "local:repo#branch" to resolve branches from.'),
+      ticket: z.string().min(1).max(512).optional()
+        .describe('Ticket key or issue link, PR URL, "repo#branch", or "local:repo#branch" to resolve branches from.'),
       dump_mode: z.enum(DUMP_MODES).optional()
         .describe('Database contents: auto (default), pg_dump (fresh dump), dump-dir (stored dump), clean or none.'),
     },
@@ -560,20 +569,36 @@ export function createMcpServer({ api, env = process.env }: CreateServerOptions)
     title: 'Stop a preview',
     description:
       'Stop a preview and tear it down: its processes and containers are stopped, its database and checkouts ' +
-      'removed, its ports freed. Waits for the teardown (up to a few minutes). A preview that has already ' +
-      'ended is left as it is.',
-    inputSchema: { id: previewIdSchema },
+      'removed, its ports freed. The server marks it "stopping" at once and tears it down in the background ' +
+      `(that can take minutes); this tool waits up to timeoutSec (default ${WAIT_DEFAULT_SEC}) for it to end. ` +
+      'stopped=false means the teardown is still running: check get_preview later; never restart the server to ' +
+      'hurry it. A preview that has already ended is left as it is.',
+    inputSchema: {
+      id: previewIdSchema,
+      timeoutSec: z.number().int().min(0).max(WAIT_MAX_SEC).optional()
+        .describe(`Longest time to wait for the teardown, in seconds (default ${WAIT_DEFAULT_SEC}; 0 = do not wait).`),
+    },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
-  }, ({ id }) => guarded(async () => {
+  }, ({ id, timeoutSec }, extra) => guarded(async () => {
     const refused = refusal();
     if (refused) return fail(refused);
-    const { preview } = await api.stopPreview<{ preview: PreviewPayload | null }>(id);
+    const isEnded = (status: string): boolean => (PREVIEW_END_STATUSES as readonly string[]).includes(status);
+    let { preview } = await api.stopPreview<{ preview: PreviewPayload | null }>(id);
     if (!preview) return ok({ stopped: true, id });
-    const ended = (PREVIEW_END_STATUSES as readonly string[]).includes(preview.status);
+    const deadline = Date.now() + (timeoutSec ?? WAIT_DEFAULT_SEC) * 1000;
+    while (!isEnded(preview.status)) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      await sleep(Math.min(STOP_POLL_MS, remaining), extra.signal);
+      preview = (await api.preview<{ preview: PreviewPayload }>(id, extra.signal)).preview;
+    }
+    const ended = isEnded(preview.status);
     return ok({
       stopped: ended,
       ...compactPreview(preview, { page: api.previewPage(preview.review_id) }),
-      ...(ended ? {} : { next: 'Teardown is still running; check get_preview in a moment.' }),
+      ...(ended ? {} : {
+        next: 'The teardown is still running in the server; check get_preview later. Do not restart the server.',
+      }),
     });
   }));
 

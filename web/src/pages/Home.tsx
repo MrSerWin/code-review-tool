@@ -4,6 +4,7 @@ import History from '../components/History';
 import { Card } from '../components/ui';
 import { navigate } from '../router';
 import { readStored, writeStored } from '../storage';
+import { TRACKER_LABEL, ticketLinkRef } from '../tickets';
 import type { Health, LocalRepo, ResolvedTarget, ReviewerInfo, TicketInfo } from '../types';
 
 const TICKET_RE = /^(?:[a-z]+:)?[a-z][a-z0-9_]*-\d+$/i;
@@ -161,15 +162,30 @@ export default function Home() {
   const hasKeyTracker = trackers === null || trackers.some((t) => t !== 'github');
   const manualText = requirements.trim();
 
+  // A tracker's issue link names its ticket as surely as the key does; a PR link
+  // is not one (it is reviewed directly, as exactly one branch). On an unknown
+  // host only a configured tracker can be the self-hosted one the path suggests.
+  const linkRef = ticketLinkRef(input);
+  const link = linkRef && (!linkRef.guessed || trackers === null || trackers.includes(linkRef.tracker))
+    ? linkRef
+    : null;
   // With requirements pasted by hand no ticket is looked up, so the input only
   // has to name a branch.
-  const isTicketInput = !manualText && (hasKeyTracker
+  const isTicketInput = !manualText && (link !== null || (hasKeyTracker
     ? TICKET_RE.test(input.trim())
-    : ISSUE_RE.test(input.trim()));
+    : ISSUE_RE.test(input.trim())));
+  // Named so the user sees what the link resolves to before asking for it.
+  const linkHint = link && !manualText && link.tracker !== 'github'
+    ? {
+        label: TRACKER_LABEL[link.tracker],
+        key: link.key,
+        missing: trackers !== null && !trackers.includes(link.tracker),
+      }
+    : null;
 
   const placeholder = hasKeyTracker
-    ? 'ABC-123, PR URL, or repo#branch'
-    : 'my-org/my-service#12, PR URL, or repo#branch';
+    ? 'ABC-123 or its link, PR URL, or repo#branch'
+    : 'my-org/my-service#12, issue or PR URL, or repo#branch';
 
   useEffect(() => {
     api
@@ -238,7 +254,12 @@ export default function Home() {
   };
 
   const run = async (chosen?: ResolvedTarget[]): Promise<void> => {
-    const value = mode === 'local' ? localInput() : input.trim();
+    // Started from a resolved link: send the canonical `tracker:KEY` the server answered with.
+    const resolvedKey =
+      chosen && ticket?.key && link && link.tracker !== 'github' && ticket.provider === link.tracker
+        ? `${ticket.provider}:${ticket.key}`
+        : null;
+    const value = mode === 'local' ? localInput() : resolvedKey ?? input.trim();
     if (!value) return;
     setError(null);
     setBusy(true);
@@ -410,6 +431,12 @@ export default function Home() {
       </form>
       )}
       {mode === 'local' && localError && <p className="muted manual-hint">{localError}</p>}
+      {mode === 'github' && linkHint && (
+        <p className="muted manual-hint">
+          {linkHint.label} ticket <span className="mono">{linkHint.key}</span>
+          {linkHint.missing && ` · ${linkHint.label} is not configured on this server`}
+        </p>
+      )}
 
       <div className="reviewer-row">
         <label className="reviewer-field">

@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { config } from '../config.js';
 import {
-  decoratePreview, deletePreview, previewsEnabled, requestPreview, stopPreview,
+  beginStop, decoratePreview, deletePreview, previewsEnabled, requestPreview,
 } from '../preview/engine.js';
 import { subscribePreview } from '../preview/events.js';
 import { loadRecipes, primaryPort } from '../preview/recipes.js';
@@ -13,7 +13,8 @@ const idParams = z.object({ id: z.coerce.number().int().positive() });
 const createBody = z
   .object({
     reviewId: z.coerce.number().int().positive().optional(),
-    ticket: z.string().min(1).max(128).optional(),
+    // A ticket key, an issue or PR link, repo#branch, or local:repo#branch; links run long.
+    ticket: z.string().min(1).max(512).optional(),
     recipe: z.string().min(1).max(128).optional(),
     roles: z
       .array(
@@ -104,7 +105,10 @@ export async function previewRoutes(app: FastifyInstance): Promise<void> {
     const preview = getPreview(parsed.data.id);
     if (!preview) return reply.code(404).send({ error: 'Preview not found' });
     try {
-      await stopPreview(preview.id, 'stopped');
+      // Answers once the row says `stopping`; `down` goes on in the background
+      // (it can take minutes) and GET /api/previews/:id shows when it ended. A
+      // client left waiting would time out and take a busy server for a dead one.
+      beginStop(preview.id, 'stopped');
     } catch (err) {
       return reply.code(400).send({ error: (err as Error).message });
     }

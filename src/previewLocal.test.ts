@@ -5,12 +5,15 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import type { PreviewRole } from './types.js';
 
 // The preview engine reaches db.ts, which opens `<DATA_DIR>/review.db` on
 // import: point it at a throwaway directory first.
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'crt-preview-local-'));
 process.env.DATA_DIR = dataDir;
-const { checkLocalOverrides, checkoutTarget } = await import('./preview/engine.js');
+const { canReuseReviewCheckout, checkLocalOverrides, checkReviewRoles, checkoutTarget } = await import(
+  './preview/engine.js'
+);
 const { normalizeOverrides } = await import('./preview/roles.js');
 const { resolveLocalBranch } = await import('./localRepos.js');
 const { db } = await import('./db.js');
@@ -139,4 +142,90 @@ test('cloning the worktree branch from the main clone copies the commit, not the
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('a missing local branch is reported by repo name, never by the clone path', async () => {
+  const { root, clone } = setupClone();
+  try {
+    const paths = new Map([['test-repo', clone]]);
+    await assert.rejects(resolveLocalBranch('test-repo', 'feat/typo', paths), (err: Error) => {
+      assert.equal(err.message, 'Branch feat/typo not found in the local clone of test-repo');
+      return true;
+    });
+    const missing = new Map([['test-repo', path.join(root, 'no-such-clone')]]);
+    await assert.rejects(resolveLocalBranch('test-repo', 'main', missing), (err: Error) => {
+      assert.match(err.message, /local clone of test-repo was not found or is not a git work tree/);
+      assert.ok(!err.message.includes(root), err.message);
+      return true;
+    });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+const localReview = {
+  id: 7, repo: 'test-repo', branch: 'feat/gone', source: 'local' as const, working_tree: 0, head_sha: 'a'.repeat(40),
+};
+const reviewedRole: PreviewRole = {
+  role: 'backend', repo: 'test-repo', branch: 'feat/gone', base: 'main', usedBase: false, source: 'local',
+};
+
+test('roles picked by hand never read the reviewed branch: no clone is needed', async () => {
+  const overrides = normalizeOverrides([{ role: 'backend', branch: 'feat/other', local: true }], recipeRepos);
+  const roles = [{ ...reviewedRole, branch: 'feat/other', sha: 'b'.repeat(40) }];
+  // An empty map: any read of a clone would fail with "No local clone is configured".
+  await checkReviewRoles(roles, overrides, localReview, new Map());
+  // Picked by hand under the reviewed branch's own name still counts as picked.
+  const same = normalizeOverrides([{ role: 'backend', branch: 'feat/gone', local: true }], recipeRepos);
+  await checkReviewRoles([{ ...reviewedRole }], same, localReview, new Map());
+});
+
+test('a role running the reviewed branch without a review checkout needs the branch in the clone', async () => {
+  const { root, clone } = setupClone();
+  try {
+    const paths = new Map([['test-repo', clone]]);
+    await assert.rejects(
+      checkReviewRoles([{ ...reviewedRole }], [], localReview, paths),
+      /^Error: Cannot run the reviewed branch for role backend: Branch feat\/gone not found in the local clone of test-repo\. /,
+    );
+    // Still there: resolved to the tip it will be copied at.
+    const roles: PreviewRole[] = [{ ...reviewedRole, branch: 'main' }];
+    await checkReviewRoles(roles, [], { ...localReview, branch: 'main' }, paths);
+    assert.equal(roles[0]?.sha, git(clone, 'rev-parse', 'main'));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a review checkout left on disk stands in for the reviewed branch, clone or not', async () => {
+  const dir = path.join(dataDir, 'checkouts', 'test-repo', 'feat__gone', String(localReview.id));
+  fs.mkdirSync(path.join(dir, '.git'), { recursive: true });
+  try {
+    const roles: PreviewRole[] = [{ ...reviewedRole }];
+    await checkReviewRoles(roles, [], localReview, new Map());
+    assert.equal(roles[0]?.sha, undefined, 'nothing resolved: the checkout runs the reviewed commit');
+    // A GitHub review is fetched from GitHub, never from the clone.
+    await checkReviewRoles([{ ...reviewedRole, source: undefined }], [], { ...localReview, source: 'github' }, new Map());
+  } finally {
+    fs.rmSync(path.join(dataDir, 'checkouts'), { recursive: true, force: true });
+  }
+});
+
+test('a review checkout is reused only for the commit the role runs', () => {
+  const reviewed = 'a'.repeat(40);
+  const review = { ...localReview, branch: 'feat/x', head_sha: reviewed };
+  const role = { ...reviewedRole, branch: 'feat/x' };
+  // The reviewed branch, nothing resolved: the reviewed commit is what it runs.
+  assert.equal(canReuseReviewCheckout(review, role), true);
+  // A local tip resolved by hand: only when the review ran that very commit.
+  assert.equal(canReuseReviewCheckout(review, { ...role, sha: reviewed }), true);
+  assert.equal(canReuseReviewCheckout(review, { ...role, sha: 'c'.repeat(40) }), false);
+  // Never a working-tree snapshot, another branch or source, or a fetch that never finished.
+  assert.equal(canReuseReviewCheckout({ ...review, working_tree: 1 }, role), false);
+  assert.equal(canReuseReviewCheckout(review, { ...role, branch: 'feat/y' }), false);
+  assert.equal(canReuseReviewCheckout({ ...review, source: 'github' }, role), false);
+  assert.equal(canReuseReviewCheckout({ ...review, head_sha: null }, role), false);
+  // GitHub roles keep reusing the reviewed checkout.
+  const github = { ...review, source: 'github' as const };
+  assert.equal(canReuseReviewCheckout(github, { ...role, source: undefined, sha: 'c'.repeat(40) }), true);
 });

@@ -216,8 +216,21 @@ interface CheckoutPaths {
   relDir: string;
 }
 
+function checkoutRelDir(target: Pick<ResolvedTarget, 'repo' | 'branch'>, reviewId: number): string {
+  return path.join(target.repo, sanitizeBranchForPath(target.branch), String(reviewId));
+}
+
+/**
+ * Where `fetchCheckout(target, reviewId)` clones to, without touching the disk.
+ * A caller that must clean up after a failed fetch registers this first: the
+ * clone directory exists long before the fetch returns or throws.
+ */
+export function checkoutDir(target: Pick<ResolvedTarget, 'repo' | 'branch'>, reviewId: number): string {
+  return path.join(checkoutsRoot(), checkoutRelDir(target, reviewId));
+}
+
 function checkoutPaths(target: ResolvedTarget, reviewId: number): CheckoutPaths {
-  const relDir = path.join(target.repo, sanitizeBranchForPath(target.branch), String(reviewId));
+  const relDir = checkoutRelDir(target, reviewId);
   const hostDir = path.join(checkoutsRoot(), relDir);
   const containerDir = `/work/${relDir.split(path.sep).join('/')}`;
   fs.rmSync(hostDir, { recursive: true, force: true });

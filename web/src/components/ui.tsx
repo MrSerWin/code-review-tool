@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import type { MouseEvent, ReactNode } from 'react';
 import type { RequirementStatus, ReviewStatus, Severity, Verdict } from '../types';
 
 const VERDICT_LABEL: Record<Verdict, string> = {
@@ -120,4 +120,79 @@ export function fmtDuration(from: string | null, to: string | null): string {
   const s = Math.round(ms / 1000);
   if (s < 60) return `${s}s`;
   return `${Math.floor(s / 60)}m ${s % 60}s`;
+}
+
+const stopPropagation = (e: MouseEvent): void => e.stopPropagation();
+
+/**
+ * A branch name opening its GitHub page in a new tab; plain text when the
+ * server sent no link. Clicks never reach a clickable row around it.
+ */
+export function BranchLink({
+  branch,
+  href,
+  local = false,
+  className = '',
+}: {
+  branch: string;
+  href: string | null | undefined;
+  /** A local run: the branch may never have been pushed. */
+  local?: boolean;
+  className?: string;
+}) {
+  const classes = `branch-link mono ${className}`.trim();
+  if (!href) {
+    return (
+      <span className={classes} title={branch}>
+        {branch}
+      </span>
+    );
+  }
+  return (
+    <a
+      className={classes}
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      title={local ? `${branch} — local run — may not be pushed` : `${branch} — open on GitHub`}
+      onClick={stopPropagation}
+    >
+      {branch}
+    </a>
+  );
+}
+
+/** `PR #12 ↗`, opening the pull request on GitHub in a new tab. */
+export function PrLink({ href, number }: { href: string; number: number | null | undefined }) {
+  const n = number ?? Number(/\/pull\/(\d+)/.exec(href)?.[1] ?? NaN);
+  return (
+    <a
+      className="pr-link"
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      title={Number.isFinite(n) ? `Pull request #${n} on GitHub` : 'Pull request on GitHub'}
+      onClick={stopPropagation}
+    >
+      PR{Number.isFinite(n) ? ` #${n}` : ''}
+      <span className="link-arrow" aria-hidden="true">↗</span>
+    </a>
+  );
+}
+
+/** A small ↗ next to a ticket key, opening the ticket in its tracker. */
+export function TicketExternalLink({ href, label }: { href: string; label: string }) {
+  return (
+    <a
+      className="ext-link"
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      title={label}
+      aria-label={label}
+      onClick={stopPropagation}
+    >
+      ↗
+    </a>
+  );
 }
