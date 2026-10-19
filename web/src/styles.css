@@ -1108,3 +1108,44 @@ tr.group-runs > td {
   .branch-runs col.col-run { width: 3rem; }
   .branch-cell { flex-wrap: wrap; }
 }
+
+/* --- ticket groups: chains and coverage --- */
+.ticket-hint { margin: 0 0 var(--space-3); font-size: var(--fs-xs); }
+.chain + .chain { margin-top: var(--space-4); }
+.chain-repo { margin: 0 0 var(--space-2); font-size: var(--fs-sm); color: var(--fg-dim); }
+.chain-list { list-style: none; margin: 0 0 var(--space-3); padding: 0; display: flex; flex-direction: column; gap: var(--space-1); }
+.chain-item { border-radius: var(--radius-sm); }
+.chain-item.dragging { opacity: 0.5; }
+.chain-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunken);
+}
+.chain-handle { color: var(--fg-faint); cursor: grab; user-select: none; }
+.chain-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: var(--space-1); }
+.chain-title { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-width: 0; }
+.chain-arrow { color: var(--fg-faint); }
+.chain-sub { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.chain-parent { display: inline-flex; align-items: center; gap: var(--space-1); }
+.chain-parent .reviewer-select { max-width: 22rem; }
+.chain-run { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.chain-base { font-size: var(--fs-xs); }
+.chain-move { display: flex; gap: 2px; }
+.coverage-title { display: inline-flex; align-items: center; gap: var(--space-2); }
+.coverage-note { font-size: var(--fs-xs); margin-top: 2px; }
+.coverage-branches { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-1); }
+.coverage-branches li { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.coverage-evidence { display: inline-flex; align-items: center; gap: var(--space-1); font-size: var(--fs-xs); }
+.coverage-where { white-space: nowrap; }
+.coverage-where.where-here { color: var(--green); }
+.coverage-where.where-elsewhere { color: var(--accent); }
+.coverage-where.where-nowhere { color: var(--red); }
+
+@media (max-width: 640px) {
+  .chain-row { flex-wrap: wrap; }
+  .chain-item { padding-left: 0 !important; }
+}

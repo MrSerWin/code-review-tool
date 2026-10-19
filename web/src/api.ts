@@ -13,6 +13,7 @@ import type {
   ReviewGroupsPayload,
   ReviewersPayload,
   ResolvedTarget,
+  TicketGroupPayload,
   TicketInfo,
 } from './types';
 
@@ -84,6 +85,23 @@ export const api = {
   remove: (id: number) => req<{ ok: true }>(`/api/reviews/${id}`, { method: 'DELETE' }),
   eventsUrl: (id: number) => `/api/reviews/${id}/events`,
   reportUrl: (id: number) => `/api/reviews/${id}/report`,
+
+  /** A ticket group: chains in stack order, latest runs, coverage. 404 when the key has none. */
+  ticketGroup: (key: string) => req<TicketGroupPayload>(`/api/ticket-groups/${encodeURIComponent(key)}`),
+  reviewTicket: (key: string, body: { reviewer?: string; model?: string; requirementsText?: string; branches?: string[] } = {}) =>
+    req<TicketGroupPayload & { reviews: Review[]; notes: string[]; resolve_warning?: string }>(
+      `/api/tickets/${encodeURIComponent(key)}/review`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+  recomputeCoverage: (key: string) =>
+    req<{ started: boolean }>(`/api/tickets/${encodeURIComponent(key)}/coverage`, { method: 'POST', body: JSON.stringify({}) }),
+  setBranchParent: (key: string, body: { repo: string; branch: string; parent: string | null }) =>
+    req<TicketGroupPayload>(`/api/tickets/${encodeURIComponent(key)}/parent`, { method: 'PUT', body: JSON.stringify(body) }),
+  setChainOrder: (key: string, body: { repo: string; branches: string[] }) =>
+    req<TicketGroupPayload>(`/api/tickets/${encodeURIComponent(key)}/order`, { method: 'PUT', body: JSON.stringify(body) }),
+  detectParents: (key: string, reset = false) =>
+    req<TicketGroupPayload>(`/api/tickets/${encodeURIComponent(key)}/detect`, { method: 'POST', body: JSON.stringify({ reset }) }),
+  coverageReportUrl: (key: string) => `/api/ticket-groups/${encodeURIComponent(key)}/coverage/report`,
 
   recipes: () => req<RecipesPayload>('/api/recipes'),
   listPreviews: (params: Params = {}) =>
