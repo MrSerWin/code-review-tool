@@ -21,10 +21,22 @@
   // "primary" marks the port whose URL is shown to the user; without it the
   // first entry wins. A port with the id "db" (or "postgres") is also used
   // for DB_PORT.
+  // Every port is offered as a link once the preview is ready, the primary
+  // one first. "label" names it in the UI (default: the id). "links" replaces
+  // the single link to the port root with one link per entry; each "path"
+  // starts with "/".
   "ports": [
-    { "id": "db", "internal": 5432 },
-    { "id": "api", "internal": 8000 },
-    { "id": "web", "internal": 3000, "primary": true }
+    { "id": "db", "internal": 5432, "label": "Postgres" },
+    {
+      "id": "api",
+      "internal": 8000,
+      "label": "API",
+      "links": [
+        { "label": "API", "path": "/" },
+        { "label": "API docs", "path": "/docs" }
+      ]
+    },
+    { "id": "web", "internal": 3000, "primary": true, "label": "Web app" }
   ],
 
   "database": {

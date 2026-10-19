@@ -10,10 +10,24 @@ const idSchema = z
   .min(1)
   .regex(ROLE_ID, 'must start with a letter and contain only letters, digits and underscores');
 
+const labelSchema = z.string().trim().min(1, 'must not be empty').max(60, 'must be at most 60 characters');
+
+const linkSchema = z.object({
+  label: labelSchema,
+  path: z
+    .string()
+    .regex(/^\/[^\s\\]*$/, 'must start with "/" and contain no whitespace or backslashes')
+    .refine((p) => !p.startsWith('//'), 'must be a path on the port, not a "//host" URL'),
+});
+
 const portSchema = z.object({
   id: idSchema,
   internal: z.number().int().min(1).max(65535),
   primary: z.boolean().optional(),
+  /** Shown in the UI; defaults to the port id. */
+  label: labelSchema.optional(),
+  /** Links the UI offers on this port; without it, one link to the port root. */
+  links: z.array(linkSchema).min(1, 'needs at least one link when present (omit it for a single root link)').optional(),
 });
 
 const pgDumpSchema = z.object({
@@ -92,6 +106,14 @@ function extraChecks(recipe: z.infer<typeof recipeSchema>, file: string): string
   const duplicates = ids.filter((id, index) => ids.indexOf(id) !== index);
   if (duplicates.length) problems.push(`${file}: ports: duplicate port id(s): ${[...new Set(duplicates)].join(', ')}`);
 
+  for (const port of recipe.ports) {
+    const paths = (port.links ?? []).map((l) => l.path);
+    const repeated = paths.filter((p, index) => paths.indexOf(p) !== index);
+    if (repeated.length) {
+      problems.push(`${file}: ports.${port.id}.links: duplicate path(s): ${[...new Set(repeated)].join(', ')}`);
+    }
+  }
+
   const primaries = recipe.ports.filter((p) => p.primary);
   if (primaries.length > 1) {
     problems.push(`${file}: ports: only one port may be marked "primary" (found ${primaries.length})`);
@@ -130,7 +152,7 @@ export function stripGlob(pattern: string): string {
 }
 
 /** The port whose URL is shown to the user: the one marked primary, else the first. */
-export function primaryPort(recipe: Recipe): { id: string; internal: number } {
+export function primaryPort(recipe: Pick<Recipe, 'ports'>): { id: string; internal: number } {
   const marked = recipe.ports.find((p) => p.primary);
   return marked ?? (recipe.ports[0] as { id: string; internal: number });
 }

@@ -442,7 +442,7 @@ every tool returns an error saying so.
 | `rerun_review` | `id`, `reviewer?`, `model?` | run a review again, optionally with another reviewer or model |
 | `list_recipes` | | preview recipes: name, roles (role -> repo), database, ready timeout; `enabled` is false when previews are off |
 | `start_preview` | `recipe?`, `roles?` (`[{role, branch?, base?, local?}]`), `review_id?`, `ticket?`, `dump_mode?` | start a [preview](#preview-environments-optional); a role runs a local branch with `branch: "local:<repo>#<branch>"` or `local: true`; returns the preview id at once |
-| `get_preview` | `id`, `tail_logs?` | status, `web_url` once ready, each role's branch, `source` (`github` / `local`) and commit, ports, data mode, expiry, error |
+| `get_preview` | `id`, `tail_logs?` | status, `web_url` and `links` (every exposed address, primary first) once ready, each role's branch, `source` (`github` / `local`) and commit, ports, data mode, expiry, error |
 | `wait_for_preview` | `id`, `timeoutSec?` (default 50, max 600), `pollSec?` (default 5) | poll until the preview is ready or has ended; returns `finished`, call again while it is `false` |
 | `stop_preview` | `id`, `timeoutSec?` (default 50, max 600) | stop a preview; waits up to `timeoutSec` for its teardown, which goes on in the server after that (`stopped=false`) |
 | `list_previews` | `review_id?`, `ticket?`, `recipe?`, `status?` (one status or `live`), `limit?` (default 20) | recent previews, newest first |
@@ -450,7 +450,8 @@ every tool returns an error saying so.
 A review takes minutes, so the usual flow is `start_review`, then
 `wait_for_review` in a loop, then `get_review` or `get_report`. Review results
 carry each review's page URL in the web UI. A preview follows the same pattern:
-`start_preview`, `wait_for_preview` until `finished`, open `web_url`, then
+`start_preview`, `wait_for_preview` until `finished`, open `web_url` (or an
+entry of `links`, such as the backend or its admin), then
 `stop_preview`. `start_preview`, `stop_preview` and the review mutations are
 refused inside a reviewer.
 
@@ -563,7 +564,9 @@ workers.
    command exits 0.
 
 All of that shares the recipe's `readyTimeoutSec`. Then the preview is
-**ready**: the UI shows the URL of the primary port and the recipe's
+**ready**: the UI shows the primary port's link first, every other port link
+(labels and paths from the recipe's `ports`, see
+[recipes.example](recipes.example/README.md#ports-and-links)) and the recipe's
 credentials hint, and its time to live starts. `down` runs on stop, on failure
 or timeout, on expiry, and after a restart; it must succeed even when nothing
 was started.

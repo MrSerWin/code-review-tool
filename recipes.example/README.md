@@ -22,6 +22,20 @@ match the directory name, every repository in `repos` must be in
 `ALLOWED_REPOS`, and `//` and `/* */` comments are allowed. Files beside it
 (compose files, scripts) are reachable through `RECIPE_DIR`.
 
+## Ports and links
+
+Each entry in `ports` gets one free host port, exposed to the steps as
+`PORT_<ID>`. Once the preview is ready, the UI, `GET /api/previews` (`links`)
+and the MCP tools offer every port as a link, the primary port first:
+
+| field | meaning |
+|---|---|
+| `id` | logical port id; letters, digits and underscores |
+| `internal` | port inside the stack, for your compose file or scripts |
+| `primary` | the port behind `url` / `web_url`; at most one, default the first |
+| `label` | name shown for the port's link; default the id |
+| `links` | `[{ "label", "path" }]`, one link per entry instead of the port root; `path` starts with `/`, no duplicates per port |
+
 `GET /api/recipes` lists what was loaded and reports every recipe that failed
 validation, with the offending field and file path. A broken recipe is skipped;
 it never keeps the server from starting.

@@ -360,6 +360,8 @@ export interface PreviewPayload {
   stopped_at: string | null;
   roles: (PreviewRole & { url?: string | null })[];
   ports: Record<string, number>;
+  /** Every link the preview exposes, the primary one first. Absent from older servers. */
+  links?: { label: string; url: string; port_id: string; primary: boolean }[];
   queuePosition?: number;
 }
 
@@ -378,7 +380,8 @@ export function compactPreviewRole(r: PreviewPayload['roles'][number]) {
 
 /**
  * One preview, compact: what runs where, and how to reach it. `web_url` is the
- * running app (only while ready); `page` is the tool's own page for it.
+ * running app and `links` every address it exposes (both only while ready);
+ * `page` is the tool's own page for it.
  */
 export function compactPreview(
   p: PreviewPayload,
@@ -393,6 +396,8 @@ export function compactPreview(
     ticket: p.ticket_key,
     review_id: p.review_id,
     web_url: ready ? p.url : null,
+    // Every exposed link (backend, admin, ...), primary first; empty until ready.
+    links: ready ? (p.links ?? []).map((l) => ({ label: l.label, url: l.url, port: l.port_id, primary: l.primary })) : [],
     roles: p.roles.map(compactPreviewRole),
     ports: p.ports,
     data: p.dump_mode,
