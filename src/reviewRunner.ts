@@ -45,6 +45,18 @@ export interface RunReviewOptions {
   onProcessGroups?: (groups: RecordedGroup[]) => void;
   /** Use this reviewer definition instead of looking one up by name; for tests. */
   reviewerDefinition?: ReviewerDefinition;
+  /**
+   * The branch is one slice of a ticket group: requirements it does not
+   * implement are not findings, and its verdict judges its code only.
+   */
+  slice?: SliceInfo;
+}
+
+/** Where a branch sits among the branches of its ticket. */
+export interface SliceInfo {
+  ticketKey: string;
+  /** Every branch of the ticket, parents first; `self` marks the reviewed one. */
+  members: { repo: string; branch: string; parent: string | null; self: boolean }[];
 }
 
 const requirementSchema = z.object({
@@ -106,6 +118,7 @@ export const PROMPT_FILES = [
   ...LENS_NAMES.map((lens) => `lens-${lens}.md`),
   'synthesis.md',
   'reanchor.md',
+  'coverage.md',
 ] as const;
 
 const cachedTemplates = new Map<string, string>();
@@ -123,6 +136,7 @@ export interface PromptVars {
   review: RunnableReview;
   checkout: CheckoutResult;
   previousFindings: PreviousFinding[];
+  slice?: SliceInfo;
 }
 
 const PLACEHOLDER = /\{\{([A-Z_]+)\}\}/g;
@@ -150,8 +164,49 @@ export function promptValues(vars: PromptVars, lensOutputs = ''): Record<string,
     CHANGED_FILES: renderChangedFiles(vars.checkout),
     PREVIOUS_FINDINGS: renderPreviousFindings(vars.previousFindings),
     LENS_OUTPUTS: lensOutputs,
+    TICKET_SCOPE: renderTicketScope(vars.slice, vars.review),
+    SLICE_RULES: vars.slice ? SLICE_RULES : '',
   };
 }
+
+/** Where the branch sits among the ticket's slices; empty for a branch without a ticket group. */
+export function renderTicketScope(slice: SliceInfo | undefined, review: Pick<RunnableReview, 'repo' | 'branch'>): string {
+  if (!slice) return '';
+  const lines = slice.members.map((m) => {
+    const base = m.parent ? ` (diffed against \`${m.parent}\`)` : '';
+    return `- \`${m.repo}#${m.branch}\`${base}${m.self ? ' <- this review' : ''}`;
+  });
+  if (!slice.members.some((m) => m.self)) lines.push(`- \`${review.repo}#${review.branch}\` <- this review`);
+  return [
+    '## How this ticket is split',
+    '',
+    `Ticket ${slice.ticketKey} is implemented in ${lines.length === 1 ? 'one branch' : `${lines.length} branches (slices)`}, ` +
+      'listed parents first. This review covers ONE of them, diffed against its parent only:',
+    '',
+    ...lines,
+    '',
+    'Work the ticket asks for that this branch does not contain may live in another slice, or may be planned for',
+    'one that does not exist yet. That is not a defect of this branch: never report it as a finding. Ticket',
+    'coverage across all slices is judged separately, after every slice is reviewed.',
+  ].join('\n');
+}
+
+const SLICE_RULES = [
+  '# This branch is one slice of the ticket',
+  '',
+  'These rules replace the parts of steps 2, 3, 4 and 7 above that are about ticket requirements:',
+  '',
+  '- A ticket requirement this branch does not implement is NOT a finding and never a blocker. The other slices',
+  '  are reviewed on their own, and ticket coverage is judged across all of them.',
+  '- Still list every ticket requirement in `requirements`. Mark `met` or `partial` only what THIS branch\'s diff',
+  '  implements, with evidence `path:line` from this branch. Mark the rest `missing`, and say in its evidence',
+  '  when it most likely belongs to another slice (name the slice when the list above makes that clear). A',
+  '  missing requirement needs no finding and no sentence in the conclusion.',
+  '- `verdict` and `can_merge` judge this branch\'s code only: `approve` and `can_merge: true` when there is no',
+  '  `blocker` and no `major` finding, whatever the requirement statuses are; `blocked` only for a serious',
+  '  defect in this branch\'s code.',
+  '- The conclusion names what this branch must fix. Never list the work of other slices as left to do here.',
+].join('\n');
 
 export async function buildLensPrompt(lens: LensName, vars: PromptVars): Promise<string> {
   const values = promptValues(vars);
@@ -375,7 +430,7 @@ export function killAllReviewersNow(): void {
 }
 
 /** Run one review pass and parse its JSON block, retrying once by default. */
-async function runPass<T>(
+export async function runPass<T>(
   label: string,
   basePrompt: string,
   schema: z.ZodType<T>,
@@ -464,6 +519,7 @@ export async function runReview(
     review,
     checkout,
     previousFindings: opts.previousFindings ?? [],
+    ...(opts.slice ? { slice: opts.slice } : {}),
   };
   const reviewer = opts.reviewerDefinition ?? getReviewer(opts.reviewer ?? review.reviewer);
   const model = opts.model ?? review.model ?? reviewer.defaultModel;
@@ -526,7 +582,7 @@ export async function runReview(
   if (opts.signal?.aborted) throw new Error('Review cancelled');
 
   return {
-    ...normalize({ ...(output as ReviewOutput), findings: anchors.findings }),
+    ...normalize({ ...(output as ReviewOutput), findings: anchors.findings }, { slice: Boolean(opts.slice) }),
     lensResults,
     synthesisRaw,
     reanchorRaw,
@@ -545,8 +601,22 @@ function correctivePrompt(basePrompt: string, problem: string): string {
   ].join('\n');
 }
 
-function normalize(output: ReviewOutput): ReviewOutput {
+/**
+ * The merge gate, re-derived. `code_verdict` / `code_can_merge` judge the
+ * findings alone. `verdict` / `can_merge` are the same for a slice of a ticket
+ * group (coverage is judged across the group); for a branch without a group
+ * they also require every requirement to be met, as before.
+ */
+export function normalize(output: ReviewOutput, opts: { slice?: boolean } = {}): ReviewOutput {
   const hasBlocking = output.findings.some((f) => f.severity === 'blocker' || f.severity === 'major');
+  const hasBlocker = output.findings.some((f) => f.severity === 'blocker');
+  const codeCanMerge = !hasBlocking;
+  const codeVerdict = output.verdict === 'blocked' && hasBlocker
+    ? 'blocked'
+    : hasBlocking ? 'changes_requested' : 'approve';
+  if (opts.slice) {
+    return { ...output, verdict: codeVerdict, can_merge: codeCanMerge, code_verdict: codeVerdict, code_can_merge: codeCanMerge };
+  }
   // `not_verifiable` cannot be checked from this repository, so it does not
   // block a merge on its own. Only `partial` and `missing` do.
   const nothingOpen = output.requirements.every(
@@ -558,7 +628,7 @@ function normalize(output: ReviewOutput): ReviewOutput {
   // Keep the verdict and the gate consistent: an "approve" banner must never
   // sit on top of can_merge = false.
   const verdict = !canMerge && output.verdict === 'approve' ? 'changes_requested' : output.verdict;
-  return { ...output, can_merge: canMerge, verdict };
+  return { ...output, can_merge: canMerge, verdict, code_verdict: codeVerdict, code_can_merge: codeCanMerge };
 }
 
 /** One reviewer CLI process: spawn it, stream its output, return its answer. Exported for tests. */

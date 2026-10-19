@@ -47,6 +47,7 @@ function outcomeHint(path: string): string {
   if (bare.startsWith('/api/previews/')) return 'get_preview or list_previews';
   if (bare === '/api/reviews') return 'list_reviews (new reviews show there once the input is resolved)';
   if (bare.startsWith('/api/reviews/')) return 'get_review or list_reviews';
+  if (bare.startsWith('/api/tickets/')) return 'get_ticket (a started ticket review shows there as "run")';
   return 'the matching get_ or list_ tool';
 }
 
@@ -90,7 +91,7 @@ export class ApiError extends Error {
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
 export interface RequestOptions {
-  method?: 'GET' | 'POST';
+  method?: 'GET' | 'POST' | 'PUT';
   body?: unknown;
   timeoutMs?: number;
   signal?: AbortSignal;
@@ -252,6 +253,33 @@ export class ApiClient {
 
   rerun<T>(id: number, body: { reviewer?: string; model?: string }): Promise<T> {
     return this.requestJson<T>(`/api/reviews/${id}/rerun`, { method: 'POST', body });
+  }
+
+  /** A human link to a ticket's page in the web UI. */
+  ticketUrl(key: string): string {
+    return `${this.baseUrl}/ticket/${encodeURIComponent(key)}`;
+  }
+
+  ticketGroup<T>(key: string, runId?: number, signal?: AbortSignal): Promise<T> {
+    return this.requestJson<T>(withQuery(`/api/ticket-groups/${encodeURIComponent(key)}`, { run: runId }), { signal });
+  }
+
+  startTicketReview<T>(key: string, body: unknown): Promise<T> {
+    return this.requestJson<T>(`/api/tickets/${encodeURIComponent(key)}/review`, {
+      method: 'POST', body, timeoutMs: SLOW_REQUEST_MS,
+    });
+  }
+
+  recomputeCoverage<T>(key: string, body: { reviewer?: string; model?: string }): Promise<T> {
+    return this.requestJson<T>(`/api/tickets/${encodeURIComponent(key)}/coverage`, { method: 'POST', body });
+  }
+
+  setBranchParent<T>(key: string, body: { repo: string; branch: string; parent: string | null }): Promise<T> {
+    return this.requestJson<T>(`/api/tickets/${encodeURIComponent(key)}/parent`, { method: 'PUT', body });
+  }
+
+  setChainOrder<T>(key: string, body: { repo: string; branches: string[]; root?: string }): Promise<T> {
+    return this.requestJson<T>(`/api/tickets/${encodeURIComponent(key)}/order`, { method: 'PUT', body });
   }
 
   recipes<T>(): Promise<T> {

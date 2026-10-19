@@ -18,6 +18,8 @@ Changed files (the changed set; renames are listed under their new path):
 
 {{TICKET}}
 
+{{TICKET_SCOPE}}
+
 # Findings from the previous review of this branch
 
 {{PREVIOUS_FINDINGS}}

@@ -12,9 +12,10 @@ import {
   ApiClient, ApiError, ApiNoAnswerError, ApiUnreachableError, apiBaseUrl, DEFAULT_API_URL,
 } from './mcp/client.js';
 import {
-  compactFindings, compactGroup, compactLocalRepos, compactPreview, findingLocation, isPreviewSettled,
-  isTerminalStatus, mutationRefusal, parseTargetSelector, reviewDetail, selectTargets, severityCounts, truncate,
-  truncateReport, type PreviewPayload,
+  compactCoverage, compactFindings, compactGroup, compactLocalRepos, compactPreview, compactTicket, coverageWhere,
+  findingLocation, isPreviewSettled, isTerminalStatus, isTicketRunFinished, mutationRefusal, parseTargetSelector,
+  reviewDetail, selectTargets, severityCounts, truncate, truncateReport, type CoveragePayload, type PreviewPayload,
+  type TicketPayload,
 } from './mcp/format.js';
 import type { FindingRow, ReviewGroup, ReviewRow } from './types.js';
 
@@ -32,7 +33,7 @@ function reviewRow(overrides: Partial<ReviewRow> = {}): ReviewRow {
     blocking_count: null, report_path: null, reviewer: 'claude', model: 'opus', error: null,
     files_changed: null, additions: null, deletions: null, created_at: '2026-01-01T00:00:00.000Z',
     started_at: null, finished_at: null, group_key: 'ABC-123',
-    runner_pid: null, runner_started_at: null, reviewer_pgids: null,
+    runner_pid: null, runner_started_at: null, reviewer_pgids: null, code_verdict: null, code_can_merge: null,
     ...overrides,
   };
 }
@@ -210,6 +211,110 @@ test('a review group is compacted with boolean can_merge, run urls, and a branch
   const all = compactGroup(reviewGroup(), (id) => `http://x/review/${id}`);
   assert.equal(all.branches[1]!.latest.can_merge, true);
   assert.equal('branches_omitted' in all, false);
+});
+
+function coveragePayload(overrides: Partial<CoveragePayload> = {}): CoveragePayload {
+  return {
+    id: 4, status: 'done', verdict: 'needs_work', summary: 'Button tests missing.', review_ids: [10, 11],
+    reviewer: 'claude', model: 'opus', report_path: 'reports/ABC-123/coverage-1.md', error: null,
+    created_at: '2026-01-02T00:00:00.000Z', finished_at: '2026-01-02T00:05:00.000Z',
+    requirements: [
+      {
+        text: 'Export endpoint', status: 'covered', note: '',
+        branches: [{
+          repo: 'my-service', branch: 'feature/abc-123-a', review_id: 10, status: 'covered', note: '',
+          evidence: [{ file: 'src/export.py', line: 4, anchor_status: 'ok' }, { file: 'src/x.py', line: null, anchor_status: 'off_diff' }],
+        }],
+      },
+      { text: 'Button tests', status: 'missing', note: 'No branch has them.', branches: [] },
+    ],
+    ...overrides,
+  };
+}
+
+function ticketPayload(runStatus: 'running' | 'done' = 'done', overrides: Partial<TicketPayload> = {}): TicketPayload {
+  const run = (id: number, status: ReviewRow['status'], base: string) => ({
+    id, run_index: 1, status, verdict: status === 'done' ? 'approve' as const : null,
+    code_verdict: status === 'done' ? 'approve' as const : null, code_can_merge: status === 'done' ? true : null,
+    base_branch: base, blocking_count: status === 'done' ? 0 : null,
+  });
+  return {
+    group: {
+      key: 'ABC-123', title: 'Add export', ticketUrl: 'https://tracker.example/ABC-123', requirementsText: null,
+      chains: [{
+        repo: 'my-service',
+        branches: [
+          {
+            repo: 'my-service', branch: 'feature/abc-123-a', source: 'github', parent: 'main', parentReason: 'default',
+            parentInGroup: false, depth: 0, prNumber: null, latest: run(10, runStatus === 'done' ? 'done' : 'reviewing', 'main'),
+            latestDone: runStatus === 'done' ? run(10, 'done', 'main') : null, parentReviewed: null,
+          },
+          {
+            repo: 'my-service', branch: 'feature/abc-123-b', source: 'github', parent: 'feature/abc-123-a',
+            parentReason: 'pr', parentInGroup: true, depth: 1, prNumber: 7,
+            latest: run(11, runStatus === 'done' ? 'done' : 'queued', 'feature/abc-123-a'),
+            latestDone: runStatus === 'done' ? run(11, 'done', 'feature/abc-123-a') : null,
+            parentReviewed: runStatus === 'done',
+          },
+        ],
+      }],
+    },
+    coverage: runStatus === 'done' ? coveragePayload() : null,
+    latest_coverage: null,
+    coverage_pending: runStatus !== 'done',
+    run: { id: 3, status: runStatus, review_ids: [10, 11], coverage_id: runStatus === 'done' ? 4 : null, created_at: '', finished_at: null },
+    ...overrides,
+  };
+}
+
+test('a ticket is compacted to chains in stack order, latest runs, and its coverage', () => {
+  const out = compactTicket(ticketPayload('running'), { review: (id) => `http://x/review/${id}`, ticket: 'http://x/ticket/ABC-123' });
+  assert.equal(out.page, 'http://x/ticket/ABC-123');
+  const [a, b] = out.chains[0]!.branches;
+  assert.deepEqual([a!.branch, a!.parent, a!.depth], ['feature/abc-123-a', 'main', 0]);
+  assert.deepEqual([b!.parent, b!.parent_reason, b!.parent_in_group, b!.depth, b!.pr], ['feature/abc-123-a', 'pr', true, 1, 7]);
+  assert.equal(b!.note, 'parent not reviewed yet');
+  assert.deepEqual(b!.latest, { id: 11, run: 1, status: 'queued', base: 'feature/abc-123-a', code_verdict: null, blocking_count: null, url: 'http://x/review/11' });
+  assert.equal(out.coverage, null);
+  assert.equal(isTicketRunFinished(ticketPayload('running')), false);
+  assert.equal(isTicketRunFinished(ticketPayload('done')), true);
+
+  const cov = compactCoverage(coveragePayload(), 1)!;
+  assert.equal(cov.verdict, 'needs_work');
+  assert.equal(cov.requirements.length, 1);
+  assert.equal(cov.requirements_omitted, 1);
+  assert.deepEqual(cov.requirements[0]!.branches, [{
+    branch: 'my-service#feature/abc-123-a', status: 'covered',
+    evidence: [{ location: 'src/export.py:4', anchor_status: 'ok' }, { location: 'src/x.py', anchor_status: 'off_diff' }],
+  }]);
+  assert.deepEqual(cov.open, ['missing: Button tests']);
+});
+
+test('a review of a ticket group carries its code verdict and the coverage seen from it', () => {
+  const detail = reviewDetail({
+    review: doneRow(10),
+    findings: [],
+    ticket_group: {
+      key: 'ABC-123', parent: 'main', parent_reason: 'default', coverage_pending: false,
+      coverage: {
+        id: 4, status: 'done', verdict: 'needs_work', summary: null, created_at: '', includes_this_review: true,
+        requirements: [
+          { text: 'Export endpoint', status: 'covered', where: 'here', here: 'covered', others: [], note: '' },
+          { text: 'Button', status: 'covered', where: 'elsewhere', here: null, others: ['my-frontend#feature/abc-123-b'], note: '' },
+          { text: 'Button tests', status: 'missing', where: 'nowhere', here: null, others: [], note: '' },
+        ],
+      },
+    },
+  }, 'http://x/review/10');
+  // An old row without a code verdict reads its combined one.
+  assert.equal(detail.code_verdict, 'changes_requested');
+  assert.deepEqual(detail.ticket_group?.coverage?.requirements.map((r) => r.where), [
+    'in this branch', 'in my-frontend#feature/abc-123-b', 'not covered anywhere',
+  ]);
+  assert.equal(coverageWhere({ text: '', status: 'partial', where: 'here', here: 'partial', others: ['w#x'], note: '' }),
+    'partly in this branch and w#x');
+  const lone = reviewDetail({ review: doneRow(12) }, 'http://x/review/12');
+  assert.equal(lone.ticket_group, null);
 });
 
 // --- recursion guard ----------------------------------------------------------
@@ -425,6 +530,7 @@ async function startStub(pollsUntilDone = 2): Promise<Stub> {
   const gets: Stub['gets'] = [];
   const polls = new Map<number, number>();
   let previewPolls = 0;
+  let ticketPolls = 0;
   const targets = [
     { repo: 'my-service', branch: 'feature/abc-123-a', baseBranch: 'main', prNumber: null },
     { repo: 'my-frontend', branch: 'feature/abc-123-b', baseBranch: 'main', prNumber: 7 },
@@ -456,6 +562,28 @@ async function startStub(pollsUntilDone = 2): Promise<Stub> {
           groups: [reviewGroup(), reviewGroup({ key: 'my-service#cleanup', isTicket: false, branches: [] })],
           total: 7,
         });
+      }
+      if (req.method === 'GET' && url.pathname === '/api/ticket-groups/ABC-123') {
+        gets.push({ path: url.pathname, query: Object.fromEntries(url.searchParams) });
+        ticketPolls += 1;
+        return send(res, 200, ticketPayload(ticketPolls > pollsUntilDone ? 'done' : 'running'));
+      }
+      if (req.method === 'POST' && url.pathname === '/api/tickets/ABC-123/review') {
+        posts.push(JSON.parse(raw || '{}'));
+        ticketPolls = 0;
+        return send(res, 201, {
+          ...ticketPayload('running'),
+          reviews: [reviewRow({ id: 10, branch: 'feature/abc-123-a' }), reviewRow({ id: 11, branch: 'feature/abc-123-b', base_branch: 'feature/abc-123-a' })],
+          notes: ['my-service#feature/abc-123-b: its parent feature/abc-123-a has no finished review yet; it is queued first in this batch.'],
+        });
+      }
+      if (req.method === 'POST' && url.pathname === '/api/tickets/ABC-123/coverage') {
+        posts.push(JSON.parse(raw || '{}'));
+        return send(res, 202, { started: true, coverage: coveragePayload({ id: 5, status: 'running', verdict: null }) });
+      }
+      if (req.method === 'PUT' && (url.pathname === '/api/tickets/ABC-123/parent' || url.pathname === '/api/tickets/ABC-123/order')) {
+        posts.push({ path: url.pathname, ...JSON.parse(raw || '{}') });
+        return send(res, 200, ticketPayload('done'));
       }
       if (req.method === 'GET' && url.pathname === '/api/tickets/ABC-123') {
         return send(res, 200, { ticket: { key: 'ABC-123', title: 'Example' }, targets });
@@ -570,9 +698,10 @@ test('stdio MCP server: list, start, get, and wait against a stub API', { timeou
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     assert.deepEqual(names, [
-      'cancel_review', 'detect_base', 'get_preview', 'get_report', 'get_review', 'list_local_repos', 'list_previews',
-      'list_recipes', 'list_review_groups', 'list_reviewers', 'list_reviews', 'rerun_review', 'start_preview',
-      'start_review', 'stop_preview', 'wait_for_preview', 'wait_for_review',
+      'cancel_review', 'detect_base', 'get_preview', 'get_report', 'get_review', 'get_ticket', 'get_ticket_coverage',
+      'list_local_repos', 'list_previews', 'list_recipes', 'list_review_groups', 'list_reviewers', 'list_reviews',
+      'rerun_review', 'set_branch_parent', 'start_preview', 'start_review', 'start_ticket_review', 'stop_preview',
+      'wait_for_preview', 'wait_for_review', 'wait_for_ticket_review',
     ]);
     assert.match(tools.find((t) => t.name === 'start_preview')!.description ?? '', /local:<repo>#<branch>/);
     assert.match(tools.find((t) => t.name === 'wait_for_review')!.description ?? '', /call wait_for_review again/i);
@@ -671,6 +800,64 @@ test('stdio MCP server: grouped history and the runs of one group', { timeout: 6
   }
 });
 
+test('stdio MCP server: review a ticket, wait for it, read it, recompute coverage, fix the order', { timeout: 60_000 }, async () => {
+  const stub = await startStub(2);
+  const client = await connect({ CODE_REVIEW_API_URL: stub.url });
+  try {
+    const { instructions } = { instructions: client.getInstructions() ?? '' };
+    assert.match(instructions, /start_ticket_review -> wait_for_ticket_review/);
+
+    const started = json(await client.callTool({
+      name: 'start_ticket_review', arguments: { ticket: 'ABC-123', model: 'sonnet', requirementsText: 'Decision: CSV.' },
+    }));
+    assert.deepEqual(stub.posts.at(-1), { model: 'sonnet', requirementsText: 'Decision: CSV.' });
+    assert.equal(started.run.id, 3);
+    assert.deepEqual(started.reviews.map((r: { id: number; base: string }) => `${r.id}<-${r.base}`), ['10<-main', '11<-feature/abc-123-a']);
+    assert.match(started.notes[0], /queued first in this batch/);
+    assert.match(started.next, /wait_for_ticket_review with ticket="ABC-123" and runId=3/);
+    assert.equal(started.page, `${stub.url}/ticket/ABC-123`);
+
+    // Two polls running, then done with the coverage.
+    const waited = json(await client.callTool({
+      name: 'wait_for_ticket_review', arguments: { ticket: 'ABC-123', runId: 3, timeoutSec: 30, pollSec: 1 },
+    }));
+    assert.equal(waited.finished, true);
+    assert.equal(stub.gets.at(-1)?.query.run, '3');
+    assert.equal(waited.coverage.verdict, 'needs_work');
+    assert.deepEqual(waited.chains[0].branches.map((b: any) => b.latest.code_verdict), ['approve', 'approve']);
+
+    const slow = json(await client.callTool({ name: 'wait_for_ticket_review', arguments: { ticket: 'ABC-123', timeoutSec: 1, pollSec: 1 } }));
+    assert.equal(typeof slow.finished, 'boolean');
+
+    const got = json(await client.callTool({ name: 'get_ticket', arguments: { ticket: 'ABC-123' } }));
+    assert.equal(got.key, 'ABC-123');
+    assert.equal(got.coverage.requirements[1].status, 'missing');
+
+    const recomputed = json(await client.callTool({ name: 'get_ticket_coverage', arguments: { ticket: 'ABC-123', recompute: true, model: 'opus' } }));
+    assert.equal(recomputed.started, true);
+    assert.deepEqual(recomputed.running, { id: 5, created_at: '2026-01-02T00:00:00.000Z' });
+    assert.deepEqual(stub.posts.at(-1), { model: 'opus' });
+    const read = json(await client.callTool({ name: 'get_ticket_coverage', arguments: { ticket: 'ABC-123' } }));
+    assert.equal(read.started, undefined);
+    assert.equal(read.coverage.id, 4);
+
+    const parent = json(await client.callTool({
+      name: 'set_branch_parent', arguments: { ticket: 'ABC-123', repo: 'my-service', branch: 'feature/abc-123-b', parent: null },
+    }));
+    assert.deepEqual(stub.posts.at(-1), { path: '/api/tickets/ABC-123/parent', repo: 'my-service', branch: 'feature/abc-123-b', parent: null });
+    assert.equal(parent.chains[0].branches.length, 2);
+    await client.callTool({
+      name: 'set_branch_parent', arguments: { ticket: 'ABC-123', repo: 'my-service', order: ['feature/abc-123-a', 'feature/abc-123-b'] },
+    });
+    assert.deepEqual(stub.posts.at(-1), { path: '/api/tickets/ABC-123/order', repo: 'my-service', branches: ['feature/abc-123-a', 'feature/abc-123-b'] });
+    const neither = await client.callTool({ name: 'set_branch_parent', arguments: { ticket: 'ABC-123', repo: 'my-service' } });
+    assert.equal(neither.isError, true);
+  } finally {
+    await client.close();
+    await stub.close();
+  }
+});
+
 test('stdio MCP server: recipes, start, wait, list, and stop a preview', { timeout: 60_000 }, async () => {
   const stub = await startStub(1);
   const client = await connect({ CODE_REVIEW_API_URL: stub.url });
@@ -744,6 +931,9 @@ test('stdio MCP server: guard inside a reviewer, and an unreachable API', { time
       ['cancel_review', { id: 1 }],
       ['start_preview', { ticket: 'ABC-123' }],
       ['stop_preview', { id: 1 }],
+      ['start_ticket_review', { ticket: 'ABC-123' }],
+      ['get_ticket_coverage', { ticket: 'ABC-123', recompute: true }],
+      ['set_branch_parent', { ticket: 'ABC-123', repo: 'r', branch: 'b', parent: null }],
     ] as const) {
       const result = await client.callTool({ name, arguments: args });
       assert.equal(result.isError, true, name);

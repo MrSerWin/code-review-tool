@@ -137,6 +137,61 @@ const MIGRATIONS: string[] = [
      ord INTEGER NOT NULL
    )`,
   `CREATE INDEX IF NOT EXISTS idx_review_files_review ON review_files(review_id)`,
+  // Ticket groups: the branches of one ticket, each with the parent it is diffed
+  // against, so a stack of slices is reviewed slice by slice.
+  `CREATE TABLE IF NOT EXISTS ticket_groups (
+     key TEXT PRIMARY KEY,
+     title TEXT,
+     ticket_url TEXT,
+     requirements_text TEXT,
+     created_at TEXT NOT NULL,
+     updated_at TEXT NOT NULL
+   )`,
+  `CREATE TABLE IF NOT EXISTS ticket_branches (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     ticket_key TEXT NOT NULL REFERENCES ticket_groups(key) ON DELETE CASCADE,
+     repo TEXT NOT NULL,
+     branch TEXT NOT NULL,
+     source TEXT NOT NULL DEFAULT 'github',
+     parent_branch TEXT,
+     parent_reason TEXT,
+     default_branch TEXT,
+     position INTEGER NOT NULL DEFAULT 0,
+     pr_number INTEGER,
+     created_at TEXT NOT NULL,
+     updated_at TEXT NOT NULL,
+     UNIQUE (ticket_key, repo, branch)
+   )`,
+  `CREATE INDEX IF NOT EXISTS idx_ticket_branches_key ON ticket_branches(ticket_key)`,
+  // Ticket coverage: one pass over every branch of a group, per requirement.
+  `CREATE TABLE IF NOT EXISTS ticket_coverage (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     ticket_key TEXT NOT NULL,
+     status TEXT NOT NULL,
+     verdict TEXT,
+     summary TEXT,
+     review_ids TEXT NOT NULL,
+     requirements_json TEXT,
+     reviewer TEXT,
+     model TEXT,
+     report_path TEXT,
+     error TEXT,
+     trigger TEXT,
+     created_at TEXT NOT NULL,
+     finished_at TEXT
+   )`,
+  `CREATE INDEX IF NOT EXISTS idx_ticket_coverage_key ON ticket_coverage(ticket_key, id)`,
+  // One "review the ticket" batch: which runs it queued, and the coverage that closed it.
+  `CREATE TABLE IF NOT EXISTS ticket_runs (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     ticket_key TEXT NOT NULL,
+     review_ids TEXT NOT NULL,
+     status TEXT NOT NULL,
+     coverage_id INTEGER,
+     created_at TEXT NOT NULL,
+     finished_at TEXT
+   )`,
+  `CREATE INDEX IF NOT EXISTS idx_ticket_runs_key ON ticket_runs(ticket_key, id)`,
 ];
 
 export function migrate(): void {
@@ -161,6 +216,9 @@ export function migrate(): void {
       'findings', 'anchor_status', `ALTER TABLE findings ADD COLUMN anchor_status TEXT NOT NULL DEFAULT 'unverified'`,
     );
     ensureColumn('findings', 'lens', `ALTER TABLE findings ADD COLUMN lens TEXT`);
+    // The code-only verdict; NULL on older rows, which only have the combined one.
+    ensureColumn('reviews', 'code_verdict', `ALTER TABLE reviews ADD COLUMN code_verdict TEXT`);
+    ensureColumn('reviews', 'code_can_merge', `ALTER TABLE reviews ADD COLUMN code_can_merge INTEGER`);
     // After ensureColumn: on an older database the column only exists from here on.
     db.prepare(`CREATE INDEX IF NOT EXISTS idx_reviews_group ON reviews(group_key, created_at)`).run();
     syncGroupKeys();
@@ -205,7 +263,7 @@ const REVIEW_COLUMNS = [
   'requirements_met', 'requirements_total', 'blocking_count', 'report_path', 'reviewer', 'model', 'error',
   'files_changed', 'additions', 'deletions', 'created_at', 'started_at', 'finished_at',
   'source', 'working_tree', 'base_reason', 'group_key',
-  'runner_pid', 'runner_started_at', 'reviewer_pgids',
+  'runner_pid', 'runner_started_at', 'reviewer_pgids', 'code_verdict', 'code_can_merge',
 ] as const satisfies readonly (keyof ReviewRow)[];
 
 /** Columns group_key is derived from; changing one of them re-derives it. */
@@ -238,6 +296,7 @@ export function createReview(input: CreateReviewInput): ReviewRow {
     // The creating process enqueues the row right away, so it owns it from
     // the first moment: no other process's recovery can see it unowned.
     runner_pid: SELF.pid, runner_started_at: SELF.startedAt, reviewer_pgids: null,
+    code_verdict: null, code_can_merge: null,
   };
   for (const column of REVIEW_COLUMNS) {
     const value = (input as Record<string, unknown>)[column];
