@@ -15,6 +15,12 @@ export const REQUEST_TIMEOUT_MS = 30_000;
 /** Starting a review resolves the input first (tracker lookup, branch listing). */
 export const SLOW_REQUEST_MS = 90_000;
 
+/**
+ * Starting a ticket review resolves the ticket, lists every repository's
+ * branches and compares the branches with each other, one sandbox run each.
+ */
+export const TICKET_REVIEW_REQUEST_MS = 300_000;
+
 /** The API base URL from the environment, without a trailing slash. */
 export function apiBaseUrl(env: NodeJS.ProcessEnv = process.env): string {
   const raw = (env.CODE_REVIEW_API_URL ?? '').trim() || DEFAULT_API_URL;
@@ -266,7 +272,7 @@ export class ApiClient {
 
   startTicketReview<T>(key: string, body: unknown): Promise<T> {
     return this.requestJson<T>(`/api/tickets/${encodeURIComponent(key)}/review`, {
-      method: 'POST', body, timeoutMs: SLOW_REQUEST_MS,
+      method: 'POST', body, timeoutMs: TICKET_REVIEW_REQUEST_MS,
     });
   }
 

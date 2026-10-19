@@ -90,6 +90,8 @@ export async function detectGroupParents(
       const prBase = opts.prBases?.get(memberKey(row.repo, row.branch)) ?? null;
       // A pull request base learnt earlier stays until a newer one is seen.
       if (!prBase && row.parent_reason === 'pr' && row.parent_branch) return null;
+      // A pull request against another branch names the parent; no compare is needed.
+      if (prBase && prBase !== def) return { parent: prBase, reason: 'pr', def };
       const safeCompare = (base: string): Promise<CompareResult | null> =>
         deps.compare(row.repo, base, row.branch).catch((err: unknown) => {
           logger.warn(`ticket ${key}: compare ${base}...${row.branch} failed: ${(err as Error).message}`);
