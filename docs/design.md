@@ -36,6 +36,7 @@ src/
   config.ts  types.ts  db.ts  logger.ts  events.ts  logSanitize.ts  gitNames.ts
   resolver.ts  prLinks.ts  localRepos.ts  gitSandbox.ts  remoteBranches.ts
   reviewRunner.ts  reportWriter.ts  findingCompare.ts  groupKey.ts  githubLinks.ts
+  ticketChains.ts  ticketStore.ts  ticketGroups.ts  coverage.ts  coverageView.ts
   queue.ts  processOwnership.ts  cli.ts  server.ts
   reviewers/types.ts  reviewers/index.ts  reviewers/shared.ts
   reviewers/claude.ts  reviewers/cursor.ts  reviewers/codex.ts  reviewers/grok.ts
@@ -43,14 +44,14 @@ src/
   trackers/index.ts  trackers/types.ts  trackers/adf.ts  trackers/html.ts
   trackers/linear.ts  trackers/jira.ts  trackers/github.ts
   trackers/azure.ts  trackers/youtrack.ts  trackers/urls.ts
-  routes/reviews.ts  routes/tickets.ts  routes/repos.ts  routes/previews.ts
+  routes/reviews.ts  routes/tickets.ts  routes/ticketGroups.ts  routes/repos.ts  routes/previews.ts
   preview/recipes.ts  preview/roles.ts  preview/ports.ts  preview/database.ts
   preview/steps.ts  preview/engine.ts  preview/store.ts  preview/events.ts
   mcp.ts  mcp/client.ts  mcp/server.ts  mcp/format.ts
   prompts/common-preamble.md  prompts/lens-common.md
   prompts/lens-correctness.md  prompts/lens-security.md
   prompts/lens-tests.md  prompts/lens-contracts.md
-  prompts/lens-regressions.md  prompts/synthesis.md
+  prompts/lens-regressions.md  prompts/synthesis.md  prompts/reanchor.md  prompts/coverage.md
   *.test.ts  testEnv.ts   # node:test suites (npm test)
 recipes.example/   # one documented, product-neutral preview recipe
 recipes/           # gitignored: the real preview recipes
@@ -457,6 +458,20 @@ extracted JSON, the synthesis JSON, and the re-anchor JSON. The queue writes
 them next to the report as `run-N-<ts>.lenses/<lens>.json`, `synthesis.json`,
 and `reanchor.json`.
 
+**Slices.** A review whose group key is a ticket (not the `repo#branch`
+fallback) is a slice of a ticket group. The queue passes `SliceInfo` (every
+branch of the group, parents first, with its base) to `runReview()`:
+`{{TICKET_SCOPE}}` in `common-preamble.md` lists the slices and tells every
+pass that work missing from this branch is not a finding, and `{{SLICE_RULES}}`
+in `synthesis.md` replaces the requirement parts of its steps: requirements
+are still listed (what THIS branch implements), but never drive the verdict.
+Both placeholders are empty for a branch without a group, so its prompts are
+unchanged.
+
+`normalize()` always derives `code_verdict` / `code_can_merge` from the
+findings alone (approve without a blocker or major; `blocked` only when
+synthesis said so and a blocker exists). For a slice, `verdict` / `can_merge`
+are the code ones. For a branch without a group the old rule stays:
 `normalize()` re-derives `can_merge` defensively (no blocker or major finding,
 no `partial` or `missing` requirement — `not_verifiable` does not block) and
 downgrades an `approve` verdict that contradicts it to `changes_requested`.
@@ -616,6 +631,111 @@ Every log line, of reviews and previews alike, goes through
 `sanitizeLogMessage()` first: ANSI escapes and C0 control characters would
 otherwise make a JSON response unparseable.
 
+```sql
+-- Ticket groups (added). A group per ticket key; its branches with the parent each is diffed against.
+CREATE TABLE ticket_groups (
+  key TEXT PRIMARY KEY, title TEXT, ticket_url TEXT,
+  requirements_text TEXT,         -- added to the ticket text of runs and coverage
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TABLE ticket_branches (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ticket_key TEXT NOT NULL REFERENCES ticket_groups(key) ON DELETE CASCADE,
+  repo TEXT NOT NULL, branch TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT 'github',
+  parent_branch TEXT,             -- the base: a group branch, an outside branch, or the default branch
+  parent_reason TEXT,             -- pr|detected|default|user|stored
+  default_branch TEXT,
+  position INTEGER NOT NULL DEFAULT 0,  -- order among siblings
+  pr_number INTEGER,
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  UNIQUE (ticket_key, repo, branch)
+);
+CREATE TABLE ticket_coverage (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ticket_key TEXT NOT NULL,
+  status TEXT NOT NULL,           -- running|done|failed
+  verdict TEXT,                   -- covered|needs_work
+  summary TEXT,
+  review_ids TEXT NOT NULL,       -- JSON: the branch runs the pass read
+  requirements_json TEXT,         -- JSON: [{ text, status, note, branches: [{ repo, branch, review_id, status, note, evidence: [{ file, line, anchor_status }] }] }]
+  reviewer TEXT, model TEXT, report_path TEXT, error TEXT, trigger TEXT,
+  created_at TEXT NOT NULL, finished_at TEXT
+);
+CREATE TABLE ticket_runs (           -- one "review the ticket" batch
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ticket_key TEXT NOT NULL,
+  review_ids TEXT NOT NULL,       -- JSON
+  status TEXT NOT NULL,           -- running|done (done once its runs settled and a coverage pass ended)
+  coverage_id INTEGER,
+  created_at TEXT NOT NULL, finished_at TEXT
+);
+-- reviews gains code_verdict TEXT and code_can_merge INTEGER (NULL on older rows).
+```
+
+The tables are created with `IF NOT EXISTS` and the columns with
+`ensureColumn()`, so an older database migrates in place. A group that
+predates them is built lazily: `syncMembersFromReviews()` adds every
+repo/branch of the group's runs that the group lacks, with the base of its
+latest run as a `stored` parent (never for a `repo#branch` fallback group).
+
+### Ticket groups (`ticketChains.ts`, `ticketStore.ts`, `ticketGroups.ts`)
+
+`ticketChains.ts` is pure: `orderChains()` builds one chain per repository, a
+depth-first walk from the branches whose parent is outside the group, so
+parents come before children (siblings by `position`, a loop cannot hide a
+branch); `wouldCycle()`; `linearParents()` for a hand-made order; and
+`chooseRemoteParent()`. `ticketStore.ts` reads and writes the rows.
+`ticketGroups.ts` holds the logic:
+
+- `detectGroupParents()` decides every eligible branch first (four at a time),
+  then applies the decisions to the whole graph and drops a decision that
+  would close a loop, so the result does not depend on the order. A `user`
+  parent is skipped unless `includeUser`; a learnt `pr` parent stays until a
+  newer PR base is seen. Local branches use `describeParent()`; pushed ones a
+  PR base other than the default branch, else `ghCompare()` (GitHub's
+  `compare/<base>...<head>` reduced to status and counts, in the sandbox) of
+  the default branch and of every sibling: the closest sibling that is
+  `ahead` wins when strictly closer than the default branch. A failed lookup
+  keeps the stored parent.
+- `joinGroup()` makes targets members and detects parents for new members'
+  repositories (`detect: 'new'`, used by `POST /api/reviews`) or for all
+  (`'all'`, used by a ticket review). `applyGroupBases()` turns a member into a
+  target diffed against its parent (`base_reason` `parent`, `chosen` for a
+  hand-set parent, `default`), unless the caller chose a base explicitly.
+- `setParentByHand()` and `setChainOrder()` refuse loops and unknown branches.
+- `ticketGroupView()` is what the ticket page and `get_ticket` show.
+
+### Ticket coverage (`coverage.ts`, `coverageView.ts`, `prompts/coverage.md`)
+
+`runCoverage(key)` collects every member in stack order with its latest
+finished run, changed files (`review_files`), and requirement checklist,
+writes a `running` coverage row before its first await, and runs one reviewer
+pass in an empty workspace under `DATA_DIR/coverage/` (the pass needs no code:
+everything is in the prompt). The answer is held to the group by
+`normalizeCoverage()`: a branch must be a member with a finished run (others
+are dropped with a warning), a requirement left without a branch is `missing`,
+and every evidence location is checked with `checkAnchor()` in that run's
+checkout when it is still on disk, else against its changed set only
+(`unverified` for a changed path, `off_diff` otherwise). The queue keeps the
+checkout of a finished slice for this (server only); after the pass the
+checkouts it read, and those of superseded runs, are removed, unless a live
+preview borrows one; a failed run's checkout stays for inspection as before.
+The pass writes `reports/<ticket>/coverage-<ts>-<id>.md`, refreshes the
+section between `<!-- ticket-coverage:start -->` and `:end` in each branch
+report, and closes the ticket runs whose reviews have all settled (also when
+the pass failed, so a waiter never hangs).
+
+`createCoverageScheduler()` debounces: every settled run (done, failed,
+cancelled) of a group restarts the group's timer (`COVERAGE_DEBOUNCE_MS`);
+when it fires and nothing of the group is active, one pass runs; a signal
+during a pass queues exactly one more. `runNow()` (manual recompute) skips the
+timer and joins a running pass. The server enables it at start and fails
+coverage rows a restart cut off; the CLI does not enable it.
+`coverageView.ts` is pure (types only): the group verdict and one branch's
+reading of a coverage (`here`, `elsewhere`, `nowhere`), shared with the MCP
+formatter.
+
 ### History groups (`src/groupKey.ts`)
 
 `group_key` is never taken from input; `createReview()` and `updateReview()`
@@ -756,9 +876,15 @@ Dark-first, compact. What each page offers is described in
   header is the location's tooltip), observations, the comparison
   with the previous run, a live log fed by SSE, and the Preview card. Actions: cancel, re-run with an optional reviewer and model,
   download report, copy report, delete.
-- **Ticket view** (`/ticket/:key`) — all runs of one group (`group_key`) across
-  repositories, grouped by repo and branch, newest first; each branch card
-  links the branch and its PR to GitHub.
+- **Ticket view** (`/ticket/:key`) — the ticket group (`GET
+  /api/ticket-groups/:key`): chains with parents, drag or ↑ ↓ (`PUT .../order`,
+  a linear chain), a parent menu per branch (`PUT .../parent`), the latest run
+  and code verdict per branch, the coverage table, and Review ticket /
+  Recompute coverage / Re-detect order; then all runs of the group across
+  repositories, newest first. It polls every 4 s while a run is active or
+  coverage is pending. A fallback `repo#branch` group shows its runs only.
+  The review page of a slice shows the code verdict banner and a Ticket
+  coverage card read from `ticket_group`.
 - **Previews** (`/previews`, only when enabled) — start a preview from a ticket
   or from custom branches per role, and follow every preview.
 
@@ -780,7 +906,8 @@ in `mcp/format.ts`; the tool list is in
 this server configured. Each reviewer's argv keeps user MCP servers out of the
 run, and as a second line of defence `mutationRefusal()` makes `start_review`,
 `rerun_review`, `cancel_review`, `start_preview`, and `stop_preview` refuse
-whenever `CODE_REVIEW_TOOL_REVIEWER` is set (and not `0`/`false`) in the MCP process's environment.
+(and `start_ticket_review`, `set_branch_parent`, and `get_ticket_coverage`
+with `recompute`) whenever `CODE_REVIEW_TOOL_REVIEWER` is set (and not `0`/`false`) in the MCP process's environment.
 
 **Failures are told apart.** `ApiUnreachableError` means nothing listens at
 the address (connection refused, unknown host, no route); only it suggests

@@ -85,6 +85,8 @@ const schema = z.object({
   // How many reviews (branches) run at once. The lens fan-out inside one
   // review is five lenses plus synthesis, so the process ceiling is this * 6.
   REVIEW_CONCURRENCY: z.coerce.number().int().positive().default(2),
+  // How long ticket coverage waits after a branch review settles, so a batch is covered once.
+  COVERAGE_DEBOUNCE_MS: z.coerce.number().int().min(0).default(15_000),
   DOCKER_BIN: z.string().min(1).default('docker'),
   GIT_IMAGE: z.string().min(1).default('code-review-tool-git:latest'),
   // --- local (unpushed) reviews; off unless a local clone is configured ---

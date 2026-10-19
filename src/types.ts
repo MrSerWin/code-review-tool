@@ -114,6 +114,9 @@ export interface LensOutput {
 
 // The exact JSON the synthesis pass must return.
 export interface ReviewOutput {
+  /** Set by the runner from the findings alone; absent on hand-built outputs. */
+  code_verdict?: Verdict;
+  code_can_merge?: boolean;
   summary: string;
   requirements: { text: string; status: RequirementStatus; evidence: string }[];
   findings: Finding[];
@@ -175,6 +178,12 @@ export interface ReviewRow {
   runner_started_at: string | null;
   /** JSON array of the reviewer processes running for it: `{ pgid, bin, spawnedAt }`. */
   reviewer_pgids: string | null;
+  /**
+   * The verdict on this branch's code alone: findings only, never the ticket
+   * requirements. NULL on rows written before it existed.
+   */
+  code_verdict: Verdict | null;
+  code_can_merge: number | null;
 }
 
 /** `active`: a run is queued/fetching/reviewing; `failed`: some branch's latest run failed; `done`: see db.ts. */
@@ -332,4 +341,99 @@ export interface PreviewLogRow {
   ts: string;
   level: LogLevel;
   message: string;
+}
+
+// --- ticket groups and coverage ---
+
+/** How the parent (base) of a branch in a ticket group was picked. */
+export const PARENT_REASONS = ['pr', 'detected', 'default', 'user', 'stored'] as const;
+export type ParentReason = (typeof PARENT_REASONS)[number];
+
+/** Mirrors a row of the `ticket_groups` table. */
+export interface TicketGroupRow {
+  key: string;
+  title: string | null;
+  ticket_url: string | null;
+  /** Pasted requirements or approved decisions, added to the ticket text for coverage. */
+  requirements_text: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Mirrors a row of the `ticket_branches` table: one branch of a ticket group. */
+export interface TicketBranchRow {
+  id: number;
+  ticket_key: string;
+  repo: string;
+  branch: string;
+  source: ReviewSource;
+  /** The base the branch is diffed against: another branch of the group, an outside branch, or the default branch. */
+  parent_branch: string | null;
+  parent_reason: ParentReason | null;
+  default_branch: string | null;
+  /** Tie-breaker among siblings with the same parent; lower first. */
+  position: number;
+  pr_number: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export type CoverageStatus = 'covered' | 'partial' | 'missing';
+export type CoverageVerdict = 'covered' | 'needs_work';
+export type CoverageRunStatus = 'running' | 'done' | 'failed';
+
+/** One place a branch implements a requirement, checked like a finding anchor. */
+export interface CoverageEvidence {
+  file: string;
+  line: number | null;
+  anchor_status: AnchorStatus;
+}
+
+/** One branch's share of a requirement. */
+export interface CoverageBranch {
+  repo: string;
+  branch: string;
+  review_id: number | null;
+  status: Exclude<CoverageStatus, 'missing'>;
+  note: string;
+  evidence: CoverageEvidence[];
+}
+
+export interface CoverageRequirement {
+  text: string;
+  status: CoverageStatus;
+  note: string;
+  branches: CoverageBranch[];
+}
+
+/** Mirrors a row of the `ticket_coverage` table. */
+export interface TicketCoverageRow {
+  id: number;
+  ticket_key: string;
+  status: CoverageRunStatus;
+  verdict: CoverageVerdict | null;
+  summary: string | null;
+  /** JSON array of the branch review ids the pass read. */
+  review_ids: string;
+  /** JSON array of `CoverageRequirement`. */
+  requirements_json: string | null;
+  reviewer: string | null;
+  model: string | null;
+  report_path: string | null;
+  error: string | null;
+  trigger: string | null;
+  created_at: string;
+  finished_at: string | null;
+}
+
+/** Mirrors a row of the `ticket_runs` table: one "review the ticket" batch. */
+export interface TicketRunRow {
+  id: number;
+  ticket_key: string;
+  /** JSON array of the review ids queued by the batch. */
+  review_ids: string;
+  status: 'running' | 'done';
+  coverage_id: number | null;
+  created_at: string;
+  finished_at: string | null;
 }

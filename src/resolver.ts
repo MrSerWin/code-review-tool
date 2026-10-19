@@ -9,7 +9,8 @@ import type { ResolvedTarget, TicketInfo } from './types.js';
 
 const defaultBranchCache = new Map<string, string>();
 
-async function defaultBranch(repo: string): Promise<string> {
+/** The repository's default branch on GitHub, cached per process. */
+export async function defaultBranch(repo: string): Promise<string> {
   assertAllowedRepo(repo);
   const cached = defaultBranchCache.get(repo);
   if (cached) return cached;

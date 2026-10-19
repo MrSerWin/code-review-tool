@@ -29,6 +29,10 @@ import { subscribe } from '../events.js';
 import { cancelReview, enqueueReview } from '../queue.js';
 import { rawOutputDir } from '../reportWriter.js';
 import { resolveTargets } from '../resolver.js';
+import { coverageForReview, coveragePending } from '../coverage.js';
+import { fallbackGroupKey, groupKeyFor } from '../groupKey.js';
+import { applyGroupBases, joinGroup } from '../ticketGroups.js';
+import { getTicketBranch, latestDoneCoverage, parseCoverageRequirements, syncMembersFromReviews } from '../ticketStore.js';
 import type { ResolvedTarget, ReviewRow, TicketInfo } from '../types.js';
 
 const ACTIVE = new Set(['queued', 'fetching', 'reviewing']);
@@ -79,7 +83,7 @@ const groupsQuery = z.object({
   offset: z.coerce.number().int().min(0).optional(),
 });
 
-function startRun(
+export function startRun(
   target: ResolvedTarget,
   ticket: TicketInfo | null,
   reviewerName: string | undefined,
@@ -101,7 +105,7 @@ function startRun(
     pr_number: target.prNumber ?? null,
     source: target.source ?? 'github',
     working_tree: target.source === 'local' && target.includeWorkingTree ? 1 : 0,
-    base_reason: target.source === 'local' ? target.baseReason ?? null : null,
+    base_reason: target.baseReason ?? null,
     status: 'queued',
     reviewer: reviewer.name,
     model: model ?? reviewer.defaultModel,
@@ -144,6 +148,13 @@ export async function reviewRoutes(app: FastifyInstance): Promise<void> {
     }
 
     if (chosen.length === 0) return reply.code(400).send({ error: 'No targets to review' });
+
+    // A branch of a ticket joins the ticket's group and is diffed against its parent there.
+    try {
+      chosen = await withGroupBases(chosen, ticket, Boolean(baseBranch?.trim()));
+    } catch (err) {
+      req.log?.warn?.(`ticket group: ${(err as Error).message}`);
+    }
 
     try {
       const reviews = chosen.map((t) => startRun(t, ticket, reviewer, model));
@@ -208,6 +219,7 @@ export async function reviewRoutes(app: FastifyInstance): Promise<void> {
       logs: getLogs(review.id),
       comparison,
       links: githubLinks(config.GITHUB_ORG, review),
+      ticket_group: ticketGroupContext(review),
     };
   });
 
@@ -253,22 +265,26 @@ export async function reviewRoutes(app: FastifyInstance): Promise<void> {
     let review: ReviewRow;
     try {
       const choice = resolveRerunChoice(prev, body.data);
-      review = startRun(
-        {
-          repo: prev.repo,
-          branch: prev.branch,
-          baseBranch: prev.base_branch,
-          prNumber: prev.pr_number ?? null,
-          // A local re-run reads the clone again, so new commits are picked up.
-          source: prev.source === 'local' ? 'local' : 'github',
-          includeWorkingTree: prev.source === 'local' && prev.working_tree === 1,
-          // The stored base is kept as-is (it may have been chosen by hand); never re-detected.
-          ...(prev.source === 'local' && prev.base_reason ? { baseReason: prev.base_reason } : {}),
-        },
-        ticket,
-        choice.reviewer.name,
-        choice.model,
-      );
+      let target: ResolvedTarget = {
+        repo: prev.repo,
+        branch: prev.branch,
+        baseBranch: prev.base_branch,
+        prNumber: prev.pr_number ?? null,
+        // A local re-run reads the clone again, so new commits are picked up.
+        source: prev.source === 'local' ? 'local' : 'github',
+        includeWorkingTree: prev.source === 'local' && prev.working_tree === 1,
+        // The stored base is kept as-is (it may have been chosen by hand); never re-detected.
+        ...(prev.base_reason ? { baseReason: prev.base_reason } : {}),
+      };
+      // A branch of a ticket group follows its parent there, which may have been changed since.
+      // A base chosen by hand for the run itself is kept, unless the group's parent was set by hand later.
+      if (prev.group_key && prev.group_key !== fallbackGroupKey(prev.repo, prev.branch)) {
+        const member = getTicketBranch(prev.group_key, prev.repo, prev.branch);
+        if (member && (prev.base_reason !== 'chosen' || member.parent_reason === 'user')) {
+          [target] = applyGroupBases(prev.group_key, [target]) as [ResolvedTarget];
+        }
+      }
+      review = startRun(target, ticket, choice.reviewer.name, choice.model);
     } catch (err) {
       return reply.code(400).send({ error: (err as Error).message });
     }
@@ -337,4 +353,58 @@ export async function reviewRoutes(app: FastifyInstance): Promise<void> {
     req.raw.on('error', cleanup);
 
   });
+}
+
+/**
+ * The group key of a target, or null when it has none: the ticket key, else a
+ * ticket-like key from the branch name (as the history groups it).
+ */
+function ticketGroupOf(target: ResolvedTarget, ticket: TicketInfo | null): string | null {
+  const key = groupKeyFor({ ticket_key: ticket?.key || null, repo: target.repo, branch: target.branch });
+  return key === fallbackGroupKey(target.repo, target.branch) ? null : key;
+}
+
+/**
+ * Each target of a ticket joins its group (parents are detected for new
+ * members) and gets the group's parent as its base, unless a base was chosen
+ * explicitly.
+ */
+export async function withGroupBases(
+  targets: ResolvedTarget[],
+  ticket: TicketInfo | null,
+  explicitBase: boolean,
+): Promise<ResolvedTarget[]> {
+  const out: ResolvedTarget[] = [];
+  const byGroup = new Map<string, ResolvedTarget[]>();
+  for (const t of targets) {
+    const key = ticketGroupOf(t, ticket);
+    if (!key) continue;
+    const list = byGroup.get(key) ?? [];
+    list.push(t);
+    byGroup.set(key, list);
+  }
+  for (const [key, list] of byGroup) {
+    await joinGroup(key, ticket?.key === key ? ticket : null, list, undefined, { detect: 'new' });
+  }
+  for (const t of targets) {
+    const key = ticketGroupOf(t, ticket);
+    out.push(key ? applyGroupBases(key, [t], { explicitBase: explicitBase || t.baseReason === 'chosen' })[0]! : t);
+  }
+  return out;
+}
+
+/** For a review of a ticket group: its place in the group and the group's latest coverage, seen from it. */
+function ticketGroupContext(review: ReviewRow) {
+  if (!review.group_key || review.group_key === fallbackGroupKey(review.repo, review.branch)) return null;
+  const key = review.group_key;
+  syncMembersFromReviews(key);
+  const member = getTicketBranch(key, review.repo, review.branch);
+  const coverage = latestDoneCoverage(key);
+  return {
+    key,
+    parent: member?.parent_branch ?? null,
+    parent_reason: member?.parent_reason ?? null,
+    coverage: coverage ? coverageForReview(review, coverage, parseCoverageRequirements(coverage)) : null,
+    coverage_pending: coveragePending(key),
+  };
 }

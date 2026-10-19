@@ -103,6 +103,8 @@ guessed. Verify before you keep anything.
      requirements do not block a merge on their own, but say so in the
      conclusion.
 
+{{SLICE_RULES}}
+
 # Output
 
 End your answer with exactly ONE fenced ```json block and nothing after it.

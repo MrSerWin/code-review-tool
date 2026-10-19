@@ -42,6 +42,10 @@ How it is built inside is described in [docs/design.md](docs/design.md).
    pass (see [Findings and their anchors](#findings-and-their-anchors)).
 5. **Report.** The verdict, requirement checklist, findings, and non-blocking
    observations are stored in SQLite and rendered to a Markdown report.
+6. **Ticket coverage.** For a ticket split into several branches, each branch
+   is diffed against its parent and judged on its own code; one more pass then
+   checks the ticket requirements across all branches (see
+   [Tickets split into several branches](#tickets-split-into-several-branches)).
 
 ### Findings and their anchors
 
@@ -122,6 +126,7 @@ truth for every default; `.env.example` lists each variable with its default.
 | `GROK_REVIEW_MODEL` | no | `grok-4.7` | Default model when the reviewer is Grok |
 | `REVIEW_TIMEOUT_MS` | no | `1800000` | Hard timeout for one review process (each lens and the synthesis pass) |
 | `REVIEW_CONCURRENCY` | no | `2` | How many reviews run at once. Each review fans out to 5 lens processes plus a synthesis pass, so the process ceiling is this value * 6 |
+| `COVERAGE_DEBOUNCE_MS` | no | `15000` | How long ticket coverage waits after a branch review of the group settles, so a batch is covered once |
 | `DOCKER_BIN` | no | `docker` | Path to the Docker CLI |
 | `GIT_IMAGE` | no | `code-review-tool-git:latest` | Sandbox image tag |
 | `LOCAL_REPOS_DIR` | no | — | Directory holding local clones named like the `ALLOWED_REPOS` entries; enables [local reviews](#reviewing-a-local-unpushed-branch) |
@@ -277,6 +282,62 @@ npm run review -- 'local:my-service#feat/b' --base feat/a     # diff against an 
 - A local review's **Preview** card copies the reviewed branch from the clone
   again; see [Local branches in a preview](#local-branches-in-a-preview).
 
+### Tickets split into several branches
+
+A ticket is often split into several branches: a backend and a frontend
+repository, and stacked slices (`main` -> `feat/a` -> `feat/b`). The tool keeps
+them as a **ticket group**: per repository, a chain of branches, each with the
+**parent** it is diffed against.
+
+- **Membership.** Every branch reviewed for a ticket joins its group (the
+  ticket key, or the ticket-like key in the branch name). Groups older than this
+  feature are built from their runs, with the base of each branch's latest run
+  as its parent (`stored`).
+- **Parents.** Per branch, in order: a parent set by hand (`user`, kept until
+  you reset it); the base of the branch's pull request when it is not the
+  default branch (`pr`); for a pushed branch, the closest other branch of the
+  group in the same repository whose tip it contains, from GitHub's compare
+  API, when it is strictly closer than the default branch (`detected`); for a
+  local branch, the detected parent of the clone (see above); otherwise the
+  default branch (`default`). A parent that would close a loop is refused.
+- **Review the ticket.** **Review ticket** on the ticket page, `POST
+  /api/tickets/<key>/review`, or the MCP tool `start_ticket_review` resolves
+  the ticket again, re-detects the parents, and queues every branch of every
+  chain parents first, each diffed against its parent, as ordinary single-branch
+  runs. A branch whose parent has no finished review yet still runs; the answer
+  says so. `requirementsText` is added to the ticket text of every run and of
+  the coverage (approved decisions, scope notes). `start_review` of one branch
+  works as before; when the branch belongs to a group, its base defaults to
+  the group's parent (an explicit `baseBranch` wins), and so does a re-run.
+- **Code verdict per branch.** A branch of a group is told which other slices
+  exist. A requirement it does not implement is not a finding: its checklist
+  marks it `missing` for this branch, and its verdict (`code_verdict`, also
+  stored as `verdict`) comes from its findings only: approve when there is no
+  blocker or major finding. A branch without a ticket keeps the old combined
+  verdict, in which unmet requirements block the merge.
+- **Coverage per ticket.** Once every queued run of a group has settled (15 s
+  after the last one, `COVERAGE_DEBOUNCE_MS`, so a batch is covered once), one
+  more reviewer pass (`src/prompts/coverage.md`) reads the ticket and every
+  branch in stack order: its changed files, review summary, and requirement
+  checklist. Per requirement it returns `covered`, `partial`, or `missing`
+  and the branches that cover it, with evidence `file:line` that is checked
+  like a finding anchor in that branch's checkout (kept on disk for this pass,
+  then removed). The group verdict is `covered` when every requirement is,
+  else `needs_work`. A branch with no finished review covers nothing, so a
+  planned slice that has no branch yet shows as "not covered anywhere".
+  **Recompute coverage**, `POST /api/tickets/<key>/coverage`, or
+  `get_ticket_coverage` with `recompute: true` runs a pass at once.
+- **Where it shows.** The ticket page lists the chains (parent, why it was
+  picked, the latest run and code verdict per branch; drag or ↑ ↓ to make a
+  repository one chain in that order, or pick a parent per branch), the
+  coverage table, and the actions. A branch's review page shows its code
+  verdict and the coverage seen from it: "in this branch", "in
+  `repo#branch`", or "not covered anywhere". Its report gets a Ticket coverage
+  section, refreshed after each pass, and every pass writes
+  `reports/<ticket>/coverage-<ts>-<id>.md`.
+- The CLI reviews branches the same way but does not run coverage (it exits
+  when its reviews end); the server's next pass, or a recompute, covers them.
+
 ## Usage
 
 Development, with hot reload:
@@ -354,8 +415,12 @@ the requirements inferred from the change.
   opens the ticket in its tracker, and the ticket key in the Run card has a ↗
   to it as well; neither shows for pasted requirements. Actions: **Cancel** while it runs; afterwards **Re-run**,
   **Download**, **Copy report**, and **Delete**.
-- **Ticket page** (`/ticket/<key>`) — every run of one group across
-  repositories, grouped by repository and branch, newest first.
+- **Ticket page** (`/ticket/<key>`) — the ticket group: its chains with
+  parents and the latest run of each branch, the ticket coverage, **Review
+  ticket**, **Recompute coverage** and **Re-detect order** (see
+  [Tickets split into several branches](#tickets-split-into-several-branches)),
+  then every run of the group, grouped by repository and branch, newest first.
+  A `repo#branch` group without a ticket shows its runs only.
 - **Previews** (`/previews`) — only when previews are enabled; see
   [below](#preview-environments-optional).
 
@@ -432,12 +497,19 @@ authentication. Errors come back as `{ "error": "…" }` with a 4xx or 5xx statu
 | POST | `/api/reviews` | `{ input, targets?, reviewer?, model?, requirementsText?, includeWorkingTree?, baseBranch? }` | `201 { reviews }`: one queued run per target; `targets` narrows a ticket to some of its branches |
 | GET | `/api/reviews` | `?q=&ticket=&repo=&branch=&group=&limit=&offset=` | `{ reviews, total }`, newest first; `limit` 1–500, default 50; each row has `links: { branch, pr }`, its GitHub URLs (`pr` null without a PR number) |
 | GET | `/api/review-groups` | `?q=&status=active\|failed\|done&limit=&offset=` | `{ groups, total }`, most recently active group first; `limit` 1–100, default 20; each branch has `prNumber` (the newest any of its runs knew) and `links: { branch, pr }` |
-| GET | `/api/reviews/:id` | | `{ review, requirements, findings, observations, changed_files, logs, comparison, links }`; `links` holds the GitHub URLs (`repo`, `branch`, `pr`, `compare`, `head`, `base`); `changed_files` is the changed set the anchor check used (`path`, `status`, `old_path`, `additions`, `deletions`) |
+| GET | `/api/reviews/:id` | | `{ review, requirements, findings, observations, changed_files, logs, comparison, links, ticket_group }`; `ticket_group` (null without a ticket) has the group key, this branch's parent, and the latest coverage with each requirement's `where` (`here`, `elsewhere`, `nowhere`) seen from this branch; `links` holds the GitHub URLs (`repo`, `branch`, `pr`, `compare`, `head`, `base`); `changed_files` is the changed set the anchor check used (`path`, `status`, `old_path`, `additions`, `deletions`) |
 | GET | `/api/reviews/:id/report` | | the Markdown report (`text/markdown`) |
 | GET | `/api/reviews/:id/events` | | server-sent events: `status`, `log`, and `done` messages |
 | POST | `/api/reviews/:id/rerun` | `{ reviewer?, model? }` | `201 { review }`: a new run of the same branch |
 | POST | `/api/reviews/:id/cancel` | | `{ review }`; `409` when it is not queued or running |
 | DELETE | `/api/reviews/:id` | | `{ ok: true }`; cancels it if needed, deletes the row, the report file, and its raw pass outputs |
+| GET | `/api/ticket-groups/:key` | `?run=` | `{ group, coverage, latest_coverage, coverage_pending, run }`: the chains per repository in stack order (each branch with `parent`, `parentReason`, `depth`, `latest` and `latestDone` run with `code_verdict`), the latest finished coverage, a newer running or failed pass, and the latest (or the given) ticket review run; `404` without a group |
+| GET | `/api/ticket-groups/:key/coverage/report` | `?id=` | the coverage report (`text/markdown`) |
+| POST | `/api/tickets/:key/review` | `{ reviewer?, model?, requirementsText?, branches?, refresh? }` | `201 { run, reviews, notes, group, coverage, ... }`: one queued run per branch, parents first, each against its parent; `branches` (`["repo#branch"]`) narrows it; `refresh: false` skips the tracker; this can take minutes (ticket lookup, branch listing, compare) |
+| POST | `/api/tickets/:key/coverage` | `{ reviewer?, model? }` | `202 { started, coverage }`: a coverage pass now; joins a running one |
+| PUT | `/api/tickets/:key/parent` | `{ repo, branch, parent }` | the ticket payload; `parent: null` = the default branch; `400` for a loop |
+| PUT | `/api/tickets/:key/order` | `{ repo, branches, root? }` | the ticket payload: the branches become one chain in that order |
+| POST | `/api/tickets/:key/detect` | `{ reset? }` | `{ detected, ...ticket payload }`: detect parents again; `reset` also replaces parents set by hand |
 | GET | `/api/recipes` | | `{ enabled, dir, recipes, errors }`: loaded preview recipes, and every invalid one with the reason |
 | GET | `/api/previews` | `?reviewId=&ticket=&recipe=&limit=&offset=` | `{ previews, total }`, newest first; `limit` 1–500, default 50 |
 | GET | `/api/previews/:id` | | `{ preview, logs }` |
@@ -467,12 +539,17 @@ every tool returns an error saying so.
 | `list_local_repos` | `repo?`, `maxBranches?` (default 30) | local clones: repo name, path, checked-out branch, default base, dirty state, branches with unpushed / ahead / behind |
 | `detect_base` | `repo`, `branch` | the base a local branch would be diffed against (detected parent or default branch) |
 | `start_review` | `input`, `reviewer?`, `model?`, `baseBranch?`, `includeWorkingTree?`, `requirementsText?`, `targets?` | start a review of any [input](#inputs); a ticket with several branches starts one review per branch, unless `targets` (`["repo#branch", …]`) narrows it; returns the review ids at once |
-| `get_review` | `id`, `maxFindings?` (default 50) | status and, once done, verdict, `can_merge`, requirements met/total, severity counts, findings (most severe first, capped; each with `kind`, `cause`, and `anchor_status`) |
+| `get_review` | `id`, `maxFindings?` (default 50) | status and, once done, verdict, `code_verdict`, `ticket_group` (the coverage seen from this branch), `can_merge`, requirements met/total, severity counts, findings (most severe first, capped; each with `kind`, `cause`, and `anchor_status`) |
 | `wait_for_review` | `id`, `timeoutSec?` (default 50, max 600), `pollSec?` (default 5), `maxFindings?` | poll until the review finishes or `timeoutSec` passes; returns `finished`, call again while it is `false` |
 | `get_report` | `id`, `maxChars?` (default 40000) | the Markdown report of a finished review, truncated past `maxChars` |
 | `list_reviews` | `q?`, `repo?`, `ticket?`, `group?`, `status?`, `limit?` (default 20) | recent runs, newest first; `status` is one status or `active` |
 | `list_review_groups` | `q?`, `status?` (`active`, `failed`, `done`), `limit?` (default 10, max 50), `offset?` | the history grouped by ticket (see [Grouping](#the-web-ui)), with the latest run of each branch, paged |
 | `cancel_review` | `id` | cancel a queued or running review |
+| `start_ticket_review` | `ticket`, `reviewer?`, `model?`, `requirementsText?`, `branches?`, `refresh?` | review every branch of a ticket, parents first, each against its parent; returns the run id, the review ids, and notes |
+| `wait_for_ticket_review` | `ticket`, `runId?`, `timeoutSec?` (default 50, max 600), `pollSec?`, `maxRequirements?` | poll until every run of the batch ended and its coverage was computed; returns `finished`, the chains with each branch's latest run and `code_verdict`, and the coverage |
+| `get_ticket` | `ticket`, `maxRequirements?` | the chains, the latest run per branch, the coverage, `coverage_pending`, and the latest run |
+| `get_ticket_coverage` | `ticket`, `recompute?`, `reviewer?`, `model?`, `maxRequirements?` | the coverage: verdict, and per requirement its status and covering branches with evidence; `recompute: true` starts a pass |
+| `set_branch_parent` | `ticket`, `repo`, `branch` + `parent`, or `order` (+ `root?`) | set one branch's parent (null = default branch), or make the repository one chain in the given order |
 | `rerun_review` | `id`, `reviewer?`, `model?` | run a review again, optionally with another reviewer or model |
 | `list_recipes` | | preview recipes: name, roles (role -> repo), database, ready timeout; `enabled` is false when previews are off |
 | `start_preview` | `recipe?`, `roles?` (`[{role, branch?, base?, local?}]`), `review_id?`, `ticket?`, `dump_mode?` | start a [preview](#preview-environments-optional); a role runs a local branch with `branch: "local:<repo>#<branch>"` or `local: true`; returns the preview id at once |
@@ -482,7 +559,9 @@ every tool returns an error saying so.
 | `list_previews` | `review_id?`, `ticket?`, `recipe?`, `status?` (one status or `live`), `limit?` (default 20) | recent previews, newest first |
 
 A review takes minutes, so the usual flow is `start_review`, then
-`wait_for_review` in a loop, then `get_review` or `get_report`. Review results
+`wait_for_review` in a loop, then `get_review` or `get_report`. For a ticket
+split into several branches: `start_ticket_review`, `wait_for_ticket_review` in
+a loop, then `get_ticket`. Review results
 carry each review's page URL in the web UI. A preview follows the same pattern:
 `start_preview`, `wait_for_preview` until `finished`, open `web_url` (or an
 entry of `links`, such as the backend or its admin), then
@@ -549,8 +628,9 @@ MCP dispatcher tools (`search_tool`, `use_tool`) disallowed, every MCP tool
 denied (`--deny 'mcp__*'`), and its Claude, Cursor, and managed MCP imports
 switched off. As a second line of defence each reviewer process gets
 `CODE_REVIEW_TOOL_REVIEWER=1`, and the MCP server refuses `start_review`,
-`rerun_review`, `cancel_review`, `start_preview`, and `stop_preview` when it
-sees it; the read-only tools stay available.
+`rerun_review`, `cancel_review`, `start_ticket_review`, `set_branch_parent`,
+`get_ticket_coverage` with `recompute`, `start_preview`, and `stop_preview`
+when it sees it; the read-only tools stay available.
 
 ## Preview environments (optional)
 
