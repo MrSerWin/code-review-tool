@@ -25,16 +25,22 @@ Changed files (the changed set; renames are listed under their new path):
 The tool checked every anchor and these failed. For each one, find the right
 location:
 
-1. If the problem sits in a changed line, point `file` and `line` at that line
-   in the changed set and set `kind` to `diff`.
-2. If the problem sits in untouched code that the diff broke, keep `file` and
+1. If the problem sits in untouched code that the diff broke, keep `file` and
    `line` at that untouched site (fix them if they are wrong), set `kind` to
    `regression`, `stale_doc` (documentation, comments, docstrings), or
    `consumer` (a parser or client of a changed shape), and set `cause_file` and
    `cause_line` to the changed line that causes it. `cause_file` MUST be in the
    changed set above.
+2. If the problem sits in a changed line and the untouched location adds
+   nothing, point `file` and `line` at that line in the changed set and set
+   `kind` to `diff`.
 3. If you cannot find a correct location, return the finding with its current
    values. Do not guess.
+
+A finding that is "outside the changed set" names a real place. It is usually
+the dependent site the finding is about: prefer rule 1 and keep it, adding the
+kind and the cause, over moving the finding into the diff. The reader needs
+both places.
 
 Search with Grep and Glob, use `git diff {{BASE_SHA}}..HEAD -- <file>` for the
 hunks, and give the hunk header (`@@ -a,b +c,d @@`) as `hunk` for a `diff`
