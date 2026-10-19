@@ -9,9 +9,13 @@ import { killProcessGroups, killProcessGroupsNow, type RecordedGroup } from './p
 import { getReviewer } from './reviewers/index.js';
 import { parseAnthropicStreamLine } from './reviewers/anthropicStream.js';
 import type { ReviewerDefinition } from './reviewers/types.js';
+import {
+  anchorFindings, changedFilesFromPaths, createAnchorContext, reanchorOutputSchema, type AnchorRunResult,
+} from './anchors.js';
+import { anchorFields, attributeLenses, normalizeLens } from './findingFields.js';
 import { LENS_NAMES } from './types.js';
 import type {
-  CheckoutResult, LensName, LensOutput, OnLog, ReviewOutput, ReviewRow, TicketInfo,
+  ChangedFile, CheckoutResult, LensName, LensOutput, OnLog, ReviewOutput, ReviewRow, TicketInfo,
 } from './types.js';
 
 export interface PreviousFinding {
@@ -39,6 +43,8 @@ export interface RunReviewOptions {
    * exits, so the caller can persist them for orphan cleanup after a crash.
    */
   onProcessGroups?: (groups: RecordedGroup[]) => void;
+  /** Use this reviewer definition instead of looking one up by name; for tests. */
+  reviewerDefinition?: ReviewerDefinition;
 }
 
 const requirementSchema = z.object({
@@ -58,6 +64,8 @@ const findingSchema = z.object({
   why: z.string().nullish().transform((v) => v ?? ''),
   suggestion: z.string().nullish().transform((v) => v ?? ''),
   snippet: z.string().nullish().transform((v) => v ?? null),
+  ...anchorFields,
+  lens: z.unknown().optional().transform(normalizeLens),
 });
 
 const observationSchema = z.object({
@@ -97,6 +105,7 @@ export const PROMPT_FILES = [
   'lens-common.md',
   ...LENS_NAMES.map((lens) => `lens-${lens}.md`),
   'synthesis.md',
+  'reanchor.md',
 ] as const;
 
 const cachedTemplates = new Map<string, string>();
@@ -152,6 +161,11 @@ export async function buildLensPrompt(lens: LensName, vars: PromptVars): Promise
     loadPromptFile('lens-common.md'),
   ]);
   return [preamble, mandate, tail].map((t) => renderTemplate(t, values)).join('\n\n');
+}
+
+export async function buildReanchorPrompt(vars: PromptVars, findingsBlock: string): Promise<string> {
+  const values = { ...promptValues(vars), FINDINGS: findingsBlock };
+  return renderTemplate(await loadPromptFile('reanchor.md'), values);
 }
 
 export async function buildSynthesisPrompt(vars: PromptVars, lensOutputs: string): Promise<string> {
@@ -215,9 +229,23 @@ function renderTicket(ticket: TicketInfo | null, review: RunnableReview): string
 
 const MAX_LISTED_FILES = 300;
 
-function renderChangedFiles(checkout: CheckoutResult): string {
-  const files = checkout.changedFiles ?? [];
-  const head = files.slice(0, MAX_LISTED_FILES).map((f) => `- \`${f}\``);
+const STATUS_NOTE: Record<string, string> = { A: ' (added)', D: ' (deleted)', T: ' (type changed)' };
+
+/** The changed files of a checkout, with statuses when the checkout has them. */
+export function checkoutChangedFiles(checkout: CheckoutResult): ChangedFile[] {
+  return checkout.changedFileList ?? changedFilesFromPaths(checkout.changedFiles ?? []);
+}
+
+function renderChangedFile(f: ChangedFile): string {
+  if ((f.status === 'R' || f.status === 'C') && f.old_path) {
+    return `- \`${f.path}\` (${f.status === 'R' ? 'renamed' : 'copied'} from \`${f.old_path}\`)`;
+  }
+  return `- \`${f.path}\`${STATUS_NOTE[f.status] ?? ''}`;
+}
+
+export function renderChangedFiles(checkout: CheckoutResult): string {
+  const files = checkoutChangedFiles(checkout);
+  const head = files.slice(0, MAX_LISTED_FILES).map(renderChangedFile);
   if (files.length > MAX_LISTED_FILES) {
     head.push(`- … and ${files.length - MAX_LISTED_FILES} more files (use \`git diff --stat\`)`);
   }
@@ -252,6 +280,18 @@ export interface LensResult {
   lens: LensName;
   output: LensOutput | null;
   error: string | null;
+  /** The JSON object the lens answered, before schema defaults; null when it failed. */
+  raw?: unknown;
+}
+
+/** What `runReview` returns: the review, plus the material kept beside the report. */
+export interface ReviewRunOutput extends ReviewOutput {
+  lensResults: LensResult[];
+  /** The synthesis answer as returned, before validation and normalisation. */
+  synthesisRaw: unknown;
+  /** The re-anchor answer as returned; null when the pass did not run or failed. */
+  reanchorRaw: unknown;
+  anchors: AnchorRunResult;
 }
 
 export interface PassOptions {
@@ -334,18 +374,19 @@ export function killAllReviewersNow(): void {
   killProcessGroupsNow(liveGroups);
 }
 
-/** Run one review pass and parse its JSON block, retrying once. */
+/** Run one review pass and parse its JSON block, retrying once by default. */
 async function runPass<T>(
   label: string,
   basePrompt: string,
   schema: z.ZodType<T>,
   onLog: OnLog,
   opts: PassOptions,
-): Promise<T> {
+  attempts = 2,
+): Promise<{ data: T; json: unknown }> {
   let lastRaw = '';
   let lastError = '';
 
-  for (let attempt = 1; attempt <= 2; attempt += 1) {
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
     const prompt = attempt === 1 ? basePrompt : correctivePrompt(basePrompt, lastError);
     if (attempt === 2) onLog('warn', `${label}: output was not valid JSON. Retrying once.`);
 
@@ -364,7 +405,7 @@ async function runPass<T>(
         .join('; ');
       continue;
     }
-    return parsed.data;
+    return { data: parsed.data, json };
   }
 
   throw new Error(
@@ -393,13 +434,13 @@ async function runLenses(
       onLog('info', `lens ${lens}: started`);
       try {
         const prompt = await buildLensPrompt(lens, vars);
-        const output = await runPass(`lens ${lens}`, prompt, lensOutputSchema, lensLog, opts);
+        const { data: output, json } = await runPass(`lens ${lens}`, prompt, lensOutputSchema, lensLog, opts);
         onLog(
           'info',
           `lens ${lens}: ${countLabel(output.findings.length, 'finding')}, ` +
             `${countLabel(output.observations.length, 'observation')}`,
         );
-        return { lens, output, error: null };
+        return { lens, output, error: null, raw: json };
       } catch (err) {
         // A cancelled run must abort the whole review, not degrade it.
         if (opts.signal?.aborted) throw err;
@@ -417,14 +458,14 @@ export async function runReview(
   ticket: TicketInfo | null,
   onLog: OnLog,
   opts: RunReviewOptions = {},
-): Promise<ReviewOutput> {
+): Promise<ReviewRunOutput> {
   const vars: PromptVars = {
     ticket,
     review,
     checkout,
     previousFindings: opts.previousFindings ?? [],
   };
-  const reviewer = getReviewer(opts.reviewer ?? review.reviewer);
+  const reviewer = opts.reviewerDefinition ?? getReviewer(opts.reviewer ?? review.reviewer);
   const model = opts.model ?? review.model ?? reviewer.defaultModel;
   const passOpts: PassOptions = {
     dir: checkout.dir,
@@ -451,7 +492,7 @@ export async function runReview(
   onLog('info', `synthesis: started with ${countLabel(totalCandidates, 'candidate finding')}.`);
 
   const prompt = await buildSynthesisPrompt(vars, renderLensOutputs(lensResults));
-  const output = await runPass(
+  const { data: output, json: synthesisRaw } = await runPass(
     'synthesis',
     prompt,
     reviewOutputSchema,
@@ -465,7 +506,32 @@ export async function runReview(
       `${countLabel(output.requirements.length, 'requirement')}`,
   );
 
-  return normalize(output as ReviewOutput);
+  const attributed = attributeLenses(output.findings as ReviewOutput['findings'], lensResults);
+  // Reads the checkout only; assertPristine afterwards still guards it.
+  const anchorCtx = createAnchorContext(checkout.dir, checkoutChangedFiles(checkout));
+  const reanchorLog: OnLog = (level, message) => onLog(level, `[re-anchor] ${message}`);
+  let reanchorRaw: unknown = null;
+  const anchors = await anchorFindings(
+    anchorCtx,
+    attributed,
+    async (findingsBlock) => {
+      const reanchorPrompt = await buildReanchorPrompt(vars, findingsBlock);
+      // One attempt: the pass is a bounded clean-up, never a second review.
+      const { data, json } = await runPass('re-anchor', reanchorPrompt, reanchorOutputSchema, reanchorLog, passOpts, 1);
+      reanchorRaw = json;
+      return data;
+    },
+    (level, message) => onLog(level, message),
+  );
+  if (opts.signal?.aborted) throw new Error('Review cancelled');
+
+  return {
+    ...normalize({ ...(output as ReviewOutput), findings: anchors.findings }),
+    lensResults,
+    synthesisRaw,
+    reanchorRaw,
+    anchors,
+  };
 }
 
 function correctivePrompt(basePrompt: string, problem: string): string {

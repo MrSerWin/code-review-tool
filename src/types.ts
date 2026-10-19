@@ -34,10 +34,40 @@ export interface ResolvedTarget {
   baseDistance?: number;
 }
 
+/**
+ * How a finding relates to the diff. `diff`: the anchor is a changed line.
+ * The others anchor at an untouched site that the diff affects, and name the
+ * changed line that causes it in `cause_file` / `cause_line`.
+ */
+export const FINDING_KINDS = ['diff', 'regression', 'stale_doc', 'consumer'] as const;
+export type FindingKind = (typeof FINDING_KINDS)[number];
+
+/**
+ * What the post-synthesis check found about a finding's `file` / `line` at
+ * HEAD. `unverified`: not checked (no location, or a row older than the check).
+ */
+export const ANCHOR_STATUSES = ['ok', 'off_diff', 'missing_path', 'line_out_of_range', 'unverified'] as const;
+export type AnchorStatus = (typeof ANCHOR_STATUSES)[number];
+
+/** One file of `git diff <base>..HEAD`, renames resolved to the new path. */
+export interface ChangedFile {
+  path: string;
+  /** git's status letter: A, M, D, R, C, T. */
+  status: string;
+  /** The pre-rename path of an R or C entry, else null. */
+  old_path: string | null;
+  /** Null for binary files. */
+  additions: number | null;
+  deletions: number | null;
+}
+
 export interface CheckoutResult {
   dir: string; headSha: string; baseSha: string;
   filesChanged: number; additions: number; deletions: number;
+  /** HEAD-side paths of every changed file, in `changedFileList` order. */
   changedFiles: string[];
+  /** The same files with status and rename source; absent on hand-built results. */
+  changedFileList?: ChangedFile[];
   /** Local targets: a synthetic commit holding the uncommitted changes, when one was added. */
   workingTreeSnapshot?: { sha: string; files: number } | null;
 }
@@ -64,6 +94,16 @@ export interface Finding {
   why: string;
   suggestion: string;
   snippet: string | null;
+  kind: FindingKind;
+  /** For a non-diff kind: the changed line that causes the finding. */
+  cause_file: string | null;
+  cause_line: number | null;
+  /** The diff hunk header (`@@ -a,b +c,d @@`) a diff finding sits in, when given. */
+  hunk: string | null;
+  /** The lens whose candidate (and anchor) synthesis kept, when known. */
+  lens: LensName | null;
+  /** Set by anchor validation after synthesis; lens output carries none. */
+  anchor_status?: AnchorStatus;
 }
 
 /** The exact JSON one lens pass must return: candidates, not verdicts. */
@@ -190,6 +230,20 @@ export interface FindingRow {
   why: string | null;
   suggestion: string | null;
   snippet: string | null;
+  /** 'diff' on rows written before kinds existed. */
+  kind: FindingKind;
+  cause_file: string | null;
+  cause_line: number | null;
+  hunk: string | null;
+  /** 'unverified' on rows written before anchor validation existed. */
+  anchor_status: AnchorStatus;
+  lens: LensName | null;
+  ord: number;
+}
+
+/** Mirrors a row of the `review_files` table: one changed file of a review. */
+export interface ReviewFileRow extends ChangedFile {
+  review_id: number;
   ord: number;
 }
 

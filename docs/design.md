@@ -389,7 +389,8 @@ finding-versus-observation contract, and the lens JSON shape. A lens prompt is
 is `common-preamble.md` + `synthesis.md`. `renderTemplate()` substitutes
 `{{TICKET}}`, `{{REPO}}`, `{{BRANCH}}`, `{{BASE_SHA}}`, `{{CHANGED_FILES}}`,
 `{{PREVIOUS_FINDINGS}}` and, for synthesis, `{{LENS_OUTPUTS}}`, and throws if any
-placeholder is left unresolved. Previous findings are the blocker and major
+placeholder is left unresolved. The re-anchor prompt is `reanchor.md` alone,
+with `{{FINDINGS}}` for the findings it must fix. Previous findings are the blocker and major
 findings of the branch's previous finished run; the synthesis reports which of
 them are fixed.
 
@@ -418,6 +419,43 @@ SIGKILL at once. An `exit` handler SIGKILLs anything left on any other exit
 path. When the process dies without running any of this (SIGKILL, a crash),
 `reviewer_pgids` is what the next recovery uses to stop the orphans (see
 [Queue and events](#queue-and-events)).
+
+**Finding anchors (`src/anchors.ts`, `src/findingFields.ts`).** Every finding
+has a `kind` (`diff` | `regression` | `stale_doc` | `consumer`) and, for a
+non-diff kind, `cause_file` / `cause_line`: the changed line behind a finding
+anchored at an untouched site. A diff finding may carry its `hunk` header. The
+prompts require `kind`, require a cause in the changed set for the other kinds,
+and require HEAD line numbers read from a numbered listing (Read, `cat -n`,
+`grep -n`), never counted from `sed -n` or diff text. The zod schemas are
+lenient where the model is sloppy: a missing or unknown `kind` is `diff`, a few
+aliases map (`dependent_site` -> `regression`), a `hunk` is cut to its
+`@@ ... @@` part, and an unknown `lens` is null; an answer written for the old
+prompt still parses.
+
+After synthesis, `attributeLenses()` fills `lens` (the one synthesis named, or
+the single lens with a candidate at the same `file:line`) and restores a
+non-diff `kind` and its cause from that candidate when synthesis dropped them.
+Then `anchorFindings()` checks every finding on the host-side checkout, read
+only: the path is normalised (`./`, an absolute path inside the checkout, `a/`
+/ `b/`, a `path:line` suffix, a pre-rename path), must resolve to a regular file
+inside the checkout (no `..`, no symlink out, nothing under `.git`), the line
+and `end_line` must be within the file, and the path must be in the changed set
+unless the kind is non-diff and the cause is a changed file (a deleted file
+counts; its lines refer to the base) with an in-range line. The result is
+`anchor_status`: `ok`, `off_diff`, `missing_path`, `line_out_of_range`, or
+`unverified` (no file). Findings, not observations, with any of the three bad
+statuses go into ONE re-anchor pass (`reanchor.md`, at most `MAX_REANCHOR` =
+40 findings, one attempt, no corrective retry). That prompt prefers keeping an
+off-diff location as the dependent site, adding the kind and the cause, over
+moving the finding into the diff: the reader needs both places. An answer replaces a finding's
+anchor only when its re-checked status ranks strictly higher (ok > off_diff >
+line_out_of_range > missing_path); a failed pass logs a warning and keeps the
+first statuses. Findings are never dropped for their anchor.
+
+**Raw pass outputs.** `runReview()` returns the `ReviewOutput` plus each lens's
+extracted JSON, the synthesis JSON, and the re-anchor JSON. The queue writes
+them next to the report as `run-N-<ts>.lenses/<lens>.json`, `synthesis.json`,
+and `reanchor.json`.
 
 `normalize()` re-derives `can_merge` defensively (no blocker or major finding,
 no `partial` or `missing` requirement — `not_verifiable` does not block) and
@@ -486,9 +524,29 @@ CREATE TABLE findings (
   why TEXT,
   suggestion TEXT,                -- advice only, never applied
   snippet TEXT,
-  ord INTEGER NOT NULL
+  ord INTEGER NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'diff',  -- diff|regression|stale_doc|consumer (added)
+  cause_file TEXT,                -- non-diff kinds: the changed file behind it (added)
+  cause_line INTEGER,             --                                         (added)
+  hunk TEXT,                      -- '@@ -a,b +c,d @@', diff findings        (added)
+  anchor_status TEXT NOT NULL DEFAULT 'unverified',
+                                  -- ok|off_diff|missing_path|line_out_of_range|unverified (added)
+  lens TEXT                       -- source lens, when known                 (added)
 );
 CREATE INDEX idx_findings_review ON findings(review_id);
+
+-- The changed set of a review (git diff --name-status -z -M), as the anchor check used it.
+CREATE TABLE review_files (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  review_id INTEGER NOT NULL REFERENCES reviews(id) ON DELETE CASCADE,
+  path TEXT NOT NULL,             -- HEAD-side path; a rename under its new path
+  status TEXT NOT NULL,           -- A|M|D|R|C|T
+  old_path TEXT,                  -- R and C only
+  additions INTEGER,              -- NULL for binary files
+  deletions INTEGER,
+  ord INTEGER NOT NULL
+);
+CREATE INDEX idx_review_files_review ON review_files(review_id);
 
 CREATE TABLE requirements (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -582,7 +640,11 @@ and `LensName` name the five lenses. `TicketInfo` carries `provider`: the
 tracker that produced it, or `manual`. `TicketInfo`, `ResolvedTarget` (with
 `source`, `includeWorkingTree`, `baseReason` for local targets), and
 `CheckoutResult` are the values passed between the resolver, the sandbox, and
-the runner. `LensOutput` is what one lens returns: `findings[]` and
+the runner; `CheckoutResult.changedFileList` holds the `ChangedFile` entries
+(path, status, rename source, counts) from `git diff --name-status -z -M` and
+`--numstat -z -M`, so no path ever arrives in the `{a => b}` rename form.
+`FINDING_KINDS` and `ANCHOR_STATUSES` name the finding kinds and anchor
+statuses. `LensOutput` is what one lens returns: `findings[]` and
 `observations[]`. `ReviewOutput` is what the synthesis pass returns: `summary`,
 `requirements[]`, `findings[]`, `observations[]`, `verdict`, `can_merge`,
 `conclusion`. An `Observation` is `{ file, line, note, rationale }`.
@@ -654,7 +716,9 @@ source and base reason for local runs, branch with head and base shas, diff
 size, and the run: number, timestamp, reviewer, model), `## Summary`,
 `## Ticket requirements` as a table with status icons (met ✅, partial ⚠️,
 missing ❌, not_verifiable ❓), `## Issues to fix` ordered by severity with
-`file:line`, problem, why, suggested fix, and snippet, `## Suggestions
+`file:line` (with the kind label and an anchor warning when there is one),
+`Caused by` for non-diff kinds, the hunk when given, problem, why, suggested
+fix, and snippet, `## Suggestions
 (non-blocking)` listing the observations as `` - `file:line` — note `` with an
 indented rationale line (or `None.`), and `## Conclusion` naming exactly what is
 still required before merge.
@@ -687,7 +751,9 @@ Dark-first, compact. What each page offers is described in
   named under the field, and resolved like a key.
 - **Review detail** (`/review/:id`) — verdict banner with GitHub links and the
   ticket in its tracker ("Open in Linear", labelled from the `ticket_url` host),
-  meta table, requirements, findings by severity, observations, the comparison
+  meta table, requirements, findings by severity (a non-diff finding shows a
+  kind badge and "caused by `file:line`", a bad anchor a warning tag; the hunk
+  header is the location's tooltip), observations, the comparison
   with the previous run, a live log fed by SSE, and the Preview card. Actions: cancel, re-run with an optional reviewer and model,
   download report, copy report, delete.
 - **Ticket view** (`/ticket/:key`) — all runs of one group (`group_key`) across

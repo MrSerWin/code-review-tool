@@ -13,6 +13,7 @@ import {
   createReview,
   deleteReview,
   getFindings,
+  getReviewFiles,
   getLogs,
   getObservations,
   getPreviousRun,
@@ -26,6 +27,7 @@ import { compareFindings, toComparable } from '../findingCompare.js';
 import { githubLinks, rowLinks } from '../githubLinks.js';
 import { subscribe } from '../events.js';
 import { cancelReview, enqueueReview } from '../queue.js';
+import { rawOutputDir } from '../reportWriter.js';
 import { resolveTargets } from '../resolver.js';
 import type { ResolvedTarget, ReviewRow, TicketInfo } from '../types.js';
 
@@ -202,6 +204,7 @@ export async function reviewRoutes(app: FastifyInstance): Promise<void> {
       requirements: getRequirements(review.id),
       findings,
       observations: getObservations(review.id),
+      changed_files: getReviewFiles(review.id),
       logs: getLogs(review.id),
       comparison,
       links: githubLinks(config.GITHUB_ORG, review),
@@ -296,7 +299,10 @@ export async function reviewRoutes(app: FastifyInstance): Promise<void> {
     if (ACTIVE.has(review.status)) cancelReview(review.id);
 
     const abs = reportAbsPath(review);
-    if (abs) await fs.rm(abs, { force: true });
+    if (abs) {
+      await fs.rm(abs, { force: true });
+      await fs.rm(rawOutputDir(abs), { recursive: true, force: true });
+    }
     deleteReview(review.id);
     return { ok: true };
   });

@@ -37,8 +37,42 @@ How it is built inside is described in [docs/design.md](docs/design.md).
    The reviewer restates the ticket as a requirement list, reads the diff and
    the surrounding code, honours the reviewed repository's own `CLAUDE.md` /
    `AGENTS.md` conventions, and returns a structured JSON verdict.
-4. **Report.** The verdict, requirement checklist, findings, and non-blocking
+4. **Anchor check.** Every finding's `file` and `line` are checked against the
+   checkout at HEAD and the changed-file list; wrong anchors get one corrective
+   pass (see [Findings and their anchors](#findings-and-their-anchors)).
+5. **Report.** The verdict, requirement checklist, findings, and non-blocking
    observations are stored in SQLite and rendered to a Markdown report.
+
+### Findings and their anchors
+
+A finding points at one place, `file:line`. Not every finding sits in the diff:
+a caller the branch broke, or documentation it made stale, lives in a file the
+branch never touched. Each finding therefore says what its location is:
+
+| field | meaning |
+|---|---|
+| `kind` | `diff` (a changed line), `regression` (untouched code that now breaks), `stale_doc` (untouched docs that describe the old behaviour), `consumer` (an untouched parser or client of a changed shape) |
+| `cause_file`, `cause_line` | for a non-diff kind: the changed line that causes it; must be in the changed set |
+| `hunk` | for a diff finding, when the reviewer gave it: the hunk header `@@ -a,b +c,d @@` |
+| `lens` | the lens whose candidate synthesis kept, when known |
+| `anchor_status` | the check below: `ok`, `off_diff`, `missing_path`, `line_out_of_range`, or `unverified` |
+
+After synthesis the tool checks every finding at HEAD, in the sandbox
+checkout: the path must exist inside the checkout, the line (and `end_line`)
+must be within the file, and the path must be in the changed set (`git diff
+--name-status -M`, renames under their new path) unless the finding has a
+non-diff kind and a valid cause in that set. `off_diff` means a real place
+outside the diff with no such cause; `unverified` means there was no location
+to check (or the row is older than the check). Findings that fail get ONE
+corrective re-anchor pass together (at most 40, one attempt, no retry); an
+answer is applied only when it improves the status. A finding is never dropped
+for its anchor: when the pass cannot fix it, it keeps its status and the UI,
+the report, and `get_review` show it.
+
+The web UI and the report render a non-diff finding with a badge (dependent
+site, stale doc, consumer) and "caused by `file:line`", and a wrong anchor
+with a visible warning (path not found, line out of range, outside the diff).
+Plain diff findings stay a plain `file:line`.
 
 ## Prerequisites
 
@@ -398,12 +432,12 @@ authentication. Errors come back as `{ "error": "…" }` with a 4xx or 5xx statu
 | POST | `/api/reviews` | `{ input, targets?, reviewer?, model?, requirementsText?, includeWorkingTree?, baseBranch? }` | `201 { reviews }`: one queued run per target; `targets` narrows a ticket to some of its branches |
 | GET | `/api/reviews` | `?q=&ticket=&repo=&branch=&group=&limit=&offset=` | `{ reviews, total }`, newest first; `limit` 1–500, default 50; each row has `links: { branch, pr }`, its GitHub URLs (`pr` null without a PR number) |
 | GET | `/api/review-groups` | `?q=&status=active\|failed\|done&limit=&offset=` | `{ groups, total }`, most recently active group first; `limit` 1–100, default 20; each branch has `prNumber` (the newest any of its runs knew) and `links: { branch, pr }` |
-| GET | `/api/reviews/:id` | | `{ review, requirements, findings, observations, logs, comparison, links }`; `links` holds the GitHub URLs (`repo`, `branch`, `pr`, `compare`, `head`, `base`) |
+| GET | `/api/reviews/:id` | | `{ review, requirements, findings, observations, changed_files, logs, comparison, links }`; `links` holds the GitHub URLs (`repo`, `branch`, `pr`, `compare`, `head`, `base`); `changed_files` is the changed set the anchor check used (`path`, `status`, `old_path`, `additions`, `deletions`) |
 | GET | `/api/reviews/:id/report` | | the Markdown report (`text/markdown`) |
 | GET | `/api/reviews/:id/events` | | server-sent events: `status`, `log`, and `done` messages |
 | POST | `/api/reviews/:id/rerun` | `{ reviewer?, model? }` | `201 { review }`: a new run of the same branch |
 | POST | `/api/reviews/:id/cancel` | | `{ review }`; `409` when it is not queued or running |
-| DELETE | `/api/reviews/:id` | | `{ ok: true }`; cancels it if needed, deletes the row and the report file |
+| DELETE | `/api/reviews/:id` | | `{ ok: true }`; cancels it if needed, deletes the row, the report file, and its raw pass outputs |
 | GET | `/api/recipes` | | `{ enabled, dir, recipes, errors }`: loaded preview recipes, and every invalid one with the reason |
 | GET | `/api/previews` | `?reviewId=&ticket=&recipe=&limit=&offset=` | `{ previews, total }`, newest first; `limit` 1–500, default 50 |
 | GET | `/api/previews/:id` | | `{ preview, logs }` |
@@ -433,7 +467,7 @@ every tool returns an error saying so.
 | `list_local_repos` | `repo?`, `maxBranches?` (default 30) | local clones: repo name, path, checked-out branch, default base, dirty state, branches with unpushed / ahead / behind |
 | `detect_base` | `repo`, `branch` | the base a local branch would be diffed against (detected parent or default branch) |
 | `start_review` | `input`, `reviewer?`, `model?`, `baseBranch?`, `includeWorkingTree?`, `requirementsText?`, `targets?` | start a review of any [input](#inputs); a ticket with several branches starts one review per branch, unless `targets` (`["repo#branch", …]`) narrows it; returns the review ids at once |
-| `get_review` | `id`, `maxFindings?` (default 50) | status and, once done, verdict, `can_merge`, requirements met/total, severity counts, findings (most severe first, capped) |
+| `get_review` | `id`, `maxFindings?` (default 50) | status and, once done, verdict, `can_merge`, requirements met/total, severity counts, findings (most severe first, capped; each with `kind`, `cause`, and `anchor_status`) |
 | `wait_for_review` | `id`, `timeoutSec?` (default 50, max 600), `pollSec?` (default 5), `maxFindings?` | poll until the review finishes or `timeoutSec` passes; returns `finished`, call again while it is `false` |
 | `get_report` | `id`, `maxChars?` (default 40000) | the Markdown report of a finished review, truncated past `maxChars` |
 | `list_reviews` | `q?`, `repo?`, `ticket?`, `group?`, `status?`, `limit?` (default 20) | recent runs, newest first; `status` is one status or `active` |
@@ -664,6 +698,10 @@ Restart when nothing is running.
 - `data/review.db` — run history, findings, requirements, observations, logs,
   and previews (SQLite).
 - `data/reports/<ticket|repo>/<repo>__<branch>/run-N-<timestamp>.md` — reports.
+- `data/reports/.../run-N-<timestamp>.lenses/`: the raw JSON answer of each
+  lens (`<lens>.json`, or `{ "error": ... }` for a failed lens), of the
+  synthesis (`synthesis.json`), and of the re-anchor pass when it ran
+  (`reanchor.json`), for debugging a finding back to its source.
 - `data/checkouts/` — temporary checkouts, removed after a successful review
   (kept after a failure, for inspection).
 - `data/previews/<id>/` — scratch directory of one preview environment.

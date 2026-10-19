@@ -712,10 +712,45 @@ function ObservationCard({ observation }: { observation: Observation }) {
   );
 }
 
+const KIND_LABEL: Record<string, string> = {
+  regression: 'dependent site',
+  stale_doc: 'stale doc',
+  consumer: 'consumer',
+};
+
+const ANCHOR_WARNING: Record<string, { label: string; detail: string }> = {
+  missing_path: { label: 'path not found', detail: 'This path does not exist at the reviewed commit.' },
+  line_out_of_range: { label: 'line out of range', detail: 'This line is past the end of the file at the reviewed commit.' },
+  off_diff: { label: 'outside the diff', detail: 'This file is not part of the change, and the finding names no changed line that causes it.' },
+};
+
+function locationText(file: string | null | undefined, line: number | null | undefined, endLine?: number | null): string | null {
+  if (!file) return null;
+  if (line === null || line === undefined) return file;
+  return endLine && endLine > line ? `${file}:${line}-${endLine}` : `${file}:${line}`;
+}
+
+function FindingLocation({ finding }: { finding: Finding }) {
+  const location = locationText(finding.file, finding.line, finding.end_line);
+  const kind = finding.kind && finding.kind !== 'diff' ? KIND_LABEL[finding.kind] ?? finding.kind : null;
+  const cause = locationText(finding.cause_file, finding.cause_line);
+  const warning = finding.anchor_status ? ANCHOR_WARNING[finding.anchor_status] : undefined;
+  if (!location && !warning) return null;
+  return (
+    <div className="loc-row">
+      {location && <span className="mono loc" title={finding.hunk ?? undefined}>{location}</span>}
+      {kind && <span className={`tag kind kind-${finding.kind}`}>{kind}</span>}
+      {kind && cause && <span className="cause muted">caused by <span className="mono">{cause}</span></span>}
+      {warning && (
+        <span className="tag anchor-warning" title={warning.detail} role="note">
+          {warning.label}
+        </span>
+      )}
+    </div>
+  );
+}
+
 function FindingCard({ finding }: { finding: Finding }) {
-  const location = finding.file
-    ? `${finding.file}${finding.line !== null ? `:${finding.line}` : ''}`
-    : null;
   return (
     <article className={`finding sev-border-${finding.severity}`}>
       <header>
@@ -723,7 +758,7 @@ function FindingCard({ finding }: { finding: Finding }) {
         {finding.category && <span className="tag cat">{finding.category}</span>}
         <h4>{finding.title}</h4>
       </header>
-      {location && <div className="mono loc">{location}</div>}
+      <FindingLocation finding={finding} />
       <p>{finding.problem}</p>
       {finding.why && (
         <p>
