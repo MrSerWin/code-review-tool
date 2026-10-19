@@ -125,8 +125,21 @@ export interface Finding {
   why: string | null;
   suggestion: string | null;
   snippet: string | null;
+  /** Absent from servers older than finding anchors. */
+  kind?: FindingKind;
+  cause_file?: string | null;
+  cause_line?: number | null;
+  hunk?: string | null;
+  anchor_status?: AnchorStatus;
+  lens?: string | null;
   ord: number;
 }
+
+/** `diff`: anchored at a changed line. The others anchor at an untouched site the diff affects. */
+export type FindingKind = 'diff' | 'regression' | 'stale_doc' | 'consumer';
+
+/** How a finding's location checked out at HEAD after the review. */
+export type AnchorStatus = 'ok' | 'off_diff' | 'missing_path' | 'line_out_of_range' | 'unverified';
 
 /** Non-blocking remark from a lens pass. Never affects the verdict. */
 export interface Observation {
