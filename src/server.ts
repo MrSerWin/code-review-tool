@@ -16,6 +16,9 @@ import { previewRoutes } from './routes/previews.js';
 import { repoRoutes } from './routes/repos.js';
 import { reviewRoutes } from './routes/reviews.js';
 import { ticketRoutes } from './routes/tickets.js';
+import { ticketGroupRoutes } from './routes/ticketGroups.js';
+import { enableCoverageScheduling } from './coverage.js';
+import { failRunningCoverage } from './ticketStore.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const webDist = path.resolve(here, '../web/dist');
@@ -52,6 +55,7 @@ export async function buildServer() {
 
   await app.register(repoRoutes);
   await app.register(ticketRoutes);
+  await app.register(ticketGroupRoutes);
   await app.register(reviewRoutes);
   await app.register(previewRoutes);
 
@@ -82,6 +86,11 @@ async function main(): Promise<void> {
         `stopped ${recovered.killedGroups.length} orphaned reviewer process group(s)`,
     );
   }
+
+  // A coverage pass lives in this process only; one left running was cut off.
+  const cutOff = failRunningCoverage('interrupted by restart');
+  if (cutOff > 0) logger.info(`recovery: failed ${cutOff} interrupted coverage pass(es)`);
+  enableCoverageScheduling();
 
   const app = await buildServer();
   await app.listen({ host: '127.0.0.1', port: config.PORT });

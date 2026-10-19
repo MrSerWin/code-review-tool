@@ -1,9 +1,11 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { config } from './config.js';
+import { branchCoverage, openRequirements, whereLabel } from './coverageView.js';
 import { listReviewers } from './reviewers/index.js';
 import type {
-  AnchorStatus, CheckoutResult, Finding, FindingKind, ReviewOutput, ReviewRow, Severity, TicketInfo,
+  AnchorStatus, CheckoutResult, CoverageRequirement, CoverageVerdict, Finding, FindingKind, ReviewOutput, ReviewRow,
+  Severity, TicketInfo,
 } from './types.js';
 
 /** Minimal shape the report needs from a `reviews` row. */
@@ -23,6 +25,23 @@ const VERDICT_BANNER: Record<string, string> = {
   approve: 'APPROVED — safe to merge',
   changes_requested: 'CHANGES REQUESTED — do not merge yet',
   blocked: 'BLOCKED — do not merge',
+};
+
+/** A slice of a ticket group: the verdict judges its code only. */
+const CODE_VERDICT_BANNER: Record<string, string> = {
+  approve: 'CODE APPROVED: no blocking findings in this branch',
+  changes_requested: 'CHANGES REQUESTED: fix the findings below',
+  blocked: 'BLOCKED: do not merge',
+};
+
+/** The ticket coverage section of a branch report sits between these markers, so it can be refreshed. */
+export const COVERAGE_START = '<!-- ticket-coverage:start -->';
+export const COVERAGE_END = '<!-- ticket-coverage:end -->';
+
+const COVERAGE_ICON: Record<string, string> = {
+  covered: '✅ Covered',
+  partial: '⚠️ Partial',
+  missing: '❌ Missing',
 };
 
 const REQ_ICON: Record<string, string> = {
@@ -71,18 +90,26 @@ export interface RawPassOutputs {
   reanchor?: unknown;
 }
 
+/** A branch report written in the context of a ticket group. */
+export interface ReportGroupContext {
+  ticketKey: string;
+  /** The ticket coverage section; a pending note when absent. */
+  coverageSection?: string;
+}
+
 export async function writeReport(
   review: ReportableReview,
   ticket: TicketInfo | null,
   checkout: CheckoutResult,
   output: ReviewOutput,
   raw?: RawPassOutputs,
+  group?: ReportGroupContext,
 ): Promise<string> {
   const now = new Date();
   const relative = reportRelativePath(review, now);
   const absolute = path.join(config.DATA_DIR, relative);
   await mkdir(path.dirname(absolute), { recursive: true });
-  await writeFile(absolute, renderReport(review, ticket, checkout, output, now), 'utf8');
+  await writeFile(absolute, renderReport(review, ticket, checkout, output, now, group), 'utf8');
   if (raw) await writeRawOutputs(path.join(config.DATA_DIR, rawOutputDir(relative)), raw);
   return relative;
 }
@@ -106,12 +133,23 @@ export function renderReport(
   checkout: CheckoutResult,
   output: ReviewOutput,
   now: Date = new Date(),
+  group?: ReportGroupContext,
 ): string {
   const title = [review.ticket_key, review.repo, review.branch].filter(Boolean).join(' · ');
   const lines: string[] = [];
 
   lines.push(`# Code Review — ${title}`, '');
-  lines.push(`**Verdict: ${VERDICT_BANNER[output.verdict] ?? output.verdict.toUpperCase()}**`, '');
+  if (group) {
+    const code = output.code_verdict ?? output.verdict;
+    lines.push(`**Code verdict: ${CODE_VERDICT_BANNER[code] ?? code.toUpperCase()}**`, '');
+    lines.push(
+      `This branch is one slice of ticket ${group.ticketKey}. Its verdict judges its code only; ` +
+        'whether the ticket is fully implemented is judged across all of its branches (Ticket coverage, below).',
+      '',
+    );
+  } else {
+    lines.push(`**Verdict: ${VERDICT_BANNER[output.verdict] ?? output.verdict.toUpperCase()}**`, '');
+  }
 
   lines.push('| | |', '|---|---|');
   lines.push(`| Ticket | ${ticketCell(review, ticket)} |`);
@@ -135,7 +173,10 @@ export function renderReport(
 
   lines.push('## Summary', '', output.summary.trim() || '(no summary)', '');
 
-  lines.push('## Ticket requirements', '');
+  lines.push(group ? '## Ticket requirements (this branch)' : '## Ticket requirements', '');
+  if (group) {
+    lines.push('What this branch implements. A requirement marked missing here may be covered by another branch.', '');
+  }
   if (output.requirements.length === 0) {
     lines.push('No requirements were extracted from the ticket.', '');
   } else {
@@ -146,6 +187,12 @@ export function renderReport(
       );
     });
     lines.push('');
+  }
+
+  if (group) {
+    lines.push(COVERAGE_START);
+    lines.push(group.coverageSection ?? pendingCoverageSection(group.ticketKey));
+    lines.push(COVERAGE_END, '');
   }
 
   lines.push('## Issues to fix', '');
@@ -265,4 +312,154 @@ function stamp(date: Date): string {
 
 function humanStamp(date: Date): string {
   return date.toISOString().slice(0, 16).replace('T', ' ');
+}
+
+// --- ticket coverage -----------------------------------------------------------
+
+function pendingCoverageSection(ticketKey: string): string {
+  return [
+    '## Ticket coverage',
+    '',
+    `Pending: coverage of ${ticketKey} is computed once every branch of the ticket has been reviewed.`,
+    '',
+  ].join('\n');
+}
+
+export interface CoverageForReport {
+  id: number;
+  verdict: CoverageVerdict;
+  summary: string;
+  requirements: CoverageRequirement[];
+  createdAt: string;
+}
+
+const COVERAGE_VERDICT_TEXT: Record<CoverageVerdict, string> = {
+  covered: 'COVERED: every requirement is implemented by some branch',
+  needs_work: 'NEEDS WORK: not every requirement is implemented yet',
+};
+
+/** The coverage section of one branch's report: each requirement seen from this branch. */
+export function renderBranchCoverageSection(
+  ticketKey: string,
+  coverage: CoverageForReport,
+  repo: string,
+  branch: string,
+): string {
+  const lines: string[] = ['## Ticket coverage', ''];
+  lines.push(`**${ticketKey}: ${COVERAGE_VERDICT_TEXT[coverage.verdict]}** (coverage #${coverage.id}, ${coverage.createdAt.slice(0, 16).replace('T', ' ')} UTC)`, '');
+  lines.push('| # | Requirement | Ticket status | Where |', '|---|---|---|---|');
+  branchCoverage(coverage.requirements, repo, branch).forEach((line, index) => {
+    lines.push(`| ${index + 1} | ${cell(line.text)} | ${COVERAGE_ICON[line.status] ?? line.status} | ${cell(whereLabel(line))} |`);
+  });
+  lines.push('');
+  return lines.join('\n');
+}
+
+/** Replaces the coverage section of a branch report; a report without one gets it before the issues. */
+export function replaceCoverageSection(markdown: string, section: string): string {
+  const start = markdown.indexOf(COVERAGE_START);
+  const end = markdown.indexOf(COVERAGE_END);
+  const block = `${COVERAGE_START}\n${section}\n${COVERAGE_END}`;
+  if (start >= 0 && end > start) return markdown.slice(0, start) + block + markdown.slice(end + COVERAGE_END.length);
+  const issues = markdown.indexOf('## Issues to fix');
+  if (issues >= 0) return `${markdown.slice(0, issues)}${block}\n\n${markdown.slice(issues)}`;
+  return `${markdown.trimEnd()}\n\n${block}\n`;
+}
+
+/** Rewrites the coverage section of a stored branch report (a path relative to DATA_DIR). */
+export async function updateReportCoverage(reportRelative: string, section: string): Promise<boolean> {
+  const abs = path.resolve(config.DATA_DIR, reportRelative);
+  if (!abs.startsWith(path.resolve(config.DATA_DIR) + path.sep)) return false;
+  try {
+    const md = await readFile(abs, 'utf8');
+    await writeFile(abs, replaceCoverageSection(md, section), 'utf8');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export interface CoverageReportBranch {
+  repo: string;
+  branch: string;
+  base: string | null;
+  reviewId: number | null;
+  runIndex: number | null;
+  codeVerdict: string | null;
+  headSha: string | null;
+  depth: number;
+  status: string;
+}
+
+/** `reports/<ticket>/coverage-<ts>-<id>.md`: the id keeps two passes of one second apart. */
+export function coverageReportPath(ticketKey: string, coverageId: number, now: Date = new Date()): string {
+  return path.posix.join('reports', sanitizeSegment(ticketKey), `coverage-${stamp(now)}-${coverageId}.md`);
+}
+
+export function renderCoverageReport(
+  ticket: { key: string; title: string | null; url: string | null },
+  coverage: CoverageForReport,
+  branches: readonly CoverageReportBranch[],
+  meta: { reviewer: string | null; model: string | null },
+  now: Date = new Date(),
+): string {
+  const lines: string[] = [];
+  lines.push(`# Ticket coverage: ${ticket.key}`, '');
+  lines.push(`**${COVERAGE_VERDICT_TEXT[coverage.verdict]}**`, '');
+  lines.push('| | |', '|---|---|');
+  const label = ticket.url ? `[${ticket.key}](${ticket.url})` : ticket.key;
+  lines.push(`| Ticket | ${ticket.title ? `${label}: ${cell(ticket.title)}` : label} |`);
+  lines.push(`| Coverage | #${coverage.id} · ${humanStamp(now)} UTC · ${reviewerLabel(meta.reviewer)} · model ${meta.model ?? 'unknown'} |`);
+  lines.push('');
+
+  lines.push('## Branches', '');
+  lines.push('| Branch | Diffed against | Review | Code verdict |', '|---|---|---|---|');
+  for (const b of branches) {
+    const indent = b.depth > 0 ? `${'↳ '.repeat(b.depth)}` : '';
+    const review = b.reviewId ? `#${b.reviewId} (run ${b.runIndex ?? '?'}, ${shortSha(b.headSha)})` : `_${b.status}_`;
+    lines.push(`| ${indent}${b.repo}#${b.branch} | ${b.base ?? '-'} | ${review} | ${b.codeVerdict ?? '-'} |`);
+  }
+  lines.push('');
+
+  lines.push('## Summary', '', coverage.summary.trim() || '(no summary)', '');
+
+  lines.push('## Requirements', '');
+  lines.push('| # | Requirement | Status | Covered by | Note |', '|---|---|---|---|---|');
+  coverage.requirements.forEach((r, index) => {
+    const by = r.branches.length === 0
+      ? 'not covered anywhere'
+      : r.branches.map((b) => {
+          const where = b.evidence.map((e) => {
+            const loc = e.line ? `${e.file}:${e.line}` : e.file;
+            const warn = anchorWarning(e.anchor_status);
+            return warn ? `\`${loc}\` [${warn}]` : `\`${loc}\``;
+          }).join(', ');
+          return `${b.repo}#${b.branch}${b.status === 'partial' ? ' (partial)' : ''}${where ? `: ${where}` : ''}`;
+        }).join('; ');
+    lines.push(`| ${index + 1} | ${cell(r.text)} | ${COVERAGE_ICON[r.status] ?? r.status} | ${cell(by)} | ${cell(r.note) || '-'} |`);
+  });
+  lines.push('');
+
+  const open = openRequirements(coverage.requirements);
+  lines.push('## Still required', '');
+  if (open.length === 0) lines.push('Nothing: every requirement is covered.', '');
+  else {
+    for (const r of open) lines.push(`- ${r.status === 'missing' ? 'Missing' : 'Partial'}: ${inline(r.text)}${r.note ? ` (${inline(r.note)})` : ''}`);
+    lines.push('');
+  }
+  return lines.join('\n');
+}
+
+export async function writeCoverageReport(
+  ticket: { key: string; title: string | null; url: string | null },
+  coverage: CoverageForReport,
+  branches: readonly CoverageReportBranch[],
+  meta: { reviewer: string | null; model: string | null },
+): Promise<string> {
+  const now = new Date();
+  const relative = coverageReportPath(ticket.key, coverage.id, now);
+  const absolute = path.join(config.DATA_DIR, relative);
+  await mkdir(path.dirname(absolute), { recursive: true });
+  await writeFile(absolute, renderCoverageReport(ticket, coverage, branches, meta, now), 'utf8');
+  return relative;
 }
