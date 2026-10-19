@@ -5,8 +5,8 @@ import { config } from './config.js';
 import { cleanGroupTitle, groupKeyFor } from './groupKey.js';
 import { SELF } from './processOwnership.js';
 import type {
-  FindingRow, GroupStatusFilter, LogLevel, LogRow, ObservationRow, RequirementRow, ReviewGroup,
-  ReviewGroupBranch, ReviewOutput, ReviewRow,
+  ChangedFile, FindingRow, GroupStatusFilter, LogLevel, LogRow, ObservationRow, RequirementRow, ReviewFileRow,
+  ReviewGroup, ReviewGroupBranch, ReviewOutput, ReviewRow,
 } from './types.js';
 
 fs.mkdirSync(config.DATA_DIR, { recursive: true });
@@ -125,6 +125,18 @@ const MIGRATIONS: string[] = [
      message TEXT NOT NULL
    )`,
   `CREATE INDEX IF NOT EXISTS idx_preview_logs_preview ON preview_logs(preview_id)`,
+  // The changed set of a review, as the anchor check used it.
+  `CREATE TABLE IF NOT EXISTS review_files (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     review_id INTEGER NOT NULL REFERENCES reviews(id) ON DELETE CASCADE,
+     path TEXT NOT NULL,
+     status TEXT NOT NULL,
+     old_path TEXT,
+     additions INTEGER,
+     deletions INTEGER,
+     ord INTEGER NOT NULL
+   )`,
+  `CREATE INDEX IF NOT EXISTS idx_review_files_review ON review_files(review_id)`,
 ];
 
 export function migrate(): void {
@@ -140,6 +152,15 @@ export function migrate(): void {
     ensureColumn('reviews', 'runner_pid', `ALTER TABLE reviews ADD COLUMN runner_pid INTEGER`);
     ensureColumn('reviews', 'runner_started_at', `ALTER TABLE reviews ADD COLUMN runner_started_at TEXT`);
     ensureColumn('reviews', 'reviewer_pgids', `ALTER TABLE reviews ADD COLUMN reviewer_pgids TEXT`);
+    // Finding anchors. Older rows read as diff findings that were never checked.
+    ensureColumn('findings', 'kind', `ALTER TABLE findings ADD COLUMN kind TEXT NOT NULL DEFAULT 'diff'`);
+    ensureColumn('findings', 'cause_file', `ALTER TABLE findings ADD COLUMN cause_file TEXT`);
+    ensureColumn('findings', 'cause_line', `ALTER TABLE findings ADD COLUMN cause_line INTEGER`);
+    ensureColumn('findings', 'hunk', `ALTER TABLE findings ADD COLUMN hunk TEXT`);
+    ensureColumn(
+      'findings', 'anchor_status', `ALTER TABLE findings ADD COLUMN anchor_status TEXT NOT NULL DEFAULT 'unverified'`,
+    );
+    ensureColumn('findings', 'lens', `ALTER TABLE findings ADD COLUMN lens TEXT`);
     // After ensureColumn: on an older database the column only exists from here on.
     db.prepare(`CREATE INDEX IF NOT EXISTS idx_reviews_group ON reviews(group_key, created_at)`).run();
     syncGroupKeys();
@@ -483,8 +504,10 @@ export function getLogs(reviewId: number): LogRow[] {
 
 export function replaceFindings(reviewId: number, findings: ReviewOutput['findings']): void {
   const insert = db.prepare(
-    `INSERT INTO findings (review_id, severity, category, file, line, end_line, title, problem, why, suggestion, snippet, ord)
-     VALUES (@review_id, @severity, @category, @file, @line, @end_line, @title, @problem, @why, @suggestion, @snippet, @ord)`,
+    `INSERT INTO findings (review_id, severity, category, file, line, end_line, title, problem, why, suggestion, snippet,
+                           kind, cause_file, cause_line, hunk, anchor_status, lens, ord)
+     VALUES (@review_id, @severity, @category, @file, @line, @end_line, @title, @problem, @why, @suggestion, @snippet,
+             @kind, @cause_file, @cause_line, @hunk, @anchor_status, @lens, @ord)`,
   );
   const run = db.transaction(() => {
     db.prepare(`DELETE FROM findings WHERE review_id = ?`).run(reviewId);
@@ -501,11 +524,48 @@ export function replaceFindings(reviewId: number, findings: ReviewOutput['findin
         why: finding.why ?? null,
         suggestion: finding.suggestion ?? null,
         snippet: finding.snippet ?? null,
+        kind: finding.kind ?? 'diff',
+        cause_file: finding.cause_file ?? null,
+        cause_line: finding.cause_line ?? null,
+        hunk: finding.hunk ?? null,
+        anchor_status: finding.anchor_status ?? 'unverified',
+        lens: finding.lens ?? null,
         ord: index,
       });
     });
   });
   run();
+}
+
+export function replaceReviewFiles(reviewId: number, files: readonly ChangedFile[]): void {
+  const insert = db.prepare(
+    `INSERT INTO review_files (review_id, path, status, old_path, additions, deletions, ord)
+     VALUES (@review_id, @path, @status, @old_path, @additions, @deletions, @ord)`,
+  );
+  const run = db.transaction(() => {
+    db.prepare(`DELETE FROM review_files WHERE review_id = ?`).run(reviewId);
+    files.forEach((f, index) => {
+      insert.run({
+        review_id: reviewId,
+        path: f.path,
+        status: f.status,
+        old_path: f.old_path ?? null,
+        additions: f.additions ?? null,
+        deletions: f.deletions ?? null,
+        ord: index,
+      });
+    });
+  });
+  run();
+}
+
+export function getReviewFiles(reviewId: number): ReviewFileRow[] {
+  return db
+    .prepare<[number], ReviewFileRow>(
+      `SELECT review_id, path, status, old_path, additions, deletions, ord
+       FROM review_files WHERE review_id = ? ORDER BY ord ASC`,
+    )
+    .all(reviewId);
 }
 
 export function getFindings(reviewId: number): FindingRow[] {

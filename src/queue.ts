@@ -5,6 +5,7 @@ import {
   getPreviousRun,
   getReview,
   replaceFindings,
+  replaceReviewFiles,
   replaceObservations,
   replaceRequirements,
   updateReview,
@@ -17,12 +18,11 @@ import {
   commandMatchesBin, inspectProcess, isOrphanReviewer, isPidAlive, killProcessGroups, parseRecordedGroups,
   SELF, shouldRecover, type ProcessInfo, type RecordedGroup, type RecoveryCaller, type RunnerIdentity,
 } from './processOwnership.js';
-import { runReview, stopAllReviewers, type PreviousFinding } from './reviewRunner.js';
+import { checkoutChangedFiles, runReview, stopAllReviewers, type PreviousFinding } from './reviewRunner.js';
 import { writeReport } from './reportWriter.js';
 import type {
   LogLevel,
   ResolvedTarget,
-  ReviewOutput,
   ReviewRow,
   ReviewStatus,
   TicketInfo,
@@ -278,6 +278,7 @@ async function processReview(reviewId: number, signal: AbortSignal): Promise<voi
     additions: checkout.additions,
     deletions: checkout.deletions,
   });
+  replaceReviewFiles(reviewId, checkoutChangedFiles(checkout));
   log(
     reviewId,
     'info',
@@ -292,7 +293,7 @@ async function processReview(reviewId: number, signal: AbortSignal): Promise<voi
     log(reviewId, 'info', `Carrying ${previousFindings.length} open finding(s) from the previous run.`);
   }
 
-  const output: ReviewOutput = await runReview(
+  const output = await runReview(
     review,
     checkout,
     ticket,
