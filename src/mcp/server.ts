@@ -30,7 +30,7 @@ const INSTRUCTIONS = `code-review-tool runs read-only code reviews of git branch
 Typical flow: start_review -> wait_for_review (repeat while finished=false) -> get_review / get_report.
 A review takes several minutes (often 5-20). Never start the same review twice to check on it: poll the id you got.
 For a branch that is not pushed yet, use list_local_repos to find the repo name and branch, then start_review with "local:<repo>#<branch>".
-Previews run a ticket's branches as a live app on a local port: list_recipes -> start_preview -> wait_for_preview (repeat while finished=false) -> open web_url -> stop_preview when done. A role can run a local (unpushed) branch: {role, branch: "local:<repo>#<branch>"} or {role, branch, local: true}.
+Previews run a ticket's branches as a live app on a local port: list_recipes -> start_preview -> wait_for_preview (repeat while finished=false) -> open web_url (links lists every exposed address, e.g. backend API and admin) -> stop_preview when done. A role can run a local (unpushed) branch: {role, branch: "local:<repo>#<branch>"} or {role, branch, local: true}.
 A request that times out reached a busy server: do not retry a start, and never restart the server while previews or reviews are live (a restart tears them down); check get_preview / list_previews / list_reviews instead.`;
 
 const idSchema = z.number().int().positive().describe('Review id, as returned by start_review or list_reviews.');
@@ -438,7 +438,7 @@ export function createMcpServer({ api, env = process.env }: CreateServerOptions)
       'Start a live preview: the recipe\'s repos (e.g. backend + frontend) checked out at the chosen branches and ' +
       'run on free local ports with their own database. Returns at once with the preview id; it takes minutes ' +
       '(longer the first time dependencies change). Then call wait_for_preview(id) until finished=true and open ' +
-      'web_url. Stop it with stop_preview when done; it also expires on its own.\n' +
+      'web_url (the primary app) or any entry of links ([{label, url, port, primary}], primary first). Stop it with stop_preview when done; it also expires on its own.\n' +
       'Branches per role, in order of precedence:\n' +
       '- roles: [{role, branch}] picks a branch by hand; an empty branch runs the role\'s base branch.\n' +
       '- a local (unpushed) branch: {role, branch: "local:<repo>#<branch>"} or {role, branch: "<branch>", local: ' +
@@ -495,7 +495,8 @@ export function createMcpServer({ api, env = process.env }: CreateServerOptions)
     title: 'Get a preview',
     description:
       'Status of one preview: queued | preparing | starting | ready | stopping | stopped | failed | expired, the ' +
-      'branch, source (github or local) and commit each role runs, web_url once ready, ports, data mode, ' +
+      'branch, source (github or local) and commit each role runs, web_url and links (every exposed address as ' +
+      '{label, url, port, primary}, primary first) once ready, ports, data mode, ' +
       'expiry, and "error" when it failed. "progress" is the latest log line while it works; tail_logs adds the ' +
       'last log lines.',
     inputSchema: {
@@ -605,7 +606,7 @@ export function createMcpServer({ api, env = process.env }: CreateServerOptions)
   server.registerTool('list_previews', {
     title: 'List previews',
     description:
-      'Recent previews, newest first: id, status, recipe, ticket, review_id, web_url (while ready), and per role ' +
+      'Recent previews, newest first: id, status, recipe, ticket, review_id, web_url and links (while ready), and per role ' +
       'the branch, source (github or local) and commit. Filter by review_id, ticket, recipe, or status ("live" = ' +
       'queued, preparing, starting, ready, or stopping).',
     inputSchema: {

@@ -1,5 +1,5 @@
 import { Link } from '../router';
-import type { DumpMode, DumpModeRequest, Preview, PreviewRole, PreviewStatus } from '../types';
+import type { DumpMode, DumpModeRequest, Preview, PreviewLink, PreviewRole, PreviewStatus } from '../types';
 
 /** Database contents offered when starting a preview, shared by every start form. */
 export const DUMP_CHOICES: { value: DumpModeRequest; label: string }[] = [
@@ -141,6 +141,47 @@ export function RoleChips({ roles }: { roles: PreviewRole[] }) {
         );
       })}
     </ul>
+  );
+}
+
+/** The preview's links, primary first; a bare `url` stands in when the server sent none. */
+export function previewLinksOf(preview: Preview): PreviewLink[] {
+  if (preview.links?.length) return preview.links;
+  return preview.url ? [{ label: 'app', url: preview.url, port_id: '', primary: true }] : [];
+}
+
+const shortUrl = (url: string): string => url.replace(/^https?:\/\//, '');
+
+/**
+ * Every address of a ready preview. `card` puts the primary link in the big
+ * button and the rest in a compact list under it; `row` is one compact line each.
+ */
+export function PreviewLinks({ preview, variant }: { preview: Preview; variant: 'card' | 'row' }) {
+  const links = previewLinksOf(preview);
+  if (links.length === 0) return null;
+  const [first, ...rest] = links;
+  const lead = variant === 'card' && first?.primary ? first : null;
+  const listed = lead ? rest : links;
+  return (
+    <>
+      {lead && (
+        <a className="preview-url" href={lead.url} target="_blank" rel="noreferrer" title={lead.label}>
+          {lead.url} <span aria-hidden="true">↗</span>
+        </a>
+      )}
+      {listed.length > 0 && (
+        <ul className={`preview-links preview-links-${variant}`}>
+          {listed.map((link) => (
+            <li key={`${link.port_id}:${link.url}`} className={link.primary ? 'preview-link-primary' : undefined}>
+              <span className="preview-link-label">{link.label}</span>
+              <a className="mono" href={link.url} target="_blank" rel="noreferrer" title={link.url}>
+                {shortUrl(link.url)} <span aria-hidden="true">↗</span>
+              </a>
+            </li>
+          ))}
+        </ul>
+      )}
+    </>
   );
 }
 

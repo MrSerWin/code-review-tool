@@ -392,6 +392,7 @@ test('a preview settles once ready or ended; only a ready one has a web_url and 
     page: 'http://ui/previews', logs: [{ message: 'migrating' }],
   });
   assert.equal(starting.web_url, null);
+  assert.deepEqual(starting.links, []);
   assert.equal(starting.progress, 'migrating');
   assert.equal('credentials_hint' in starting, false);
   assert.deepEqual(starting.roles, [
@@ -404,6 +405,18 @@ test('a preview settles once ready or ended; only a ready one has a web_url and 
 
   const ready = compactPreview(previewPayload({ status: 'ready' }), { page: 'http://ui/previews' });
   assert.equal(ready.web_url, 'http://127.0.0.1:41000');
+  assert.deepEqual(ready.links, []);
+  const linked = compactPreview(previewPayload({
+    status: 'ready',
+    links: [
+      { label: 'web', url: 'http://127.0.0.1:41000', port_id: 'web', primary: true },
+      { label: 'Django admin', url: 'http://127.0.0.1:41001/admin/', port_id: 'api', primary: false },
+    ],
+  }), { page: 'http://ui/previews' });
+  assert.deepEqual(linked.links, [
+    { label: 'web', url: 'http://127.0.0.1:41000', port: 'web', primary: true },
+    { label: 'Django admin', url: 'http://127.0.0.1:41001/admin/', port: 'api', primary: false },
+  ]);
   assert.equal(ready.credentials_hint, 'admin / admin');
   assert.equal('progress' in ready, false);
 });
