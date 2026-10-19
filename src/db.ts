@@ -219,6 +219,7 @@ export function migrate(): void {
     // The code-only verdict; NULL on older rows, which only have the combined one.
     ensureColumn('reviews', 'code_verdict', `ALTER TABLE reviews ADD COLUMN code_verdict TEXT`);
     ensureColumn('reviews', 'code_can_merge', `ALTER TABLE reviews ADD COLUMN code_can_merge INTEGER`);
+    ensureColumn('reviews', 'depends_on', `ALTER TABLE reviews ADD COLUMN depends_on INTEGER`);
     // After ensureColumn: on an older database the column only exists from here on.
     db.prepare(`CREATE INDEX IF NOT EXISTS idx_reviews_group ON reviews(group_key, created_at)`).run();
     syncGroupKeys();
@@ -263,7 +264,7 @@ const REVIEW_COLUMNS = [
   'requirements_met', 'requirements_total', 'blocking_count', 'report_path', 'reviewer', 'model', 'error',
   'files_changed', 'additions', 'deletions', 'created_at', 'started_at', 'finished_at',
   'source', 'working_tree', 'base_reason', 'group_key',
-  'runner_pid', 'runner_started_at', 'reviewer_pgids', 'code_verdict', 'code_can_merge',
+  'runner_pid', 'runner_started_at', 'reviewer_pgids', 'code_verdict', 'code_can_merge', 'depends_on',
 ] as const satisfies readonly (keyof ReviewRow)[];
 
 /** Columns group_key is derived from; changing one of them re-derives it. */
@@ -296,7 +297,7 @@ export function createReview(input: CreateReviewInput): ReviewRow {
     // The creating process enqueues the row right away, so it owns it from
     // the first moment: no other process's recovery can see it unowned.
     runner_pid: SELF.pid, runner_started_at: SELF.startedAt, reviewer_pgids: null,
-    code_verdict: null, code_can_merge: null,
+    code_verdict: null, code_can_merge: null, depends_on: null,
   };
   for (const column of REVIEW_COLUMNS) {
     const value = (input as Record<string, unknown>)[column];

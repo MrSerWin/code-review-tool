@@ -135,8 +135,8 @@ test('a parent set by hand sticks, loops are refused, and an order makes a linea
   // Back to the default branch, by hand: detection leaves it alone.
   await groups.setParentByHand('ABC-2', 'svc', B, null, remote);
   await groups.detectGroupParents('ABC-2', remote, {});
-  // Two roots now, in the order they joined the group.
-  assert.deepEqual(shape('ABC-2')[0], { repo: 'svc', branches: [`${B} <- main (user)`, `${A} <- main (default)`] });
+  // Two roots now, in the chain order they had before.
+  assert.deepEqual(shape('ABC-2')[0], { repo: 'svc', branches: [`${A} <- main (default)`, `${B} <- main (user)`] });
   // Unless the user asks for a reset.
   await groups.detectGroupParents('ABC-2', remote, { includeUser: true });
   assert.deepEqual(shape('ABC-2')[0], { repo: 'svc', branches: [`${A} <- main (default)`, `  ${B} <- ${A} (detected)`] });
@@ -190,4 +190,33 @@ test('remote parent choice: PR base, closest contained sibling, else the default
   assert.equal(chains.chooseRemoteParent({ ...base, prBase: 'main', siblings: [{ name: 'a', compare: ahead(2) }] }).parent, 'a');
   // GitHub could not answer for the default branch: any contained sibling wins.
   assert.equal(chains.chooseRemoteParent({ ...base, defaultCompare: null, siblings: [{ name: 'a', compare: ahead(9) }] }).parent, 'a');
+});
+
+test('a batch is ordered parents first and each child names its parent in the batch', () => {
+  // As the tracker listed CYT-1302: frontend first, children before parents.
+  const t = (repo: string, branch: string, baseBranch: string) => ({ repo, branch, baseBranch, prNumber: null });
+  const batch = [t('web', B, A), t('svc', B, A), t('web', A, 'main'), t('svc', A, 'main'), t('svc', 'lone', 'main')];
+  const steps = groups.orderBatch(batch, (x) => (x.branch === 'lone' ? null : 'ABC-1'));
+  assert.deepEqual(steps.map((s) => `${s.target.repo}#${s.target.branch}`), [
+    `svc#${A}`, `svc#${B}`, `web#${A}`, `web#${B}`, 'svc#lone',
+  ]);
+  assert.deepEqual(steps.map((s) => s.parentIndex), [null, 0, null, 2, null]);
+  // Without any group, a base that is another target still goes first.
+  const plain = groups.orderBatch([t('svc', 'c', 'b'), t('svc', 'b', 'a'), t('svc', 'a', 'main')], () => null);
+  assert.deepEqual(plain.map((s) => s.target.branch), ['a', 'b', 'c']);
+  assert.deepEqual(plain.map((s) => s.parentIndex), [null, 0, 1]);
+});
+
+test('positions follow the chain: a parent never sorts after its child', () => {
+  const now = new Date().toISOString();
+  ticketStore.upsertTicketGroup('POS-1');
+  for (const [branch, parent, position] of [['c', 'b', 0], ['b', 'a', 1], ['a', 'main', 2]] as const) {
+    store.db.prepare(
+      `INSERT INTO ticket_branches (ticket_key, repo, branch, source, parent_branch, parent_reason, position, created_at, updated_at)
+       VALUES ('POS-1', 'svc', ?, 'github', ?, 'stored', ?, ?, ?)`,
+    ).run(branch, parent, position, now, now);
+  }
+  assert.equal(ticketStore.renumberPositions('POS-1'), 2);
+  assert.deepEqual(ticketStore.listTicketBranches('POS-1').map((b) => `${b.branch}:${b.position}`), ['a:0', 'b:1', 'c:2']);
+  assert.equal(ticketStore.renumberPositions('POS-1'), 0);
 });

@@ -52,9 +52,10 @@ const deps: Partial<TicketRouteDeps> = {
     defaultBranch: async () => 'main',
     localParent: async () => { throw new Error('not local'); },
   },
-  startRun: (target, t, reviewer) => {
+  startRun: (target, t, reviewer, _model, opts) => {
     started.push({ target, ticket: t, reviewer });
     return store.createReview({
+      depends_on: opts?.dependsOn ?? null,
       ticket_key: t?.key || null, ticket_title: t?.title ?? null, ticket_body: t?.body ?? null,
       repo: target.repo, branch: target.branch, base_branch: target.baseBranch, status: 'queued',
       base_reason: target.baseReason ?? null, reviewer: reviewer ?? 'claude',
@@ -93,9 +94,13 @@ test('review the ticket: every branch queued parents first, each against its par
   assert.match(started[1]!.ticket!.body, /^Export risks\.\n\n## Added requirements and decisions\n\nDecision: CSV is enough\.$/);
   assert.equal(body.run.status, 'running');
   assert.deepEqual(body.run.review_ids, body.reviews.map((r: ReviewRow) => r.id));
-  // The children's parents have no finished review yet: allowed, and said.
+  // Each child waits for its parent's review in this batch, and the answer says so.
   assert.equal(body.notes.length, 2);
-  assert.match(body.notes[0], new RegExp(`svc#${B}: its parent ${A} has no finished review yet; it is queued first`));
+  assert.match(body.notes[0], new RegExp(`svc#${B}: starts after the review of its parent ${A} in this batch ends`));
+  const ids = new Map(body.reviews.map((r: ReviewRow) => [`${r.repo}#${r.branch}`, r.id]));
+  assert.deepEqual(body.reviews.map((r: ReviewRow) => store.getReview(r.id)!.depends_on), [
+    null, ids.get(`svc#${A}`), null, ids.get(`web#${A}`),
+  ]);
   assert.equal(body.group.chains.length, 2);
   assert.equal(ticketStore.getTicketGroup('ABC-3')!.requirements_text, 'Decision: CSV is enough.');
 });
@@ -206,4 +211,32 @@ test('recompute coverage, and the coverage seen from one review', async () => {
   // A branch without a ticket has no group context.
   const lone = store.createReview({ repo: 'svc', branch: 'cleanup', base_branch: 'main', status: 'done' });
   assert.equal((await app.inject({ method: 'GET', url: `/api/reviews/${lone.id}` })).json().ticket_group, null);
+});
+
+test('incident: stored parents with the child at position 0, targets listed children first, frontend first', async () => {
+  // The state of CYT-1302 when a ticket review queued the children first.
+  const KEY = 'INC-9';
+  const P = 'feat/inc-9-export';
+  const C = 'feat/inc-9-dates';
+  const now = new Date().toISOString();
+  ticketStore.upsertTicketGroup(KEY, { title: 'Incident' });
+  for (const repo of ['web', 'svc']) {
+    for (const [branch, parent, position] of [[C, P, 0], [P, 'main', 1]] as const) {
+      store.db.prepare(
+        `INSERT INTO ticket_branches (ticket_key, repo, branch, source, parent_branch, parent_reason, position, created_at, updated_at)
+         VALUES (?, ?, ?, 'github', ?, 'stored', ?, ?, ?)`,
+      ).run(KEY, repo, branch, parent, position, now, now);
+    }
+  }
+  started.length = 0;
+  const res = await app.inject({ method: 'POST', url: `/api/tickets/${KEY}/review`, payload: { refresh: false } });
+  assert.equal(res.statusCode, 201, res.body);
+  assert.deepEqual(started.map((s) => `${s.target.repo}#${s.target.branch} <- ${s.target.baseBranch}`), [
+    `svc#${P} <- main`, `svc#${C} <- ${P}`, `web#${P} <- main`, `web#${C} <- ${P}`,
+  ]);
+  const rows = res.json().reviews.map((r: ReviewRow) => store.getReview(r.id)!);
+  assert.deepEqual(rows.map((r: ReviewRow) => r.depends_on), [null, rows[0].id, null, rows[2].id]);
+  // Positions follow the chain now: the parent sorts first.
+  const positions = ticketStore.listTicketBranches(KEY).map((b) => `${b.repo}#${b.branch}:${b.position}`);
+  assert.deepEqual(positions.sort(), [`svc#${C}:1`, `svc#${P}:0`, `web#${C}:1`, `web#${P}:0`]);
 });

@@ -31,8 +31,10 @@ import { rawOutputDir } from '../reportWriter.js';
 import { resolveTargets } from '../resolver.js';
 import { coverageForReview, coveragePending } from '../coverage.js';
 import { fallbackGroupKey, groupKeyFor } from '../groupKey.js';
-import { applyGroupBases, joinGroup } from '../ticketGroups.js';
-import { getTicketBranch, latestDoneCoverage, parseCoverageRequirements, syncMembersFromReviews } from '../ticketStore.js';
+import { applyGroupBases, joinGroup, orderBatch } from '../ticketGroups.js';
+import {
+  createTicketRun, getTicketBranch, latestDoneCoverage, parseCoverageRequirements, syncMembersFromReviews,
+} from '../ticketStore.js';
 import type { ResolvedTarget, ReviewRow, TicketInfo } from '../types.js';
 
 const ACTIVE = new Set(['queued', 'fetching', 'reviewing']);
@@ -88,6 +90,7 @@ export function startRun(
   ticket: TicketInfo | null,
   reviewerName: string | undefined,
   model: string | undefined,
+  opts: { dependsOn?: number | null } = {},
 ): ReviewRow {
   const reviewer = getReviewer(reviewerName);
   // A missing CLI is a configuration problem, not a failed review: refuse it
@@ -109,6 +112,7 @@ export function startRun(
     status: 'queued',
     reviewer: reviewer.name,
     model: model ?? reviewer.defaultModel,
+    depends_on: opts.dependsOn ?? null,
   });
   enqueueReview(review.id);
   return review;
@@ -157,7 +161,18 @@ export async function reviewRoutes(app: FastifyInstance): Promise<void> {
     }
 
     try {
-      const reviews = chosen.map((t) => startRun(t, ticket, reviewer, model));
+      // Parents first; a child waits in the queue until its parent's review has ended.
+      const reviews: ReviewRow[] = [];
+      const byGroup = new Map<string, number[]>();
+      for (const step of orderBatch(chosen, (t) => ticketGroupOf(t, ticket))) {
+        const dependsOn = step.parentIndex !== null ? reviews[step.parentIndex]!.id : null;
+        const review = startRun(step.target, ticket, reviewer, model, { dependsOn });
+        reviews.push(review);
+        const key = ticketGroupOf(step.target, ticket);
+        if (key) byGroup.set(key, [...(byGroup.get(key) ?? []), review.id]);
+      }
+      // A batch of several branches of one ticket is a ticket run, so wait_for_ticket_review follows it.
+      for (const [key, ids] of byGroup) if (ids.length > 1) createTicketRun(key, ids);
       return reply.code(201).send({ reviews });
     } catch (err) {
       return reply.code(400).send({ error: (err as Error).message });

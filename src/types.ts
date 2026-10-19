@@ -184,6 +184,11 @@ export interface ReviewRow {
    */
   code_verdict: Verdict | null;
   code_can_merge: number | null;
+  /**
+   * In a ticket batch: the review of this branch's parent slice. The queue
+   * starts this one only after that one has ended. NULL otherwise.
+   */
+  depends_on: number | null;
 }
 
 /** `active`: a run is queued/fetching/reviewing; `failed`: some branch's latest run failed; `done`: see db.ts. */
