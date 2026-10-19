@@ -38,9 +38,13 @@ End your answer with exactly ONE fenced ```json block and nothing after it:
     {
       "severity": "blocker|major|minor|nit",
       "category": "correctness|security|tenancy|tests|performance|style|docs",
+      "kind": "diff|regression|stale_doc|consumer",
       "file": "src/file.ts",
       "line": 120,
       "end_line": 126,
+      "cause_file": "the changed file that causes a non-diff finding, else null",
+      "cause_line": 88,
+      "hunk": "@@ -110,8 +110,12 @@ or null",
       "title": "short title",
       "problem": "what is wrong, in simple words",
       "why": "why it matters, what breaks",
@@ -63,5 +67,8 @@ Rules for the JSON block:
 - Both arrays may be empty.
 - `file` and `line` may be `null` only when the point is genuinely not tied to
   one place. Prefer a real location.
+- `kind` is required on every finding. `cause_file` and `cause_line` are
+  required for every kind other than `diff`, and `null` for `diff`. See
+  "Locations" above.
 - Use plain strings. No markdown tables inside the JSON values.
 - Output valid JSON. No comments, no trailing commas, no text after the block.

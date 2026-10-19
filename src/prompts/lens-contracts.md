@@ -25,5 +25,10 @@ Look for:
   describes the old behaviour after this diff. Check the docs the repository's
   own conventions require to be updated with a behaviour change.
 
+A broken consumer you found in untouched code is `kind: "consumer"`, and stale
+documentation in untouched files is `kind: "stale_doc"`: `file` and `line` point
+at the consumer or the stale text, `cause_file` and `cause_line` at the changed
+line that made it wrong. A problem in a changed file is `kind: "diff"`.
+
 Name the concrete consumer that breaks. "Someone might depend on this" is not a
 finding — put that in `observations` instead.
