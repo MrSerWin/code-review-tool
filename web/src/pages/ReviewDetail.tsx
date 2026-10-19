@@ -13,12 +13,14 @@ import {
 import { Link, navigate } from '../router';
 import { openTicketLabel, openTicketTitle } from '../tickets';
 import type {
+  BranchCoverageLine,
   Finding,
   LogLine,
   Observation,
   ReviewDetailPayload,
   ReviewerInfo,
   RunComparison,
+  ReviewTicketGroup,
   Severity,
   SseEvent,
 } from '../types';
@@ -30,6 +32,13 @@ const BANNER: Record<string, string> = {
   approve: 'APPROVED — safe to merge',
   changes_requested: 'CHANGES REQUESTED — do not merge yet',
   blocked: 'BLOCKED — serious problems found',
+};
+
+/** A branch of a ticket group: the verdict judges its code; the ticket is judged by coverage. */
+const CODE_BANNER: Record<string, [string, string]> = {
+  approve: ['CODE APPROVED', 'no blocking findings in this branch'],
+  changes_requested: ['CHANGES REQUESTED', 'fix the findings below'],
+  blocked: ['BLOCKED', 'serious problems found'],
 };
 
 /** The lens passes the runner is expected to emit progress for, in display order. */
@@ -165,6 +174,8 @@ export default function ReviewDetail({ id }: { id: number }) {
   if (!data) return <p className="muted">Loading…</p>;
 
   const { review, requirements, findings, comparison, links } = data;
+  const group = data.ticket_group ?? null;
+  const verdict = group ? review.code_verdict ?? review.verdict : review.verdict;
   const observations = data.observations ?? [];
   const running = ACTIVE.has(review.status);
   const finished = review.status === 'done';
@@ -225,8 +236,8 @@ export default function ReviewDetail({ id }: { id: number }) {
   })).filter((g) => g.items.length > 0);
 
   // "CHANGES REQUESTED — do not merge yet" → a loud verdict and a quieter hint.
-  const [verdictText, verdictHint] = review.verdict
-    ? (BANNER[review.verdict] ?? review.verdict).split(' — ')
+  const [verdictText, verdictHint] = verdict
+    ? (group ? CODE_BANNER[verdict] : undefined) ?? (BANNER[verdict] ?? verdict).split(' — ')
     : [running ? 'Review in progress' : `Run ${review.status}`];
   const modelsListId = `rerun-models-${rerunReviewer}`;
   // The ticket in its tracker; pasted requirements have none. A PR read as its
@@ -238,7 +249,7 @@ export default function ReviewDetail({ id }: { id: number }) {
 
   return (
     <div className="stack">
-      <div className={`banner verdict-${review.verdict ?? 'none'}`}>
+      <div className={`banner verdict-${verdict ?? 'none'}`}>
         <div className="banner-main">
           <h1 className="banner-title">
             <span className="banner-verdict">{verdictText}</span>
@@ -482,7 +493,15 @@ export default function ReviewDetail({ id }: { id: number }) {
         </Card>
       )}
 
-      <Card title="Ticket requirements">
+      {group && <TicketCoverageCard group={group} finished={finished} />}
+
+      <Card title={group ? 'Ticket requirements (this branch)' : 'Ticket requirements'}>
+        {group && requirements.length > 0 && (
+          <p className="muted ticket-hint">
+            What this branch implements, as its own review saw it. A requirement missing here may be covered by another
+            branch of {group.key}; see Ticket coverage.
+          </p>
+        )}
         {requirements.length === 0 ? (
           <p className="muted">No requirements recorded.</p>
         ) : (
@@ -515,14 +534,14 @@ export default function ReviewDetail({ id }: { id: number }) {
 
       <Card title={`Findings (${findings.length})`}>
         {findings.length === 0 ? (
-          review.verdict && review.verdict !== 'approve' ? (
+          verdict && verdict !== 'approve' ? (
             <div className="empty-note">
               <p>
                 No individual defects were raised, yet the verdict is{' '}
-                <strong>{BANNER[review.verdict]?.split('—')[0]?.trim().toLowerCase() ?? review.verdict}</strong>.
+                <strong>{BANNER[verdict]?.split('—')[0]?.trim().toLowerCase() ?? verdict}</strong>.
               </p>
               <p className="muted">
-                {unmet.length > 0
+                {unmet.length > 0 && !group
                   ? `The blocker is requirement coverage: ${unmet.length} of ${requirements.length} ticket requirements are not fully met. Fix those rows above — they are the work left to do.`
                   : 'Nothing was pinned to a specific line. Check the run summary and the log below for what the review objected to.'}
               </p>
@@ -562,6 +581,91 @@ export default function ReviewDetail({ id }: { id: number }) {
         )}
       </Card>
     </div>
+  );
+}
+
+const COVERAGE_TAG: Record<string, string> = { covered: 'req-met', partial: 'req-partial', missing: 'req-missing' };
+
+function whereLabel(line: BranchCoverageLine): string {
+  if (line.where === 'nowhere') return 'not covered anywhere';
+  const others = line.others.join(', ');
+  if (line.where === 'elsewhere') return `in ${others}`;
+  const here = line.here === 'partial' ? 'partly in this branch' : 'in this branch';
+  return others ? `${here} and ${others}` : here;
+}
+
+/** The ticket's coverage across all of its branches, each requirement seen from this branch. */
+function TicketCoverageCard({ group, finished }: { group: ReviewTicketGroup; finished: boolean }) {
+  const c = group.coverage;
+  return (
+    <Card
+      title={
+        <span className="coverage-title">
+          Ticket coverage
+          {c?.verdict && (
+            <span className={`badge ${c.verdict === 'covered' ? 'verdict-approve' : 'verdict-changes_requested'}`}>
+              {c.verdict === 'covered' ? 'Covered' : 'Needs work'}
+            </span>
+          )}
+        </span>
+      }
+      actions={
+        <Link to={`/ticket/${encodeURIComponent(group.key)}`} className="link-btn" title={`Every branch of ${group.key}`}>
+          {group.key}
+        </Link>
+      }
+    >
+      {group.parent && (
+        <p className="muted ticket-hint">
+          One branch of {group.key}, diffed against <span className="mono">{group.parent}</span>. Its verdict above
+          judges its code only; whether the ticket is done is judged here, across all of its branches.
+        </p>
+      )}
+      {group.coverage_pending && (
+        <p className="notice-line">A coverage pass is pending or running for {group.key}.</p>
+      )}
+      {!c ? (
+        <p className="muted">
+          {finished
+            ? 'Not computed yet: it runs once every branch of the ticket has been reviewed.'
+            : 'Computed once this and the other branch reviews finish.'}
+        </p>
+      ) : (
+        <>
+          {!c.includes_this_review && (
+            <p className="muted ticket-hint">This coverage read another run of this branch; it is updated after the next pass.</p>
+          )}
+          {c.summary && <p>{c.summary}</p>}
+          <div className="table-wrap">
+            <table className="grid">
+              <thead>
+                <tr>
+                  <th className="num">#</th>
+                  <th>Requirement</th>
+                  <th>Ticket</th>
+                  <th>Where</th>
+                </tr>
+              </thead>
+              <tbody>
+                {c.requirements.map((r, i) => (
+                  <tr key={`${i}-${r.text}`}>
+                    <td className="num mono">{i + 1}</td>
+                    <td>
+                      {r.text}
+                      {r.note && <div className="muted coverage-note">{r.note}</div>}
+                    </td>
+                    <td>
+                      <span className={`tag ${COVERAGE_TAG[r.status] ?? ''}`}>{r.status}</span>
+                    </td>
+                    <td className={`coverage-where where-${r.where}`}>{whereLabel(r)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </Card>
   );
 }
 

@@ -38,8 +38,11 @@ export interface Review {
   /** 'local' when the branch was read from a local clone (possibly unpushed). */
   source?: 'github' | 'local';
   working_tree?: number;
-  /** Local reviews: how base_branch was picked. */
+  /** How base_branch was picked: detected parent (local or ticket group), chosen, or default. */
   base_reason?: 'parent' | 'chosen' | 'default' | null;
+  /** The verdict on this branch's code alone; absent or null on older rows. */
+  code_verdict?: Verdict | null;
+  code_can_merge?: number | null;
   run_index: number;
   status: ReviewStatus;
   verdict: Verdict | null;
@@ -170,6 +173,8 @@ export interface LogLine {
 }
 
 export interface ReviewDetailPayload {
+  /** The review's ticket group and its coverage seen from this branch; null for a branch without a ticket. */
+  ticket_group?: ReviewTicketGroup | null;
   review: Review;
   requirements: Requirement[];
   findings: Finding[];
@@ -401,4 +406,135 @@ export interface LocalParent {
 export interface LocalReposPayload {
   repos: LocalRepo[];
   unavailable: { repo: string; reason: string }[];
+}
+
+// --- ticket groups and coverage ---
+
+export type ParentReason = 'pr' | 'detected' | 'default' | 'user' | 'stored';
+export type CoverageStatus = 'covered' | 'partial' | 'missing';
+export type CoverageVerdict = 'covered' | 'needs_work';
+
+export interface CoverageEvidence {
+  file: string;
+  line: number | null;
+  anchor_status: AnchorStatus;
+}
+
+export interface CoverageBranch {
+  repo: string;
+  branch: string;
+  review_id: number | null;
+  status: 'covered' | 'partial';
+  note: string;
+  evidence: CoverageEvidence[];
+}
+
+export interface CoverageRequirement {
+  text: string;
+  status: CoverageStatus;
+  note: string;
+  branches: CoverageBranch[];
+}
+
+export interface Coverage {
+  id: number;
+  ticket_key: string;
+  status: 'running' | 'done' | 'failed';
+  verdict: CoverageVerdict | null;
+  summary: string | null;
+  requirements: CoverageRequirement[];
+  review_ids: number[];
+  reviewer: string | null;
+  model: string | null;
+  report_path: string | null;
+  error: string | null;
+  trigger: string | null;
+  created_at: string;
+  finished_at: string | null;
+}
+
+export interface BranchRunSummary {
+  id: number;
+  run_index: number;
+  status: ReviewStatus;
+  verdict: Verdict | null;
+  code_verdict: Verdict | null;
+  can_merge: boolean | null;
+  code_can_merge: boolean | null;
+  base_branch: string;
+  blocking_count: number | null;
+  requirements_met: number | null;
+  requirements_total: number | null;
+  reviewer: string | null;
+  model: string | null;
+  created_at: string;
+  finished_at: string | null;
+}
+
+export interface GroupBranch {
+  repo: string;
+  branch: string;
+  source: 'github' | 'local';
+  parent: string | null;
+  parentReason: ParentReason | null;
+  parentInGroup: boolean;
+  depth: number;
+  position: number;
+  defaultBranch: string | null;
+  prNumber: number | null;
+  latest: BranchRunSummary | null;
+  latestDone: BranchRunSummary | null;
+  parentReviewed: boolean | null;
+  links?: RowLinks;
+}
+
+export interface TicketRun {
+  id: number;
+  status: 'running' | 'done';
+  review_ids: number[];
+  coverage_id: number | null;
+  created_at: string;
+  finished_at: string | null;
+}
+
+/** GET /api/ticket-groups/:key */
+export interface TicketGroupPayload {
+  group: {
+    key: string;
+    title: string | null;
+    ticketUrl: string | null;
+    requirementsText: string | null;
+    chains: { repo: string; branches: GroupBranch[] }[];
+  };
+  coverage: Coverage | null;
+  latest_coverage: { id: number; status: string; error: string | null; created_at: string } | null;
+  coverage_pending: boolean;
+  run: TicketRun | null;
+}
+
+/** A coverage requirement seen from one branch. */
+export interface BranchCoverageLine {
+  text: string;
+  status: CoverageStatus;
+  where: 'here' | 'elsewhere' | 'nowhere';
+  here: 'covered' | 'partial' | null;
+  others: string[];
+  note: string;
+}
+
+export interface ReviewTicketGroup {
+  key: string;
+  parent: string | null;
+  parent_reason: ParentReason | null;
+  coverage: {
+    id: number;
+    status: string;
+    verdict: CoverageVerdict | null;
+    summary: string | null;
+    created_at: string;
+    finished_at: string | null;
+    includes_this_review: boolean;
+    requirements: BranchCoverageLine[];
+  } | null;
+  coverage_pending: boolean;
 }
