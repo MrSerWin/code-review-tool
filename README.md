@@ -565,7 +565,8 @@ workers.
 
 All of that shares the recipe's `readyTimeoutSec`. Then the preview is
 **ready**: the UI shows the primary port's link first, every other port link
-(labels and paths from the recipe's `ports`, see
+(labels and paths from the recipe's `ports`; a port with `"link": false`, such
+as the database, gets none; see
 [recipes.example](recipes.example/README.md#ports-and-links)) and the recipe's
 credentials hint, and its time to live starts. `down` runs on stop, on failure
 or timeout, on expiry, and after a restart; it must succeed even when nothing

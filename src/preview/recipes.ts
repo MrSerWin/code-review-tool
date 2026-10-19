@@ -28,6 +28,8 @@ const portSchema = z.object({
   label: labelSchema.optional(),
   /** Links the UI offers on this port; without it, one link to the port root. */
   links: z.array(linkSchema).min(1, 'needs at least one link when present (omit it for a single root link)').optional(),
+  /** false: the port gets no link at all, e.g. a database. */
+  link: z.boolean().optional(),
 });
 
 const pgDumpSchema = z.object({
@@ -106,7 +108,14 @@ function extraChecks(recipe: z.infer<typeof recipeSchema>, file: string): string
   const duplicates = ids.filter((id, index) => ids.indexOf(id) !== index);
   if (duplicates.length) problems.push(`${file}: ports: duplicate port id(s): ${[...new Set(duplicates)].join(', ')}`);
 
+  const primaryId = primaryPort(recipe).id;
   for (const port of recipe.ports) {
+    if (port.link === false && port.links) {
+      problems.push(`${file}: ports.${port.id}.links: cannot be combined with "link": false`);
+    }
+    if (port.link === false && port.id === primaryId) {
+      problems.push(`${file}: ports.${port.id}.link: the primary port must keep its link`);
+    }
     const paths = (port.links ?? []).map((l) => l.path);
     const repeated = paths.filter((p, index) => paths.indexOf(p) !== index);
     if (repeated.length) {

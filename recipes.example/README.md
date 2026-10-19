@@ -35,6 +35,7 @@ and the MCP tools offer every port as a link, the primary port first:
 | `primary` | the port behind `url` / `web_url`; at most one, default the first |
 | `label` | name shown for the port's link; default the id |
 | `links` | `[{ "label", "path" }]`, one link per entry instead of the port root; `path` starts with `/`, no duplicates per port |
+| `link` | `false` gives the port no link at all (a database, say); not with `links`, not on the primary port; default `true` |
 
 `GET /api/recipes` lists what was loaded and reports every recipe that failed
 validation, with the offending field and file path. A broken recipe is skipped;
