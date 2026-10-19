@@ -280,8 +280,17 @@ export interface Preview {
   /** Decorated by the API from roles_json / ports_json. */
   roles: PreviewRole[];
   ports: Record<string, number>;
+  /** Every address the preview exposes, the primary one first. */
+  links: PreviewLink[];
   /** 1-based place in the queue, 0 when not waiting. */
   queuePosition: number;
+}
+
+export interface PreviewLink {
+  label: string;
+  url: string;
+  port_id: string;
+  primary: boolean;
 }
 
 export interface PreviewLogLine {
@@ -301,6 +310,9 @@ export interface RecipePort {
   id: string;
   internal: number;
   primary: boolean;
+  label: string;
+  links?: { label: string; path: string }[];
+  link: boolean;
 }
 
 export interface RecipeDatabase {

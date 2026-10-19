@@ -20,6 +20,7 @@ import type {
 import { resolveDumpSource } from './database.js';
 import { publishPreview } from './events.js';
 import { allocatePorts } from './ports.js';
+import { previewLinks } from './links.js';
 import { findRecipe, loadRecipes, primaryPort, type Recipe } from './recipes.js';
 import {
   coversAllRoles, followUpTicketKey, missingBranchMessage, missingOverrideBranches, normalizeOverrides,
@@ -462,7 +463,8 @@ async function startPreview(previewId: number, controller: AbortController): Pro
       expires_at: expiresAt.toISOString(),
     });
     log(previewId, 'info', `Preview is ready at ${url} (expires ${expiresAt.toISOString()}).`);
-    publishPreview(previewId, { type: 'ready', previewId, status: 'ready', url });
+    const links = previewLinks(reservation.ports, recipe, url);
+    publishPreview(previewId, { type: 'ready', previewId, status: 'ready', url, links });
     publishStatus(previewId, 'ready');
   } catch (err) {
     const requested = stopRequested.get(previewId);
@@ -1002,8 +1004,14 @@ export function previewsSummary(): {
   };
 }
 
-/** A preview row plus the parts the UI cannot derive from the row alone. */
-export function decoratePreview(row: PreviewRow): Record<string, unknown> {
+/**
+ * A preview row plus the parts the UI cannot derive from the row alone.
+ * `recipes` lets a list read the recipes directory once for all its rows.
+ */
+export function decoratePreview(row: PreviewRow, recipes: readonly Recipe[] = loadRecipes().recipes): Record<string, unknown> {
+  const ports = parsePorts(row.ports_json);
+  // A recipe that is gone or broken now still leaves one link per allocated port.
+  const recipe = recipes.find((r) => r.name === row.recipe) ?? null;
   return {
     ...row,
     // The org lives only in the server config, so the GitHub link is built here.
@@ -1013,7 +1021,8 @@ export function decoratePreview(row: PreviewRow): Record<string, unknown> {
       // A local branch may not exist on GitHub, so it gets no link.
       url: role.source === 'local' ? null : branchUrl(config.githubOrg, role.repo, role.usedBase ? role.base : role.branch),
     })),
-    ports: parsePorts(row.ports_json),
+    ports,
+    links: previewLinks(ports, recipe, row.url),
     queuePosition: queuePosition(row.id),
   };
 }

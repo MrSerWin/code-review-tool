@@ -777,6 +777,15 @@ table.grid tr:last-child td { border-bottom: none; }
 }
 .preview-url:hover { text-decoration: none; border-color: var(--fg); }
 
+/* Every address a ready preview exposes: label, then the URL */
+.preview-links { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; list-style: none; font-size: var(--fs-xs); }
+.preview-links li { display: flex; align-items: baseline; gap: var(--space-2); min-width: 0; }
+.preview-link-label { flex: 0 0 auto; color: var(--fg-faint); white-space: nowrap; }
+.preview-links a { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.preview-links-card .preview-link-label { flex-basis: 7rem; }
+.preview-links-card { font-size: var(--fs-sm); }
+.preview-link-primary a { font-weight: 600; }
+
 .pill.pstatus-ready { color: var(--green); }
 .pill.pstatus-failed { color: var(--red); }
 .pill.pstatus-expired, .pill.pstatus-stopped { color: var(--fg-faint); }
