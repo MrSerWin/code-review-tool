@@ -14,7 +14,7 @@ import {
   chooseRemoteParent, linearParents, orderChains, wouldCycle, type CompareResult,
 } from './ticketChains.js';
 import {
-  getTicketBranch, getTicketGroup, listTicketBranches, setTicketBranchParent, syncMembersFromReviews,
+  getTicketBranch, getTicketGroup, listTicketBranches, renumberPositions, setTicketBranchParent, syncMembersFromReviews,
   upsertTicketBranch, upsertTicketGroup,
 } from './ticketStore.js';
 import type {
@@ -136,6 +136,7 @@ export async function detectGroupParents(
       const def = decisions.find((x) => x.row.repo === d.repo && x.row.branch === d.branch)?.decision?.def ?? null;
       setTicketBranchParent(key, d.repo, d.branch, d.parent, d.reason, { defaultBranch: def });
     }
+    renumberPositions(key);
   });
   write();
   return out;
@@ -197,6 +198,7 @@ export async function joinGroup(
   const detected = opts.detect === 'none' || repos.size === 0
     ? []
     : await detectGroupParents(key, deps, { repos, prBases });
+  renumberPositions(key);
   return { joined, detected };
 }
 
@@ -257,6 +259,7 @@ export async function setParentByHand(
     throw new GroupError(`${target} is ${branch} itself or one of its children: that would make a loop`);
   }
   setTicketBranchParent(key, repo, branch, target, 'user', { defaultBranch: def });
+  renumberPositions(key);
   return getTicketBranch(key, repo, branch)!;
 }
 
@@ -414,4 +417,59 @@ export function sliceContext(key: string, repo: string, branch: string): { membe
   syncMembersFromReviews(key);
   const members = orderedMembers(key);
   return { members, self: members.find((m) => m.repo === repo && m.branch === branch) ?? null };
+}
+
+/** One target of a batch, and the position in the batch of the target its base belongs to. */
+export interface BatchStep<T> {
+  target: T;
+  /** Index (in the returned order) of the target that is this one's parent branch; null without one. */
+  parentIndex: number | null;
+}
+
+/**
+ * Orders a batch of targets parents first: members of a ticket group in the
+ * group's chain order (groups in order of first appearance), anything else
+ * after them as given; then a topological pass makes sure that a target whose
+ * base is another target of the batch (same repository) always comes after
+ * it, whatever the stored positions say. `parentIndex` names that target.
+ */
+export function orderBatch<T extends Pick<ResolvedTarget, 'repo' | 'branch' | 'baseBranch'>>(
+  targets: readonly T[],
+  groupOf: (target: T) => string | null,
+): BatchStep<T>[] {
+  const groupRank = new Map<string, number>();
+  const memberRank = new Map<string, Map<string, number>>();
+  const rankOf = (t: T, index: number): [number, number, number] => {
+    const key = groupOf(t);
+    if (!key) return [Number.MAX_SAFE_INTEGER, 0, index];
+    if (!groupRank.has(key)) {
+      groupRank.set(key, groupRank.size);
+      memberRank.set(key, new Map(orderedMembers(key).map((m, i) => [memberKey(m.repo, m.branch), i])));
+    }
+    const pos = memberRank.get(key)!.get(memberKey(t.repo, t.branch)) ?? Number.MAX_SAFE_INTEGER;
+    return [groupRank.get(key)!, pos, index];
+  };
+  const sorted = targets
+    .map((t, i) => ({ t, rank: rankOf(t, i) }))
+    .sort((a, b) => a.rank[0] - b.rank[0] || a.rank[1] - b.rank[1] || a.rank[2] - b.rank[2])
+    .map((x) => x.t);
+
+  const inBatch = (t: T): T | undefined =>
+    sorted.find((p) => p !== t && p.repo === t.repo && p.branch === t.baseBranch);
+  const out: T[] = [];
+  const placed = new Set<T>();
+  const place = (t: T, seen: Set<T>): void => {
+    if (placed.has(t) || seen.has(t)) return;
+    seen.add(t);
+    const parent = inBatch(t);
+    if (parent) place(parent, seen);
+    placed.add(t);
+    out.push(t);
+  };
+  for (const t of sorted) place(t, new Set());
+  return out.map((target) => {
+    const parent = inBatch(target);
+    const parentIndex = parent ? out.indexOf(parent) : -1;
+    return { target, parentIndex: parentIndex >= 0 && parentIndex < out.indexOf(target) ? parentIndex : null };
+  });
 }

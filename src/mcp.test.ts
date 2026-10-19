@@ -33,7 +33,7 @@ function reviewRow(overrides: Partial<ReviewRow> = {}): ReviewRow {
     blocking_count: null, report_path: null, reviewer: 'claude', model: 'opus', error: null,
     files_changed: null, additions: null, deletions: null, created_at: '2026-01-01T00:00:00.000Z',
     started_at: null, finished_at: null, group_key: 'ABC-123',
-    runner_pid: null, runner_started_at: null, reviewer_pgids: null, code_verdict: null, code_can_merge: null,
+    runner_pid: null, runner_started_at: null, reviewer_pgids: null, code_verdict: null, code_can_merge: null, depends_on: null,
     ...overrides,
   };
 }

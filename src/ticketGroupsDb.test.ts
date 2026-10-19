@@ -48,6 +48,8 @@ test('an old database gains the ticket tables and the code verdict; old rows kee
   for (const t of ['ticket_groups', 'ticket_branches', 'ticket_coverage', 'ticket_runs']) assert.ok(tables.includes(t), t);
   const cols = (store.db.pragma('table_info(reviews)') as { name: string }[]).map((c) => c.name);
   assert.ok(cols.includes('code_verdict') && cols.includes('code_can_merge'));
+  assert.ok(cols.includes('depends_on'));
+  assert.equal(store.getReview(1)!.depends_on, null);
   const old = store.getReview(1)!;
   assert.equal(old.verdict, 'changes_requested');
   assert.equal(old.code_verdict, null);

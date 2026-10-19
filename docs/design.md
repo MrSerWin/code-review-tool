@@ -779,6 +779,20 @@ always 5 wide plus a synthesis pass, so the process ceiling is
 restart. A checkout is removed after a successful review and kept after a
 failure for inspection.
 
+**Dependencies.** A review queued in a batch with its parent slice records
+that review in `depends_on` (`reviews.depends_on`, nullable, added). Batches
+(`POST /api/tickets/:key/review`, and `POST /api/reviews` with several targets)
+are ordered by `orderBatch()` in `ticketGroups.ts`: group members in chain
+order, then a topological pass so a target whose base is another target of the
+batch comes after it. A worker takes the first pending review whose dependency
+has ended (or no longer exists), skipping the others in place; when a review
+ends, or a queued one is cancelled, workers are topped up again, so a waiting
+child starts as soon as its parent ends. Any terminal parent status releases
+the child (a failed or cancelled one with a warning in the child's log), so a
+batch always settles. Positions in `ticket_branches` are rewritten in chain
+order (`renumberPositions()`) after every parent change or sync, so a parent
+never sorts after its child.
+
 **Ownership and recovery.** The server and the CLI share the database, and
 each can only ever finish the rows in its own memory. So every row records its
 owner: `createReview()` and `enqueueReview()` write `runner_pid` and
