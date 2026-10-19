@@ -5,6 +5,7 @@
  */
 import { db } from './db.js';
 import { fallbackGroupKey } from './groupKey.js';
+import { orderChains } from './ticketChains.js';
 import type {
   CoverageRequirement, CoverageVerdict, ParentReason, ReviewRow, ReviewSource, TicketBranchRow, TicketCoverageRow,
   TicketGroupRow, TicketRunRow,
@@ -120,6 +121,27 @@ export function setTicketBranchParent(
   });
 }
 
+/**
+ * Rewrites `position` in chain order (parents before children, per
+ * repository), so a parent never sorts after its child, whatever order the
+ * branches joined in. Returns how many rows changed.
+ */
+export function renumberPositions(key: string): number {
+  const update = db.prepare(`UPDATE ticket_branches SET position = ? WHERE id = ?`);
+  let changed = 0;
+  const run = db.transaction(() => {
+    for (const chain of orderChains(listTicketBranches(key))) {
+      chain.nodes.forEach((node, index) => {
+        if (node.item.position === index) return;
+        update.run(index, node.item.id);
+        changed += 1;
+      });
+    }
+  });
+  run();
+  return changed;
+}
+
 export function removeTicketBranch(key: string, repo: string, branch: string): boolean {
   return db.prepare(`DELETE FROM ticket_branches WHERE ticket_key = ? AND repo = ? AND branch = ?`)
     .run(key, repo, branch).changes > 0;
@@ -156,6 +178,7 @@ export function syncMembersFromReviews(key: string): number {
       setTicketBranchParent(key, head.repo, head.branch, head.base_branch, 'stored');
       added += 1;
     }
+    if (added > 0) renumberPositions(key);
   });
   run();
   return added;

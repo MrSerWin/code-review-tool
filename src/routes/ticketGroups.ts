@@ -9,7 +9,7 @@ import { rowLinks } from '../githubLinks.js';
 import { resolveTargets } from '../resolver.js';
 import { REVIEWER_NAMES } from '../reviewers/index.js';
 import {
-  applyGroupBases, defaultDetectDeps, detectGroupParents, GroupError, joinGroup, orderedMembers, setChainOrder,
+  applyGroupBases, defaultDetectDeps, detectGroupParents, GroupError, joinGroup, orderBatch, orderedMembers, setChainOrder,
   setParentByHand, ticketGroupView, type DetectDeps, type TicketGroupView,
 } from '../ticketGroups.js';
 import {
@@ -22,7 +22,10 @@ import { startRun } from './reviews.js';
 export interface TicketRouteDeps {
   resolve: typeof resolveTargets;
   detect: DetectDeps;
-  startRun: (target: ResolvedTarget, ticket: TicketInfo | null, reviewer: string | undefined, model: string | undefined) => ReviewRow;
+  startRun: (
+    target: ResolvedTarget, ticket: TicketInfo | null, reviewer: string | undefined, model: string | undefined,
+    opts?: { dependsOn?: number | null },
+  ) => ReviewRow;
   recompute: typeof recomputeCoverage;
   pending: (key: string) => boolean;
 }
@@ -247,28 +250,35 @@ export async function ticketGroupRoutes(app: FastifyInstance, opts: { deps?: Par
 
     const runTicket = withAddedRequirements(ticket, requirementsText);
     const queuedNames = new Set(members.map((m) => `${m.repo}#${m.branch}`));
+    const allMembers = orderedMembers(key);
+    const planned = members.map((m) => {
+      const fromTarget = targets.find((t) => t.repo === m.repo && t.branch === m.branch);
+      const base: ResolvedTarget = fromTarget ?? {
+        repo: m.repo, branch: m.branch, baseBranch: m.parent_branch ?? m.default_branch ?? 'main',
+        prNumber: m.pr_number ?? null, source: m.source,
+      };
+      return applyGroupBases(key, [{ ...base, source: m.source }])[0]!;
+    });
     const notes: string[] = [];
     const reviews: ReviewRow[] = [];
     try {
-      for (const m of members) {
-        const fromTarget = targets.find((t) => t.repo === m.repo && t.branch === m.branch);
-        const base: ResolvedTarget = fromTarget ?? {
-          repo: m.repo, branch: m.branch, baseBranch: m.parent_branch ?? m.default_branch ?? 'main',
-          prNumber: m.pr_number ?? null, source: m.source,
-        };
-        const [target] = applyGroupBases(key, [{ ...base, source: m.source }]);
-        const parentIsMember = members.some((p) => p.repo === m.repo && p.branch === target!.baseBranch)
-          || orderedMembers(key).some((p) => p.repo === m.repo && p.branch === target!.baseBranch);
+      // Parents first across every chain; a child waits in the queue for its parent's review.
+      for (const step of orderBatch(planned, () => key)) {
+        const target = step.target;
+        const parentIsMember = allMembers.some((p) => p.repo === target.repo && p.branch === target.baseBranch);
         if (parentIsMember) {
           const reviewed = db.prepare(`SELECT 1 FROM reviews WHERE repo = ? AND branch = ? AND status = 'done' LIMIT 1`)
-            .get(m.repo, target!.baseBranch);
-          if (!reviewed) {
-            notes.push(queuedNames.has(`${m.repo}#${target!.baseBranch}`)
-              ? `${m.repo}#${m.branch}: its parent ${target!.baseBranch} has no finished review yet; it is queued first in this batch.`
-              : `${m.repo}#${m.branch}: its parent ${target!.baseBranch} has no finished review yet and is not in this batch.`);
+            .get(target.repo, target.baseBranch);
+          if (step.parentIndex !== null) {
+            notes.push(`${target.repo}#${target.branch}: starts after the review of its parent ${target.baseBranch} in this batch ends.`);
+          } else if (!reviewed) {
+            notes.push(queuedNames.has(`${target.repo}#${target.baseBranch}`)
+              ? `${target.repo}#${target.branch}: its parent ${target.baseBranch} has no finished review yet.`
+              : `${target.repo}#${target.branch}: its parent ${target.baseBranch} has no finished review yet and is not in this batch.`);
           }
         }
-        reviews.push(deps.startRun(target!, runTicket, reviewer, model));
+        const dependsOn = step.parentIndex !== null ? reviews[step.parentIndex]!.id : null;
+        reviews.push(deps.startRun(target, runTicket, reviewer, model, { dependsOn }));
       }
     } catch (err) {
       if (reviews.length === 0) return reply.code(400).send({ error: (err as Error).message });

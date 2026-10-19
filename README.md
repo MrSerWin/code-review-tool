@@ -304,8 +304,12 @@ them as a **ticket group**: per repository, a chain of branches, each with the
   /api/tickets/<key>/review`, or the MCP tool `start_ticket_review` resolves
   the ticket again, re-detects the parents, and queues every branch of every
   chain parents first, each diffed against its parent, as ordinary single-branch
-  runs. A branch whose parent has no finished review yet still runs; the answer
-  says so. `requirementsText` is added to the ticket text of every run and of
+  runs. A child whose parent is in the same batch waits in the queue until the
+  parent's review has ended (done, failed, or cancelled: a parent that did not
+  finish releases it, with a note in its log); `POST /api/reviews` with several
+  branches of one ticket orders and chains them the same way and records a
+  ticket run. A branch whose parent is outside the batch and has no finished
+  review yet still runs; the answer says so. `requirementsText` is added to the ticket text of every run and of
   the coverage (approved decisions, scope notes). `start_review` of one branch
   works as before; when the branch belongs to a group, its base defaults to
   the group's parent (an explicit `baseBranch` wins), and so does a re-run.
