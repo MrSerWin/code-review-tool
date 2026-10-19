@@ -52,7 +52,11 @@ export async function previewRoutes(app: FastifyInstance): Promise<void> {
         name: recipe.name,
         description: recipe.description ?? null,
         roles: Object.entries(recipe.repos).map(([role, repo]) => ({ role, repo })),
-        ports: recipe.ports.map((port) => ({ ...port, primary: port.id === primaryPort(recipe).id })),
+        ports: recipe.ports.map((port) => ({
+          ...port,
+          label: port.label ?? port.id,
+          primary: port.id === primaryPort(recipe).id,
+        })),
         database: recipe.database
           ? {
               engine: recipe.database.engine,
@@ -76,7 +80,8 @@ export async function previewRoutes(app: FastifyInstance): Promise<void> {
     if (!parsed.success) return reply.code(400).send({ error: 'Invalid query' });
     const { limit = 50, offset = 0, ...rest } = parsed.data;
     const { previews, total } = listPreviews({ ...rest, limit, offset });
-    return { previews: previews.map(decoratePreview), total };
+    const { recipes } = loadRecipes();
+    return { previews: previews.map((row) => decoratePreview(row, recipes)), total };
   });
 
   app.get('/api/previews/:id', async (req, reply) => {

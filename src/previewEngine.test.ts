@@ -246,6 +246,8 @@ test('stop answers while the teardown runs; a second stop joins it', async () =>
   assert.equal(second.json().preview.status, 'stopping');
   const polled = await app.inject({ method: 'GET', url: `/api/previews/${preview.id}` });
   assert.equal(polled.json().preview.status, 'stopping');
+  const { url, links } = polled.json().preview;
+  assert.deepEqual(links, [{ label: 'web', url, port_id: 'web', primary: true }]);
 
   assert.equal(await settled(preview.id, ['stopped', 'failed']), 'stopped');
   const downLog = path.join(dataDir, 'previews', String(preview.id), 'down.log');
@@ -254,4 +256,43 @@ test('stop answers while the teardown runs; a second stop joins it', async () =>
 
   const ended = await app.inject({ method: 'POST', url: `/api/previews/${preview.id}/stop` });
   assert.equal(ended.json().preview.status, 'stopped', 'an ended preview is left as it is');
+});
+
+test('the API derives links from the recipe, and one per allocated port when the recipe is gone', async () => {
+  const dir = path.join(recipesDir, 'linked');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'recipe.json'), JSON.stringify({
+    name: 'linked',
+    repos: { backend: 'test-repo' },
+    ports: [
+      { id: 'api', internal: 8000, label: 'Backend API', links: [{ label: 'Admin', path: '/admin/' }] },
+      { id: 'web', internal: 3000, primary: true, label: 'Web app' },
+    ],
+    steps: { up: ['true'], down: ['true'] },
+  }));
+  try {
+    const ports = JSON.stringify({ api: 47901, web: 47902 });
+    const linked = store.createPreview({ recipe: 'linked', ports_json: ports, url: 'http://127.0.0.1:47902', status: 'stopped' });
+    const orphan = store.createPreview({ recipe: 'gone', ports_json: ports, url: 'http://127.0.0.1:47902', status: 'stopped' });
+
+    const one = await app.inject({ method: 'GET', url: `/api/previews/${linked.id}` });
+    assert.deepEqual(one.json().preview.links, [
+      { label: 'Web app', url: 'http://127.0.0.1:47902', port_id: 'web', primary: true },
+      { label: 'Admin', url: 'http://127.0.0.1:47901/admin/', port_id: 'api', primary: false },
+    ]);
+
+    const list = await app.inject({ method: 'GET', url: '/api/previews?limit=500' });
+    const byId = new Map(list.json().previews.map((p: { id: number }) => [p.id, p]));
+    assert.deepEqual((byId.get(linked.id) as { links: unknown }).links, one.json().preview.links);
+    assert.deepEqual((byId.get(orphan.id) as { links: unknown }).links, [
+      { label: 'web', url: 'http://127.0.0.1:47902', port_id: 'web', primary: true },
+      { label: 'api', url: 'http://127.0.0.1:47901', port_id: 'api', primary: false },
+    ]);
+
+    const recipes = await app.inject({ method: 'GET', url: '/api/recipes' });
+    const recipe = recipes.json().recipes.find((r: { name: string }) => r.name === 'linked');
+    assert.deepEqual(recipe.ports.map((p: { label: string }) => p.label), ['Backend API', 'Web app']);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
