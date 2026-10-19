@@ -2,7 +2,9 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { config } from './config.js';
 import { listReviewers } from './reviewers/index.js';
-import type { CheckoutResult, ReviewOutput, ReviewRow, Severity, TicketInfo } from './types.js';
+import type {
+  AnchorStatus, CheckoutResult, Finding, FindingKind, ReviewOutput, ReviewRow, Severity, TicketInfo,
+} from './types.js';
 
 /** Minimal shape the report needs from a `reviews` row. */
 export type ReportableReview = Pick<
@@ -155,7 +157,9 @@ export function renderReport(
   } else {
     findings.forEach((finding, index) => {
       lines.push(`### ${index + 1}. [${finding.severity.toUpperCase()}] ${finding.title}`, '');
-      lines.push(`- **File:** ${location(finding.file, finding.line, finding.end_line)}`);
+      lines.push(`- **File:** ${location(finding.file, finding.line, finding.end_line)}${anchorNote(finding)}`);
+      if (finding.kind && finding.kind !== 'diff') lines.push(`- **Caused by:** ${causeText(finding)}`);
+      if (finding.hunk) lines.push(`- **Hunk:** \`${finding.hunk}\``);
       if (finding.category) lines.push(`- **Category:** ${finding.category}`);
       lines.push(`- **Problem:** ${finding.problem}`);
       if (finding.why) lines.push(`- **Why it matters:** ${finding.why}`);
@@ -205,6 +209,38 @@ function location(file: string | null, line: number | null, endLine: number | nu
   if (line && endLine && endLine > line) return `\`${file}:${line}-${endLine}\``;
   if (line) return `\`${file}:${line}\``;
   return `\`${file}\``;
+}
+
+const KIND_LABEL: Record<FindingKind, string> = {
+  diff: 'in the diff',
+  regression: 'dependent site',
+  stale_doc: 'stale doc',
+  consumer: 'consumer',
+};
+
+const ANCHOR_WARNING: Partial<Record<AnchorStatus, string>> = {
+  missing_path: 'path not found at HEAD',
+  line_out_of_range: 'line out of range at HEAD',
+  off_diff: 'outside the diff',
+};
+
+export function kindLabel(kind: FindingKind | null | undefined): string | null {
+  return kind && kind !== 'diff' ? KIND_LABEL[kind] ?? kind : null;
+}
+
+export function anchorWarning(status: AnchorStatus | null | undefined): string | null {
+  return status ? ANCHOR_WARNING[status] ?? null : null;
+}
+
+/** ` (dependent site)` and/or ` **[anchor: path not found at HEAD]**`; empty for a plain diff finding. */
+function anchorNote(f: Pick<Finding, 'kind' | 'anchor_status'>): string {
+  const kind = kindLabel(f.kind);
+  const warning = anchorWarning(f.anchor_status);
+  return `${kind ? ` (${kind})` : ''}${warning ? ` **[anchor: ${warning}]**` : ''}`;
+}
+
+function causeText(f: Pick<Finding, 'cause_file' | 'cause_line'>): string {
+  return f.cause_file ? location(f.cause_file, f.cause_line, null) : '_no cause location given_';
 }
 
 /** Keep table cells on one line and stop `|` from splitting a column. */

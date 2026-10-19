@@ -7,7 +7,7 @@
  * pulls in nothing that reads configuration or secrets.
  */
 import type {
-  FindingRow, LogRow, PreviewRole, PreviewStatus, RequirementRow, ReviewGroup, ReviewRow, ReviewStatus, Severity,
+  AnchorStatus, FindingKind, FindingRow, LogRow, PreviewRole, PreviewStatus, RequirementRow, ReviewGroup, ReviewRow, ReviewStatus, Severity,
 } from '../types.js';
 
 export const TERMINAL_STATUSES: readonly ReviewStatus[] = ['done', 'failed', 'cancelled'];
@@ -48,6 +48,12 @@ export interface CompactFinding {
   severity: Severity;
   title: string;
   location: string | null;
+  /** `diff`, or the kind of untouched site the location is (regression, stale_doc, consumer). */
+  kind: FindingKind;
+  /** For a non-diff kind: the changed line that causes it, as `file:line`. */
+  cause: string | null;
+  /** How the location checked out at HEAD; `unverified` on rows older than the check. */
+  anchor_status: AnchorStatus;
   problem: string | null;
 }
 
@@ -71,6 +77,9 @@ export function compactFindings(
       severity: f.severity,
       title: truncate(f.title, 160) ?? '',
       location: findingLocation(f),
+      kind: f.kind ?? 'diff',
+      cause: f.cause_file ? findingLocation({ file: f.cause_file, line: f.cause_line, end_line: null }) : null,
+      anchor_status: f.anchor_status ?? 'unverified',
       problem: truncate(f.problem, textMax),
     })),
     omitted: sorted.length - kept.length,
