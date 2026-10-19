@@ -22,11 +22,13 @@ guessed. Verify before you keep anything.
 1. **Verify every candidate.**
    Open the file and the line each candidate names and check the claim against
    the real code. Drop anything you cannot confirm. Drop anything that is not
-   about the changed code, EXCEPT a regression: a `regressions` candidate points
-   at untouched code on purpose, and it stays in scope because the diff is what
-   broke it. Drop duplicates: when two lenses report the same problem, keep one
-   entry with the clearest wording and the best location. Keeping a wrong
-   finding is worse than dropping a real one.
+   about the changed code, EXCEPT a non-diff finding: a candidate with `kind`
+   `regression`, `stale_doc`, or `consumer` points at untouched code on
+   purpose, and it stays in scope because the diff is what broke it. Check
+   that its `cause_file` and `cause_line` really are a changed line. Drop
+   duplicates: when two lenses report the same problem, keep one entry with
+   the clearest wording and the best location. Keeping a wrong finding is
+   worse than dropping a real one.
 
    For a `regressions` candidate, the location it names is the DEPENDENT site —
    the caller, test, query, or consumer that now breaks — not the changed line.
@@ -36,6 +38,13 @@ guessed. Verify before you keep anything.
    cannot find the usage it claims, is unverified — drop it. When the claim is
    that an existing test now fails, check that the named test file, test name,
    and assertion exist and would really break; drop it if they do not.
+
+   Keep the lens's anchor (`file`, `line`, `end_line`, `kind`, `cause_file`,
+   `cause_line`, `hunk`) unless you re-read the code at HEAD and found a better
+   one. When you keep a candidate, set `lens` to the lens it came from (the
+   one whose wording or anchor you kept); `null` only when you wrote the
+   finding yourself. A non-diff finding keeps its `kind` and its cause: never
+   turn a regression into a `diff` finding that points at an untouched file.
 
 2. **Assign the final severity yourself.**
    The lenses over- and under-rate. Set the severity you can defend:
@@ -109,9 +118,14 @@ It must match this shape exactly:
     {
       "severity": "blocker|major|minor|nit",
       "category": "correctness|security|tenancy|tests|performance|style|docs",
+      "kind": "diff|regression|stale_doc|consumer",
       "file": "src/file.ts",
       "line": 120,
       "end_line": 126,
+      "cause_file": "the changed file that causes a non-diff finding, else null",
+      "cause_line": 88,
+      "hunk": "@@ -110,8 +110,12 @@ or null",
+      "lens": "correctness|security|tests|contracts|regressions|null",
       "title": "short title",
       "problem": "what is wrong, in simple words",
       "why": "why it matters, what breaks",
@@ -139,6 +153,10 @@ Rules for the JSON block:
 - `file`, `line`, `end_line` and `snippet` may be `null` only when the entry is
   genuinely not tied to one place (rare). Prefer a real location.
 - For a regression, `file` and `line` point at the DEPENDENT site that breaks,
-  and `problem` names the changed code that broke it. Never the other way round.
+  `kind` is `regression` (or `stale_doc` / `consumer`), and `cause_file` and
+  `cause_line` name the changed line that broke it. Never the other way round.
+  `cause_file` must be in the changed set.
+- `kind` is required on every finding; `cause_file` and `cause_line` are `null`
+  for a `diff` finding.
 - Use plain strings. No markdown tables inside the JSON values.
 - Output valid JSON. No comments, no trailing commas, no text after the block.

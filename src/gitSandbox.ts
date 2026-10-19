@@ -4,6 +4,7 @@ import path from 'node:path';
 import { config, assertAllowedRemote, assertAllowedRepo, repoUrl } from './config.js';
 import { logger } from './logger.js';
 import type { BaseReason, CheckoutResult, OnLog, ResolvedTarget } from './types.js';
+import { mergeChangedFiles } from './changedFiles.js';
 import { assertSafeName } from './gitNames.js';
 import {
   branchRefs, branchTip, captureWorkingTree, currentBranch, detectBaseBranch, localRepoPath, planBaseSource,
@@ -439,18 +440,15 @@ async function finishCheckout(
     await inRepo(['git', 'merge-base', `refs/remotes/origin/${target.baseBranch}`, 'HEAD'])
   ).stdout.trim();
 
-  const numstat = await inRepo(['git', 'diff', '--numstat', `${baseSha}..HEAD`]);
-  let additions = 0;
-  let deletions = 0;
-  const changedFiles: string[] = [];
-  for (const line of numstat.stdout.split('\n')) {
-    if (!line.trim()) continue;
-    const [add, del, file] = line.split('\t');
-    if (!file) continue;
-    additions += Number(add) || 0;
-    deletions += Number(del) || 0;
-    changedFiles.push(file);
-  }
+  // -z keeps paths verbatim (no quoting, no `{a => b}` rename form); -M
+  // resolves a rename to its new path and keeps the old one beside it.
+  const range = `${baseSha}..HEAD`;
+  const nameStatus = await inRepo(['git', 'diff', '--name-status', '-z', '-M', range]);
+  const numstat = await inRepo(['git', 'diff', '--numstat', '-z', '-M', range]);
+  const changedFileList = mergeChangedFiles(nameStatus.stdout, numstat.stdout);
+  const changedFiles = changedFileList.map((f) => f.path);
+  const additions = changedFileList.reduce((n, f) => n + (f.additions ?? 0), 0);
+  const deletions = changedFileList.reduce((n, f) => n + (f.deletions ?? 0), 0);
 
   // The review must run against a complete offline tree; a missing object here
   // would silently truncate the diff the reviewer sees.
@@ -482,6 +480,7 @@ async function finishCheckout(
     additions,
     deletions,
     changedFiles,
+    changedFileList,
     workingTreeSnapshot: snapshot,
   };
 }

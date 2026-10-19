@@ -532,6 +532,11 @@ table.grid tr:last-child td { border-bottom: none; }
 }
 .finding header { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; margin-bottom: var(--space-2); }
 .finding .loc { color: var(--accent); margin-bottom: var(--space-2); overflow-wrap: anywhere; }
+.finding .loc-row { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; margin-bottom: var(--space-2); }
+.finding .loc-row .loc { margin-bottom: 0; }
+.finding .cause { font-size: var(--fs-sm); overflow-wrap: anywhere; }
+.tag.kind { color: var(--violet); border-color: var(--violet); }
+.tag.anchor-warning { color: var(--amber); border-color: var(--amber); background: var(--amber-bg); }
 .finding p:last-child { margin-bottom: 0; }
 .finding p, .observation p { overflow-wrap: anywhere; }
 .sev-border-blocker { border-left-color: var(--sev-blocker); }
