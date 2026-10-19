@@ -65,7 +65,10 @@ export function enqueueReview(reviewId: number): void {
   }
   finishRow(reviewId, { runner_pid: SELF.pid, runner_started_at: SELF.startedAt, reviewer_pgids: null });
   pending.push(reviewId);
-  log(reviewId, 'info', 'Queued.');
+  const dependsOn = getReview(reviewId)?.depends_on ?? null;
+  log(reviewId, 'info', dependsOn && !dependencySettled(dependsOn)
+    ? `Queued; waits for the review of its parent branch (#${dependsOn}) to finish.`
+    : 'Queued.');
   status(reviewId, 'queued');
   spawnWorkers();
 }
@@ -79,6 +82,8 @@ export function cancelReview(reviewId: number): boolean {
     log(reviewId, 'warn', 'Cancelled before it started.');
     status(reviewId, 'cancelled');
     settleGroup(reviewId);
+    // Children waiting for it may start now.
+    spawnWorkers();
     return true;
   }
   const job = running.get(reviewId);
@@ -212,18 +217,58 @@ export async function stopAllReviews(reason: string, graceMs = 3_000): Promise<v
   await stopped;
 }
 
-/** Top up the worker pool to `CONCURRENCY` while there is queued work. */
+const TERMINAL = new Set<ReviewStatus>(['done', 'failed', 'cancelled']);
+
+/** A dependency is settled once its row has ended, or is gone. */
+function dependencySettled(id: number): boolean {
+  const row = getReview(id);
+  return !row || TERMINAL.has(row.status);
+}
+
+/**
+ * The first queued review that may start: one without a dependency, or whose
+ * dependency (the review of its parent slice in the same batch) has ended.
+ * A parent that failed or was cancelled releases its child, with a note.
+ */
+export function nextEligible(queue: number[], settled: (id: number) => boolean, dependsOf: (id: number) => number | null): number | undefined {
+  for (let i = 0; i < queue.length; i += 1) {
+    const id = queue[i]!;
+    const dep = dependsOf(id);
+    if (dep !== null && !settled(dep)) continue;
+    queue.splice(i, 1);
+    return id;
+  }
+  return undefined;
+}
+
+function takeNext(): number | undefined {
+  const id = nextEligible(pending, dependencySettled, (rid) => getReview(rid)?.depends_on ?? null);
+  if (id === undefined) return undefined;
+  const dep = getReview(id)?.depends_on ?? null;
+  if (dep !== null) {
+    const parent = getReview(dep);
+    if (parent && parent.status !== 'done') {
+      log(id, 'warn', `The review of its parent branch (#${dep}) ended as ${parent.status}; this one starts anyway.`);
+    }
+  }
+  return id;
+}
+
+/** Top up the worker pool to `CONCURRENCY` while there is queued work that may start. */
 function spawnWorkers(): void {
   while (workers < CONCURRENCY && pending.length > 0) {
+    const id = takeNext();
+    if (id === undefined) return;
     workers += 1;
-    void worker();
+    void worker(id);
   }
 }
 
-async function worker(): Promise<void> {
+async function worker(first: number): Promise<void> {
+  let next: number | undefined = first;
   try {
-    while (pending.length > 0) {
-      const reviewId = pending.shift()!;
+    while (next !== undefined) {
+      const reviewId: number = next;
       const controller = new AbortController();
       running.set(reviewId, { reviewId, controller });
       try {
@@ -235,9 +280,12 @@ async function worker(): Promise<void> {
         cancelling.delete(reviewId);
         interrupted.delete(reviewId);
       }
+      next = stopping ? undefined : takeNext();
     }
   } finally {
     workers -= 1;
+    // A finished review may have released children that wait for it.
+    if (!stopping) spawnWorkers();
   }
 }
 
