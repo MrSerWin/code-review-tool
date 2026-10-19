@@ -4,12 +4,14 @@ import {
   DUMP_CHOICES,
   DumpModeBadge,
   PREVIEW_LIVE,
+  PreviewLinks,
   PreviewStatusPill,
   RoleChips,
   TicketLabel,
   baseRoles,
   fmtAge,
   fmtExpiry,
+  previewLinksOf,
 } from '../components/preview';
 import RoleBranchInputs, { roleRequests } from '../components/RoleBranchInputs';
 import { Card } from '../components/ui';
@@ -299,7 +301,7 @@ export default function Previews() {
                   <th>Ticket</th>
                   <th className="col-branches">Branches</th>
                   <th>Status</th>
-                  <th>URL</th>
+                  <th>Links</th>
                   <th>Data</th>
                   <th>Age</th>
                   <th>Expires</th>
@@ -351,10 +353,8 @@ export default function Previews() {
                         )}
                       </td>
                       <td>
-                        {p.status === 'ready' && p.url ? (
-                          <a className="mono nowrap" href={p.url} target="_blank" rel="noreferrer">
-                            {p.url.replace(/^https?:\/\//, '')} ↗
-                          </a>
+                        {p.status === 'ready' && previewLinksOf(p).length > 0 ? (
+                          <PreviewLinks preview={p} variant="row" />
                         ) : (
                           <span className="muted">—</span>
                         )}

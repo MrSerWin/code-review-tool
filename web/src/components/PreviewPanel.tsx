@@ -15,6 +15,7 @@ import {
   DumpModeNote,
   PhaseTrack,
   PREVIEW_LIVE,
+  PreviewLinks,
   PreviewStatusPill,
   RoleChips,
   baseRoles,
@@ -338,11 +339,7 @@ export default function PreviewPanel({
 
           {live && !ready && <PhaseTrack preview={preview} />}
 
-          {ready && preview.url && (
-            <a className="preview-url" href={preview.url} target="_blank" rel="noreferrer">
-              {preview.url} <span aria-hidden="true">↗</span>
-            </a>
-          )}
+          {ready && <PreviewLinks preview={preview} variant="card" />}
 
           {preview.status === 'expired' && (
             <p className="notice-line">
