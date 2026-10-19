@@ -40,7 +40,8 @@ function reviewRow(overrides: Partial<ReviewRow> = {}): ReviewRow {
 function finding(i: number, severity: FindingRow['severity'], overrides: Partial<FindingRow> = {}): FindingRow {
   return {
     id: i, review_id: 1, severity, category: 'correctness', file: `src/f${i}.ts`, line: i, end_line: null,
-    title: `Finding ${i}`, problem: `Problem ${i}`, why: null, suggestion: null, snippet: null, ord: i,
+    title: `Finding ${i}`, problem: `Problem ${i}`, why: null, suggestion: null, snippet: null,
+    kind: 'diff', cause_file: null, cause_line: null, hunk: null, anchor_status: 'ok', lens: null, ord: i,
     ...overrides,
   };
 }

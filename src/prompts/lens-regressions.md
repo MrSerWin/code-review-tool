@@ -62,8 +62,11 @@ diff, say so in `observations` — that is a useful answer, not a failure.
 
 - Every finding MUST name the AFFECTED site — the dependent file and line that
   now breaks — not only the changed line. Put that dependent location in `file`
-  and `line`. Mention the changed line inside `problem`. A regression claim
-  without the dependent location is useless and must not be reported.
+  and `line`, set `kind` to `regression` (or `stale_doc` for documentation,
+  `consumer` for a parser of a changed shape), and put the changed line that
+  broke it in `cause_file` and `cause_line`. `cause_file` must be in the
+  changed set. A regression claim without both locations is useless and must
+  not be reported.
 - Say in `problem` how you found the usage, so the reader can repeat it: the
   pattern you grepped for and where it hit.
 - You cannot run tests. Any claim that a test would now fail MUST name the test

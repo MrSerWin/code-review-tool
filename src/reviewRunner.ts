@@ -9,6 +9,7 @@ import { killProcessGroups, killProcessGroupsNow, type RecordedGroup } from './p
 import { getReviewer } from './reviewers/index.js';
 import { parseAnthropicStreamLine } from './reviewers/anthropicStream.js';
 import type { ReviewerDefinition } from './reviewers/types.js';
+import { anchorFields, normalizeLens } from './findingFields.js';
 import { LENS_NAMES } from './types.js';
 import type {
   CheckoutResult, LensName, LensOutput, OnLog, ReviewOutput, ReviewRow, TicketInfo,
@@ -58,6 +59,8 @@ const findingSchema = z.object({
   why: z.string().nullish().transform((v) => v ?? ''),
   suggestion: z.string().nullish().transform((v) => v ?? ''),
   snippet: z.string().nullish().transform((v) => v ?? null),
+  ...anchorFields,
+  lens: z.unknown().optional().transform(normalizeLens),
 });
 
 const observationSchema = z.object({
