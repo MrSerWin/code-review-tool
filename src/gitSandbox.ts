@@ -203,12 +203,46 @@ export async function ghApi<T>(apiPath: string): Promise<T> {
   if (!GH_PATH_SAFE.test(trimmed) || trimmed.includes('..') || trimmed.includes('://')) {
     throw new Error(`Unsafe GitHub API path: ${JSON.stringify(apiPath)}`);
   }
-  const result = await runInSandbox(['gh', 'api', '-H', 'Accept: application/vnd.github+json', trimmed]);
+  return runGhApi<T>(trimmed);
+}
+
+async function runGhApi<T>(trimmed: string, jq?: string): Promise<T> {
+  const result = await runInSandbox([
+    'gh', 'api', '-H', 'Accept: application/vnd.github+json', ...(jq ? ['--jq', jq] : []), trimmed,
+  ]);
   try {
     return JSON.parse(result.stdout) as T;
   } catch {
     throw new Error(`GitHub API returned non-JSON for ${trimmed}: ${result.stdout.slice(0, 400)}`);
   }
+}
+
+/**
+ * `compare/<base>...<head>` of an allowed repository, reduced to its status and
+ * commit counts. The `...` separator is why this does not go through `ghApi`,
+ * whose `..` guard would refuse it: both names are checked to be inert branch
+ * names (which never contain `..`), so the separator is the only dot run.
+ */
+export async function ghCompare(
+  repo: string,
+  base: string,
+  head: string,
+): Promise<{ status: string; ahead_by: number; behind_by: number }> {
+  assertAllowedRepo(repo);
+  assertSafeName('base branch', base);
+  assertSafeName('branch', head);
+  const apiPath = `repos/${config.GITHUB_ORG}/${repo}/compare/${base}...${head}?per_page=1`;
+  if (!GH_PATH_SAFE.test(apiPath) || apiPath.includes('://')) {
+    throw new Error(`Unsafe GitHub API path: ${JSON.stringify(apiPath)}`);
+  }
+  const out = await runGhApi<{ status?: unknown; ahead_by?: unknown; behind_by?: unknown }>(
+    apiPath, '{status: .status, ahead_by: .ahead_by, behind_by: .behind_by}',
+  );
+  return {
+    status: typeof out.status === 'string' ? out.status : 'unknown',
+    ahead_by: Number(out.ahead_by) || 0,
+    behind_by: Number(out.behind_by) || 0,
+  };
 }
 
 interface CheckoutPaths {

@@ -7,7 +7,8 @@
  * pulls in nothing that reads configuration or secrets.
  */
 import type {
-  AnchorStatus, FindingKind, FindingRow, LogRow, PreviewRole, PreviewStatus, RequirementRow, ReviewGroup, ReviewRow, ReviewStatus, Severity,
+  AnchorStatus, CoverageRequirement, CoverageStatus, CoverageVerdict, FindingKind, FindingRow, LogRow, ParentReason,
+  PreviewRole, PreviewStatus, RequirementRow, ReviewGroup, ReviewRow, ReviewSource, ReviewStatus, Severity, Verdict,
 } from '../types.js';
 
 export const TERMINAL_STATUSES: readonly ReviewStatus[] = ['done', 'failed', 'cancelled'];
@@ -176,12 +177,72 @@ export function compactGroup(
   };
 }
 
+/** A requirement of a group coverage as one branch reads it (see coverageView.ts). */
+export interface BranchCoverageLinePayload {
+  text: string;
+  status: CoverageStatus;
+  where: 'here' | 'elsewhere' | 'nowhere';
+  here: 'covered' | 'partial' | null;
+  others: string[];
+  note: string;
+}
+
+/** `ticket_group` of `GET /api/reviews/:id`: the review's ticket group, null for a branch without one. */
+export interface ReviewTicketGroupPayload {
+  key: string;
+  parent: string | null;
+  parent_reason: ParentReason | null;
+  coverage: {
+    id: number;
+    status: string;
+    verdict: CoverageVerdict | null;
+    summary: string | null;
+    created_at: string;
+    includes_this_review: boolean;
+    requirements: BranchCoverageLinePayload[];
+  } | null;
+  coverage_pending: boolean;
+}
+
 /** What `GET /api/reviews/:id` returns (the parts the MCP uses). */
 export interface ReviewDetailPayload {
   review: ReviewRow;
   requirements?: RequirementRow[];
   findings?: FindingRow[];
   logs?: LogRow[];
+  ticket_group?: ReviewTicketGroupPayload | null;
+}
+
+/** `in this branch`, `in repo#b`, `not covered anywhere`. */
+export function coverageWhere(line: BranchCoverageLinePayload): string {
+  if (line.where === 'nowhere') return 'not covered anywhere';
+  const others = line.others.join(', ');
+  if (line.where === 'elsewhere') return `in ${others}`;
+  const here = line.here === 'partial' ? 'partly in this branch' : 'in this branch';
+  return others ? `${here} and ${others}` : here;
+}
+
+/** The ticket group part of a review, compact. */
+export function reviewTicketGroup(group: ReviewTicketGroupPayload | null | undefined, maxRequirements = 30) {
+  if (!group) return null;
+  const c = group.coverage;
+  return {
+    key: group.key,
+    parent: group.parent,
+    parent_reason: group.parent_reason,
+    coverage_pending: group.coverage_pending,
+    coverage: c
+      ? {
+          id: c.id,
+          verdict: c.verdict,
+          includes_this_review: c.includes_this_review,
+          requirements: c.requirements.slice(0, maxRequirements).map((r) => ({
+            status: r.status, text: truncate(r.text, 200), where: coverageWhere(r),
+          })),
+          ...(c.requirements.length > maxRequirements ? { requirements_omitted: c.requirements.length - maxRequirements } : {}),
+        }
+      : null,
+  };
 }
 
 export interface ReviewDetailOptions {
@@ -210,6 +271,10 @@ export function reviewDetail(payload: ReviewDetailPayload, url: string, opts: Re
     // Only a finished review has an outcome; before that these are null.
     verdict: done ? review.verdict : null,
     can_merge: done && review.can_merge !== null ? review.can_merge === 1 : null,
+    // Findings only; for a branch of a ticket group it equals verdict, and coverage is in ticket_group.
+    code_verdict: done ? review.code_verdict ?? review.verdict : null,
+    code_can_merge: done ? boolOrNull(review.code_can_merge ?? review.can_merge) : null,
+    ticket_group: reviewTicketGroup(payload.ticket_group),
     summary: done ? truncate(review.summary, SUMMARY_MAX) : null,
     requirements: done
       ? { met: review.requirements_met ?? 0, total: review.requirements_total ?? 0, unmet }
@@ -231,6 +296,160 @@ export function reviewDetail(payload: ReviewDetailPayload, url: string, opts: Re
 }
 
 export type ReviewDetail = ReturnType<typeof reviewDetail>;
+
+function boolOrNull(v: number | null | undefined): boolean | null {
+  return v === null || v === undefined ? null : v === 1;
+}
+
+// --- ticket groups --------------------------------------------------------------
+
+interface RunSummaryPayload {
+  id: number;
+  run_index: number;
+  status: ReviewStatus;
+  verdict: Verdict | null;
+  code_verdict: Verdict | null;
+  code_can_merge: boolean | null;
+  base_branch: string;
+  blocking_count: number | null;
+}
+
+export interface TicketBranchPayload {
+  repo: string;
+  branch: string;
+  source: ReviewSource;
+  parent: string | null;
+  parentReason: ParentReason | null;
+  parentInGroup: boolean;
+  depth: number;
+  prNumber: number | null;
+  latest: RunSummaryPayload | null;
+  latestDone: RunSummaryPayload | null;
+  parentReviewed: boolean | null;
+}
+
+export interface CoveragePayload {
+  id: number;
+  status: 'running' | 'done' | 'failed';
+  verdict: CoverageVerdict | null;
+  summary: string | null;
+  requirements: CoverageRequirement[];
+  review_ids: number[];
+  reviewer: string | null;
+  model: string | null;
+  report_path: string | null;
+  error: string | null;
+  created_at: string;
+  finished_at: string | null;
+}
+
+export interface TicketRunPayload {
+  id: number;
+  status: 'running' | 'done';
+  review_ids: number[];
+  coverage_id: number | null;
+  created_at: string;
+  finished_at: string | null;
+}
+
+/** What `GET /api/ticket-groups/:key` returns. */
+export interface TicketPayload {
+  group: {
+    key: string;
+    title: string | null;
+    ticketUrl: string | null;
+    requirementsText: string | null;
+    chains: { repo: string; branches: TicketBranchPayload[] }[];
+  };
+  coverage: CoveragePayload | null;
+  latest_coverage: { id: number; status: string; error: string | null; created_at: string } | null;
+  coverage_pending: boolean;
+  run: TicketRunPayload | null;
+}
+
+export const DEFAULT_MAX_REQUIREMENTS = 40;
+
+/** A coverage, compact: per requirement its status and the branches that cover it, with their evidence. */
+export function compactCoverage(c: CoveragePayload | null, maxRequirements = DEFAULT_MAX_REQUIREMENTS) {
+  if (!c) return null;
+  const reqs = c.requirements.slice(0, maxRequirements);
+  return {
+    id: c.id,
+    status: c.status,
+    verdict: c.verdict,
+    summary: truncate(c.summary, SUMMARY_MAX),
+    requirements: reqs.map((r) => ({
+      status: r.status,
+      text: truncate(r.text, 200),
+      branches: r.branches.map((b) => ({
+        branch: `${b.repo}#${b.branch}`,
+        status: b.status,
+        evidence: b.evidence.slice(0, 5).map((e) => ({
+          location: e.line ? `${e.file}:${e.line}` : e.file,
+          anchor_status: e.anchor_status,
+        })),
+      })),
+      ...(r.note ? { note: truncate(r.note, 200) } : {}),
+    })),
+    ...(c.requirements.length > reqs.length ? { requirements_omitted: c.requirements.length - reqs.length } : {}),
+    open: c.requirements.filter((r) => r.status !== 'covered').map((r) => `${r.status}: ${truncate(r.text, 120)}`),
+    review_ids: c.review_ids,
+    error: truncate(c.error, 600),
+    created_at: c.created_at,
+    finished_at: c.finished_at,
+  };
+}
+
+function compactRun(run: RunSummaryPayload | null, urlFor: (id: number) => string) {
+  if (!run) return null;
+  return {
+    id: run.id,
+    run: run.run_index,
+    status: run.status,
+    base: run.base_branch,
+    code_verdict: run.status === 'done' ? run.code_verdict ?? run.verdict : null,
+    blocking_count: run.status === 'done' ? run.blocking_count : null,
+    url: urlFor(run.id),
+  };
+}
+
+/** A ticket group for `get_ticket`: chains in stack order, the latest run per branch, and the coverage. */
+export function compactTicket(
+  payload: TicketPayload,
+  urls: { review: (id: number) => string; ticket: string },
+  maxRequirements = DEFAULT_MAX_REQUIREMENTS,
+) {
+  return {
+    key: payload.group.key,
+    title: truncate(payload.group.title, 160),
+    ticket_url: payload.group.ticketUrl,
+    page: urls.ticket,
+    chains: payload.group.chains.map((c) => ({
+      repo: c.repo,
+      branches: c.branches.map((b) => ({
+        branch: b.branch,
+        source: b.source,
+        parent: b.parent,
+        parent_reason: b.parentReason,
+        parent_in_group: b.parentInGroup,
+        depth: b.depth,
+        pr: b.prNumber,
+        latest: compactRun(b.latest, urls.review),
+        ...(b.latestDone && b.latestDone.id !== b.latest?.id ? { latest_done: compactRun(b.latestDone, urls.review) } : {}),
+        ...(b.parentInGroup && b.parentReviewed === false ? { note: 'parent not reviewed yet' } : {}),
+      })),
+    })),
+    coverage: compactCoverage(payload.coverage, maxRequirements),
+    ...(payload.latest_coverage ? { latest_coverage: payload.latest_coverage } : {}),
+    coverage_pending: payload.coverage_pending,
+    run: payload.run,
+  };
+}
+
+/** Whether a ticket review batch is over: every queued run ended and its coverage was computed. */
+export function isTicketRunFinished(payload: TicketPayload): boolean {
+  return payload.run?.status === 'done';
+}
 
 export const DEFAULT_REPORT_MAX = 40_000;
 

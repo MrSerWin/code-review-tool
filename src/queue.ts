@@ -18,8 +18,11 @@ import {
   commandMatchesBin, inspectProcess, isOrphanReviewer, isPidAlive, killProcessGroups, parseRecordedGroups,
   SELF, shouldRecover, type ProcessInfo, type RecordedGroup, type RecoveryCaller, type RunnerIdentity,
 } from './processOwnership.js';
-import { checkoutChangedFiles, runReview, stopAllReviewers, type PreviousFinding } from './reviewRunner.js';
+import { checkoutChangedFiles, runReview, stopAllReviewers, type PreviousFinding, type SliceInfo } from './reviewRunner.js';
 import { writeReport } from './reportWriter.js';
+import { coverageSchedulingEnabled, onGroupReviewSettled } from './coverage.js';
+import { sliceContext } from './ticketGroups.js';
+import { isTicketGroupKey } from './ticketStore.js';
 import type {
   LogLevel,
   ResolvedTarget,
@@ -75,6 +78,7 @@ export function cancelReview(reviewId: number): boolean {
     finishRow(reviewId, { status: 'cancelled', finished_at: nowIso() });
     log(reviewId, 'warn', 'Cancelled before it started.');
     status(reviewId, 'cancelled');
+    settleGroup(reviewId);
     return true;
   }
   const job = running.get(reviewId);
@@ -261,7 +265,7 @@ async function processReview(reviewId: number, signal: AbortSignal): Promise<voi
     prNumber: review.pr_number ?? null,
     source: local ? 'local' : 'github',
     includeWorkingTree: local && review.working_tree === 1,
-    ...(local && review.base_reason ? { baseReason: review.base_reason } : {}),
+    ...(review.base_reason ? { baseReason: review.base_reason } : {}),
   };
 
   await ensureImage();
@@ -288,6 +292,21 @@ async function processReview(reviewId: number, signal: AbortSignal): Promise<voi
   status(reviewId, 'reviewing');
 
   const ticket = loadTicket(review);
+  const slice = loadSlice(review);
+  if (slice) {
+    const self = slice.members.find((m) => m.self);
+    const parentInGroup = slice.members.find((m) => m.repo === review.repo && m.branch === self?.parent);
+    log(
+      reviewId,
+      'info',
+      `Slice ${slice.members.findIndex((m) => m.self) + 1} of ${slice.members.length} of ${slice.ticketKey}, ` +
+        `diffed against ${review.base_branch}. The verdict judges this branch's code; ticket coverage is judged ` +
+        'across all branches.',
+    );
+    if (parentInGroup && !hasFinishedRun(review.repo, parentInGroup.branch)) {
+      log(reviewId, 'info', `Note: the parent ${parentInGroup.branch} has no finished review yet.`);
+    }
+  }
   const previousFindings = loadPreviousFindings(review.repo, review.branch, review.run_index);
   if (previousFindings.length) {
     log(reviewId, 'info', `Carrying ${previousFindings.length} open finding(s) from the previous run.`);
@@ -305,6 +324,7 @@ async function processReview(reviewId: number, signal: AbortSignal): Promise<voi
       reviewer: review.reviewer ?? undefined,
       // Persisted so a later recovery can stop them if this process dies.
       onProcessGroups: (groups) => finishRow(reviewId, { reviewer_pgids: JSON.stringify(groups) }),
+      ...(slice ? { slice } : {}),
     },
   );
   throwIfCancelled(signal);
@@ -321,13 +341,15 @@ async function processReview(reviewId: number, signal: AbortSignal): Promise<voi
     lenses: output.lensResults,
     synthesis: output.synthesisRaw,
     reanchor: output.reanchorRaw,
-  });
+  }, slice ? { ticketKey: slice.ticketKey } : undefined);
   log(reviewId, 'info', `Report written to ${reportPath}`);
 
   updateReview(reviewId, {
     status: 'done',
     verdict: output.verdict,
     can_merge: output.can_merge ? 1 : 0,
+    code_verdict: output.code_verdict ?? null,
+    code_can_merge: output.code_can_merge === undefined ? null : output.code_can_merge ? 1 : 0,
     summary: output.summary,
     requirements_met: output.requirements.filter((r) => r.status === 'met').length,
     requirements_total: output.requirements.length,
@@ -341,7 +363,7 @@ async function processReview(reviewId: number, signal: AbortSignal): Promise<voi
   log(
     reviewId,
     'info',
-    `Done — verdict ${output.verdict}, can_merge=${output.can_merge}, ` +
+    `Done: verdict ${output.verdict}, can_merge=${output.can_merge}, code verdict ${output.code_verdict ?? output.verdict}, ` +
       `${output.findings.length} finding(s), ${output.observations.length} observation(s).`,
   );
   publish(reviewId, {
@@ -353,7 +375,12 @@ async function processReview(reviewId: number, signal: AbortSignal): Promise<voi
     reportPath,
   });
 
-  pruneCheckout(checkout.dir);
+  // A slice's checkout waits for the ticket coverage pass, which checks its evidence there.
+  if (slice && coverageSchedulingEnabled()) {
+    onGroupReviewSettled(slice.ticketKey);
+  } else {
+    pruneCheckout(checkout.dir);
+  }
 }
 
 function handleFailure(reviewId: number, err: unknown): void {
@@ -370,6 +397,41 @@ function handleFailure(reviewId: number, err: unknown): void {
   });
   log(reviewId, 'error', cancelled ? 'Cancelled.' : `Failed: ${message}`);
   status(reviewId, finalStatus);
+  settleGroup(reviewId);
+}
+
+/** A settled run of a ticket group may be the last one of a batch: coverage is (re)scheduled. */
+function settleGroup(reviewId: number): void {
+  try {
+    const row = getReview(reviewId);
+    if (row && isTicketGroupKey(row)) onGroupReviewSettled(row.group_key!);
+  } catch {
+    // Scheduling must never break the pipeline.
+  }
+}
+
+/** The ticket slices the review belongs to, or undefined for a branch without a ticket group. */
+function loadSlice(review: ReviewRow): SliceInfo | undefined {
+  if (!isTicketGroupKey(review)) return undefined;
+  try {
+    const { members } = sliceContext(review.group_key!, review.repo, review.branch);
+    return {
+      ticketKey: review.group_key!,
+      members: members.map((m) => ({
+        repo: m.repo,
+        branch: m.branch,
+        parent: m.repo === review.repo && m.branch === review.branch ? review.base_branch : m.parent_branch,
+        self: m.repo === review.repo && m.branch === review.branch,
+      })),
+    };
+  } catch (err) {
+    log(review.id, 'warn', `Could not read the ticket group: ${(err as Error).message}`);
+    return { ticketKey: review.group_key!, members: [{ repo: review.repo, branch: review.branch, parent: review.base_branch, self: true }] };
+  }
+}
+
+function hasFinishedRun(repo: string, branch: string): boolean {
+  return Boolean(db.prepare(`SELECT 1 FROM reviews WHERE repo = ? AND branch = ? AND status = 'done' LIMIT 1`).get(repo, branch));
 }
 
 function loadTicket(review: ReviewRow): TicketInfo | null {

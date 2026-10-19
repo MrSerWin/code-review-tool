@@ -12,10 +12,11 @@ import { REVIEWER_NAMES } from '../reviewers/types.js';
 import type { ResolvedTarget, ReviewGroup, ReviewRow, TicketInfo } from '../types.js';
 import { ApiClient, ApiError, ApiNoAnswerError, ApiUnreachableError } from './client.js';
 import {
-  ALL_STATUSES, ACTIVE_STATUSES, compactGroup, compactLocalRepos, compactPreview, compactRecipes, compactReviewers,
-  DEFAULT_MAX_BRANCHES, DEFAULT_MAX_FINDINGS, DEFAULT_REPORT_MAX, isPreviewSettled, isTerminalStatus,
-  mutationRefusal, parseTargetSelector, PREVIEW_END_STATUSES, PREVIEW_LIVE_STATUSES, reviewDetail, reviewListRow, reviewRef,
-  selectTargets, truncateReport, type PreviewPayload, type RecipePayload, type ReviewDetailPayload,
+  ALL_STATUSES, ACTIVE_STATUSES, compactCoverage, compactGroup, compactLocalRepos, compactPreview, compactRecipes,
+  compactReviewers, compactTicket, DEFAULT_MAX_BRANCHES, DEFAULT_MAX_FINDINGS, DEFAULT_MAX_REQUIREMENTS, DEFAULT_REPORT_MAX,
+  isPreviewSettled, isTerminalStatus, isTicketRunFinished, mutationRefusal, parseTargetSelector, PREVIEW_END_STATUSES,
+  PREVIEW_LIVE_STATUSES, reviewDetail, reviewListRow, reviewRef, selectTargets, truncateReport, type CoveragePayload,
+  type PreviewPayload, type RecipePayload, type ReviewDetailPayload, type TicketPayload, type TicketRunPayload,
 } from './format.js';
 
 const version = (createRequire(import.meta.url)('../../package.json') as { version?: string }).version ?? '0.0.0';
@@ -29,6 +30,7 @@ const STOP_POLL_MS = 2_000;
 const INSTRUCTIONS = `code-review-tool runs read-only code reviews of git branches (GitHub or local clones) with a reviewer CLI (Claude Code, Codex, Cursor Agent, or Grok) and returns a verdict, a requirement checklist, and findings.
 Typical flow: start_review -> wait_for_review (repeat while finished=false) -> get_review / get_report.
 A review takes several minutes (often 5-20). Never start the same review twice to check on it: poll the id you got.
+A ticket split into several branches (BE and FE repos, stacked slices base -> child) is reviewed as a group: start_ticket_review -> wait_for_ticket_review (repeat while finished=false) -> get_ticket. Each branch is diffed against its parent in the group and gets a code_verdict from its own findings; whether the whole ticket is implemented is the group's coverage (covered | needs_work, per requirement with the covering branches), computed once the batch ends. get_ticket shows the chains; set_branch_parent fixes a wrong parent or order; get_ticket_coverage with recompute=true recomputes coverage. start_review of a branch that belongs to a group also defaults its base to the group parent.
 For a branch that is not pushed yet, use list_local_repos to find the repo name and branch, then start_review with "local:<repo>#<branch>".
 Previews run a ticket's branches as a live app on a local port: list_recipes -> start_preview -> wait_for_preview (repeat while finished=false) -> open web_url -> stop_preview when done. A role can run a local (unpushed) branch: {role, branch: "local:<repo>#<branch>"} or {role, branch, local: true}.
 A request that times out reached a busy server: do not retry a start, and never restart the server while previews or reviews are live (a restart tears them down); check get_preview / list_previews / list_reviews instead.`;
@@ -418,6 +420,210 @@ export function createMcpServer({ api, env = process.env }: CreateServerOptions)
     return ok({
       review: reviewRef(review, api.reviewUrl(review.id)),
       next: 'Call wait_for_review with the new id until finished=true.',
+    });
+  }));
+
+  // --- ticket groups -----------------------------------------------------------
+
+  const ticketSchema = z.string().trim().min(1).max(200)
+    .describe('Ticket key, e.g. "ABC-123" (the group key list_review_groups shows).');
+
+  server.registerTool('start_ticket_review', {
+    title: 'Review a whole ticket',
+    description:
+      'Review every branch of a ticket as one group, in stack order: each branch of each repository chain is ' +
+      'queued parents first and diffed against its parent branch (not the default branch), so findings stay per ' +
+      'branch. The ticket\'s branches come from the tracker (its PRs and branch names) plus branches reviewed ' +
+      'before; parents come from the PR base, GitHub compare between the branches, or a hand-set parent ' +
+      '(set_branch_parent). Each branch gets a code_verdict from its own findings; once every queued branch is ' +
+      'done, one coverage pass says per requirement which branch covers it. Returns at once with the run id and ' +
+      'review ids; then call wait_for_ticket_review until finished=true. A branch whose parent has no finished ' +
+      'review yet is still run, with a note.',
+    inputSchema: {
+      ticket: ticketSchema,
+      reviewer: z.enum(REVIEWER_NAMES).optional().describe('Reviewer CLI (see list_reviewers).'),
+      model: z.string().min(1).max(64).optional().describe("Model id for that reviewer. Default: the reviewer's default."),
+      requirementsText: z.string().min(1).max(20_000).optional()
+        .describe('Added to the ticket text for every branch and for coverage: approved decisions, scope notes.'),
+      branches: z.array(z.string().min(3).max(300)).min(1).max(40).optional()
+        .describe('Only these branches of the group, each as "repo#branch". Default: all.'),
+      refresh: z.boolean().optional()
+        .describe('Ask the tracker for the ticket\'s branches again (default true). false: only the stored group.'),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  }, (args) => guarded(async () => {
+    const refused = refusal();
+    if (refused) return fail(refused);
+    const body = {
+      ...(args.reviewer ? { reviewer: args.reviewer } : {}),
+      ...(args.model ? { model: args.model } : {}),
+      ...(args.requirementsText ? { requirementsText: args.requirementsText } : {}),
+      ...(args.branches ? { branches: args.branches } : {}),
+      ...(args.refresh !== undefined ? { refresh: args.refresh } : {}),
+    };
+    const out = await api.startTicketReview<TicketPayload & {
+      run: TicketRunPayload; reviews: ReviewRow[]; notes?: string[]; resolve_warning?: string;
+    }>(args.ticket, body);
+    const ticket = compactTicket(out, { review: (id) => api.reviewUrl(id), ticket: api.ticketUrl(args.ticket) });
+    return ok({
+      run: out.run,
+      reviews: out.reviews.map((r) => reviewRef(r, api.reviewUrl(r.id))),
+      notes: out.notes ?? [],
+      ...(out.resolve_warning ? { warning: out.resolve_warning } : {}),
+      chains: ticket.chains,
+      page: ticket.page,
+      next: `Reviews take several minutes each. Call wait_for_ticket_review with ticket="${args.ticket}" and runId=${out.run.id} until finished=true.`,
+    });
+  }));
+
+  server.registerTool('get_ticket', {
+    title: 'Get a ticket group',
+    description:
+      'A ticket group: its branches per repository in stack order (chains: parent, why that parent - pr, ' +
+      'detected, default, user, stored - and depth), the latest run of each branch (status, base, code_verdict, ' +
+      'url), the latest ticket coverage (verdict covered | needs_work; per requirement its status covered | ' +
+      'partial | missing and the branches that cover it, with evidence locations and their anchor_status), ' +
+      'whether a coverage pass is pending, and the latest ticket review run.',
+    inputSchema: {
+      ticket: ticketSchema,
+      maxRequirements: z.number().int().min(0).max(200).optional()
+        .describe(`Coverage requirements to include (default ${DEFAULT_MAX_REQUIREMENTS}).`),
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  }, ({ ticket, maxRequirements }) => guarded(async () => {
+    const payload = await api.ticketGroup<TicketPayload>(ticket);
+    return ok(compactTicket(payload, { review: (id) => api.reviewUrl(id), ticket: api.ticketUrl(ticket) }, maxRequirements));
+  }));
+
+  server.registerTool('get_ticket_coverage', {
+    title: 'Get ticket coverage',
+    description:
+      'The ticket coverage of a group: verdict (covered when every requirement is covered, else needs_work), ' +
+      'summary, and per requirement its status (covered | partial | missing) with the branches that cover it ' +
+      'and their evidence. Coverage is recomputed on its own once a batch of branch reviews ends; ' +
+      'recompute=true starts a pass now (it takes a few minutes; call again with recompute=false to read it). ' +
+      'A planned slice with no branch, or a branch not reviewed yet, shows as missing.',
+    inputSchema: {
+      ticket: ticketSchema,
+      recompute: z.boolean().optional().describe('Start a new coverage pass now (default false).'),
+      reviewer: z.enum(REVIEWER_NAMES).optional().describe('With recompute: the reviewer CLI for the pass.'),
+      model: z.string().min(1).max(64).optional().describe('With recompute: the model for the pass.'),
+      maxRequirements: z.number().int().min(0).max(200).optional(),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  }, ({ ticket, recompute, reviewer, model, maxRequirements }) => guarded(async () => {
+    let started: boolean | undefined;
+    let running: CoveragePayload | null = null;
+    if (recompute) {
+      const refused = refusal();
+      if (refused) return fail(refused);
+      const out = await api.recomputeCoverage<{ started: boolean; coverage: CoveragePayload | null }>(ticket, {
+        ...(reviewer ? { reviewer } : {}), ...(model ? { model } : {}),
+      });
+      started = out.started;
+      running = out.coverage;
+    }
+    const payload = await api.ticketGroup<TicketPayload>(ticket);
+    return ok({
+      ticket,
+      ...(started !== undefined ? { started } : {}),
+      ...(running && running.status === 'running' ? { running: { id: running.id, created_at: running.created_at } } : {}),
+      coverage_pending: payload.coverage_pending,
+      coverage: compactCoverage(payload.coverage, maxRequirements ?? DEFAULT_MAX_REQUIREMENTS),
+      ...(payload.latest_coverage ? { latest_coverage: payload.latest_coverage } : {}),
+      ...(payload.coverage_pending ? { next: 'A coverage pass is pending or running; call get_ticket_coverage again in a minute.' } : {}),
+    });
+  }));
+
+  server.registerTool('set_branch_parent', {
+    title: 'Set a branch parent',
+    description:
+      'Fix the stack order of a ticket group by hand. Either give branch + parent (the branch it is diffed ' +
+      'against; null or "" = the default branch), or give order: the repository\'s branches root first, which ' +
+      'makes a linear chain (the first on the default branch, or on root, each next on the one before). A hand-set ' +
+      'parent is kept by later detection. Refuses a loop. Takes effect for the next run of the branch.',
+    inputSchema: {
+      ticket: ticketSchema,
+      repo: z.string().min(1).max(200).describe('Repository name.'),
+      branch: z.string().min(1).max(255).optional().describe('The branch whose parent is set.'),
+      parent: z.string().max(255).nullable().optional().describe('Its new parent; null or "" = the default branch.'),
+      order: z.array(z.string().min(1).max(255)).min(1).max(40).optional()
+        .describe('All branches of the chain, root first; replaces branch/parent.'),
+      root: z.string().min(1).max(255).optional().describe('With order: what the first branch sits on (default branch by default).'),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  }, ({ ticket, repo, branch, parent, order, root }) => guarded(async () => {
+    const refused = refusal();
+    if (refused) return fail(refused);
+    let payload: TicketPayload;
+    if (order) {
+      payload = await api.setChainOrder<TicketPayload>(ticket, { repo, branches: order, ...(root ? { root } : {}) });
+    } else {
+      if (!branch) return fail('Give branch (with parent), or order.');
+      payload = await api.setBranchParent<TicketPayload>(ticket, { repo, branch, parent: parent ?? null });
+    }
+    const out = compactTicket(payload, { review: (id) => api.reviewUrl(id), ticket: api.ticketUrl(ticket) }, 0);
+    return ok({ ticket, chains: out.chains });
+  }));
+
+  server.registerTool('wait_for_ticket_review', {
+    title: 'Wait for a ticket review',
+    description:
+      'Wait for a ticket review batch (start_ticket_review) to finish: every queued branch review ended and the ' +
+      `ticket coverage was computed. Polls for at most timeoutSec (default ${WAIT_DEFAULT_SEC}, max ${WAIT_MAX_SEC}). ` +
+      'Returns "finished", the per-branch latest runs (base, status, code_verdict), and once finished the coverage. ' +
+      'If finished=false, call it again. A whole ticket usually takes 10-40 minutes.',
+    inputSchema: {
+      ticket: ticketSchema,
+      runId: z.number().int().positive().optional().describe('The run id from start_ticket_review. Default: the latest run.'),
+      timeoutSec: z.number().int().min(1).max(WAIT_MAX_SEC).optional(),
+      pollSec: z.number().int().min(1).max(60).optional(),
+      maxRequirements: z.number().int().min(0).max(200).optional(),
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  }, ({ ticket, runId, timeoutSec, pollSec, maxRequirements }, extra) => guarded(async () => {
+    const timeoutMs = (timeoutSec ?? WAIT_DEFAULT_SEC) * 1000;
+    const pollMs = (pollSec ?? POLL_DEFAULT_SEC) * 1000;
+    const started = Date.now();
+    const deadline = started + timeoutMs;
+    const progressToken = extra._meta?.progressToken;
+    let payload = await api.ticketGroup<TicketPayload>(ticket, runId, extra.signal);
+    if (!payload.run) return fail(`No ticket review run for ${ticket}${runId ? ` with id ${runId}` : ''}; start one with start_ticket_review.`);
+    while (!isTicketRunFinished(payload)) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      await sleep(Math.min(pollMs, remaining), extra.signal);
+      payload = await api.ticketGroup<TicketPayload>(ticket, runId, extra.signal);
+      if (progressToken !== undefined) {
+        const runs = payload.group.chains.flatMap((c) => c.branches).filter((b) => payload.run?.review_ids.includes(b.latest?.id ?? -1));
+        const ended = runs.filter((b) => b.latest && isTerminalStatus(b.latest.status)).length;
+        await extra.sendNotification({
+          method: 'notifications/progress',
+          params: {
+            progressToken,
+            progress: Math.round((Date.now() - started) / 1000),
+            total: Math.round(timeoutMs / 1000),
+            message: `ticket ${ticket}: ${ended}/${payload.run?.review_ids.length ?? 0} branch reviews ended` +
+              `${payload.coverage_pending ? ', coverage pending' : ''}`,
+          },
+        }).catch(() => { /* progress is best-effort */ });
+      }
+    }
+    const finished = isTicketRunFinished(payload);
+    const out = compactTicket(payload, { review: (id) => api.reviewUrl(id), ticket: api.ticketUrl(ticket) }, maxRequirements);
+    return ok({
+      finished,
+      waited_sec: Math.round((Date.now() - started) / 1000),
+      run: payload.run,
+      chains: out.chains,
+      coverage_pending: payload.coverage_pending,
+      coverage: finished ? out.coverage : null,
+      ...(finished && payload.run?.coverage_id && payload.coverage?.id !== payload.run.coverage_id
+        ? { coverage_note: `The coverage pass of this run (#${payload.run.coverage_id}) did not finish: ` +
+            `${payload.latest_coverage?.error ?? 'see get_ticket'}. The coverage shown is the last finished one.` }
+        : {}),
+      page: out.page,
+      ...(finished ? {} : { next: 'Still running. Call wait_for_ticket_review again with the same ticket and runId.' }),
     });
   }));
 
