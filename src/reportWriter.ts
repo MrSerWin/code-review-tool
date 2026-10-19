@@ -57,18 +57,45 @@ export function reportRelativePath(review: ReportableReview, now: Date = new Dat
   );
 }
 
+/** `run-N-<ts>.md` -> `run-N-<ts>.lenses`: where a run's raw pass outputs sit. */
+export function rawOutputDir(reportRelative: string): string {
+  return reportRelative.replace(/\.md$/, '') + '.lenses';
+}
+
+/** The raw answers of the passes, kept beside the report for debugging. */
+export interface RawPassOutputs {
+  lenses: { lens: string; raw?: unknown; error: string | null }[];
+  synthesis?: unknown;
+  reanchor?: unknown;
+}
+
 export async function writeReport(
   review: ReportableReview,
   ticket: TicketInfo | null,
   checkout: CheckoutResult,
   output: ReviewOutput,
+  raw?: RawPassOutputs,
 ): Promise<string> {
   const now = new Date();
   const relative = reportRelativePath(review, now);
   const absolute = path.join(config.DATA_DIR, relative);
   await mkdir(path.dirname(absolute), { recursive: true });
   await writeFile(absolute, renderReport(review, ticket, checkout, output, now), 'utf8');
+  if (raw) await writeRawOutputs(path.join(config.DATA_DIR, rawOutputDir(relative)), raw);
   return relative;
+}
+
+async function writeRawOutputs(dir: string, raw: RawPassOutputs): Promise<void> {
+  await mkdir(dir, { recursive: true });
+  const json = (value: unknown) => `${JSON.stringify(value, null, 2)}\n`;
+  for (const lens of raw.lenses) {
+    const body = lens.error !== null || lens.raw === undefined ? { error: lens.error ?? 'no output' } : lens.raw;
+    await writeFile(path.join(dir, `${sanitizeSegment(lens.lens)}.json`), json(body), 'utf8');
+  }
+  if (raw.synthesis !== undefined) await writeFile(path.join(dir, 'synthesis.json'), json(raw.synthesis), 'utf8');
+  if (raw.reanchor !== undefined && raw.reanchor !== null) {
+    await writeFile(path.join(dir, 'reanchor.json'), json(raw.reanchor), 'utf8');
+  }
 }
 
 export function renderReport(

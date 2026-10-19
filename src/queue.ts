@@ -317,7 +317,11 @@ async function processReview(reviewId: number, signal: AbortSignal): Promise<voi
   replaceFindings(reviewId, output.findings);
   replaceObservations(reviewId, output.observations);
 
-  const reportPath = await writeReport(review, ticket, checkout, output);
+  const reportPath = await writeReport(review, ticket, checkout, output, {
+    lenses: output.lensResults,
+    synthesis: output.synthesisRaw,
+    reanchor: output.reanchorRaw,
+  });
   log(reviewId, 'info', `Report written to ${reportPath}`);
 
   updateReview(reviewId, {
