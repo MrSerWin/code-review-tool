@@ -55,6 +55,7 @@ export async function previewRoutes(app: FastifyInstance): Promise<void> {
         ports: recipe.ports.map((port) => ({
           ...port,
           label: port.label ?? port.id,
+          link: port.link !== false,
           primary: port.id === primaryPort(recipe).id,
         })),
         database: recipe.database

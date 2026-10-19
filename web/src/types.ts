@@ -312,6 +312,7 @@ export interface RecipePort {
   primary: boolean;
   label: string;
   links?: { label: string; path: string }[];
+  link: boolean;
 }
 
 export interface RecipeDatabase {

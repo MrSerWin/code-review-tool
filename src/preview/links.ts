@@ -18,7 +18,7 @@ function hostUrl(port: number, path = '/'): string {
 /**
  * Every link a preview exposes: the primary port's links first (its first link
  * marked primary), then the other ports in recipe order. Ports the preview
- * never allocated are skipped. Without a usable recipe, each allocated port
+ * never allocated, and ports with `link: false`, are skipped. Without a usable recipe, each allocated port
  * gets one root link labelled with its id, and the port behind `url` stays
  * primary.
  */
@@ -39,7 +39,7 @@ export function previewLinks(
   const links: PreviewLink[] = [];
   for (const port of ordered) {
     const host = ports[port.id];
-    if (host === undefined) continue;
+    if (host === undefined || port.link === false) continue;
     const entries = port.links ?? [{ label: port.label ?? port.id, path: '/' }];
     entries.forEach((link, index) => {
       links.push({

@@ -24,9 +24,10 @@
   // Every port is offered as a link once the preview is ready, the primary
   // one first. "label" names it in the UI (default: the id). "links" replaces
   // the single link to the port root with one link per entry; each "path"
-  // starts with "/".
+  // starts with "/". "link": false gives a port no link at all (e.g. the
+  // database); it cannot be combined with "links" or set on the primary port.
   "ports": [
-    { "id": "db", "internal": 5432, "label": "Postgres" },
+    { "id": "db", "internal": 5432, "label": "Postgres", "link": false },
     {
       "id": "api",
       "internal": 8000,

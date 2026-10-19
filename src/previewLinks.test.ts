@@ -107,3 +107,33 @@ test('without a usable recipe each allocated port gets a root link, the one behi
   ]);
   assert.ok(previewLinks({ api: 43001 }, null, null).every((l) => !l.primary));
 });
+
+test('"link": false cannot be combined with links or set on the primary port', () => {
+  const both = parseRecipe(recipeWith([
+    { id: 'db', internal: 5432, link: false, links: [{ label: 'x', path: '/' }] },
+    { id: 'web', internal: 3000, primary: true },
+  ]), FILE);
+  assert.equal(both.error, `${FILE}: ports.db.links: cannot be combined with "link": false`);
+
+  const marked = parseRecipe(recipeWith([{ id: 'web', internal: 3000, primary: true, link: false }]), FILE);
+  assert.equal(marked.error, `${FILE}: ports.web.link: the primary port must keep its link`);
+
+  // Without a mark the first port is primary, so it must keep its link too.
+  const implied = parseRecipe(recipeWith([{ id: 'db', internal: 5432, link: false }, { id: 'web', internal: 3000 }]), FILE);
+  assert.equal(implied.error, `${FILE}: ports.db.link: the primary port must keep its link`);
+
+  const notBoolean = parseRecipe(recipeWith([{ id: 'web', internal: 3000, link: 'no' }]), FILE);
+  assert.match(notBoolean.error ?? '', /ports\.0\.link:/);
+});
+
+test('a port with "link": false yields no links; "link": true behaves like the default', () => {
+  const recipe = parsedPorts([
+    { id: 'db', internal: 5432, label: 'Postgres', link: false },
+    { id: 'api', internal: 8000, link: true },
+    { id: 'web', internal: 3000, primary: true },
+  ]);
+  assert.deepEqual(previewLinks({ db: 44000, api: 44001, web: 44002 }, recipe, 'http://127.0.0.1:44002'), [
+    { label: 'web', url: 'http://127.0.0.1:44002', port_id: 'web', primary: true },
+    { label: 'api', url: 'http://127.0.0.1:44001', port_id: 'api', primary: false },
+  ]);
+});
