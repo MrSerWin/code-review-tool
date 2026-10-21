@@ -292,6 +292,14 @@ export class ApiClient {
     return this.requestJson<T>('/api/recipes');
   }
 
+  /** What a preview of the whole ticket runs: each role's chain tip, and a live preview that runs it already. */
+  ticketPreviewPlan<T>(key: string, recipe?: string): Promise<T> {
+    return this.requestJson<T>(
+      withQuery(`/api/ticket-groups/${encodeURIComponent(key)}/preview-plan`, { recipe }),
+      { timeoutMs: SLOW_REQUEST_MS },
+    );
+  }
+
   createPreview<T>(body: unknown): Promise<T> {
     return this.requestJson<T>('/api/previews', { method: 'POST', body, timeoutMs: SLOW_REQUEST_MS });
   }

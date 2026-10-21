@@ -13,10 +13,10 @@ import type { ResolvedTarget, ReviewGroup, ReviewRow, TicketInfo } from '../type
 import { ApiClient, ApiError, ApiNoAnswerError, ApiUnreachableError } from './client.js';
 import {
   ALL_STATUSES, ACTIVE_STATUSES, compactCoverage, compactGroup, compactLocalRepos, compactPreview, compactRecipes,
-  compactReviewers, compactTicket, DEFAULT_MAX_BRANCHES, DEFAULT_MAX_FINDINGS, DEFAULT_MAX_REQUIREMENTS, DEFAULT_REPORT_MAX,
+  compactReviewers, compactTicket, compactTicketPlan, DEFAULT_MAX_BRANCHES, DEFAULT_MAX_FINDINGS, DEFAULT_MAX_REQUIREMENTS, DEFAULT_REPORT_MAX,
   isPreviewSettled, isTerminalStatus, isTicketRunFinished, mutationRefusal, parseTargetSelector, PREVIEW_END_STATUSES,
   PREVIEW_LIVE_STATUSES, reviewDetail, reviewListRow, reviewRef, selectTargets, truncateReport, type CoveragePayload,
-  type PreviewPayload, type RecipePayload, type ReviewDetailPayload, type TicketPayload, type TicketRunPayload,
+  type PreviewPayload, type RecipePayload, type ReviewDetailPayload, type TicketPayload, type TicketPlanPayload, type TicketRunPayload,
 } from './format.js';
 
 const version = (createRequire(import.meta.url)('../../package.json') as { version?: string }).version ?? '0.0.0';
@@ -32,7 +32,7 @@ Typical flow: start_review -> wait_for_review (repeat while finished=false) -> g
 A review takes several minutes (often 5-20). Never start the same review twice to check on it: poll the id you got.
 A ticket split into several branches (BE and FE repos, stacked slices base -> child) is reviewed as a group: start_ticket_review -> wait_for_ticket_review (repeat while finished=false) -> get_ticket. Each branch is diffed against its parent in the group and gets a code_verdict from its own findings; whether the whole ticket is implemented is the group's coverage (covered | needs_work, per requirement with the covering branches), computed once the batch ends. get_ticket shows the chains; set_branch_parent fixes a wrong parent or order; get_ticket_coverage with recompute=true recomputes coverage. start_review of a branch that belongs to a group also defaults its base to the group parent.
 For a branch that is not pushed yet, use list_local_repos to find the repo name and branch, then start_review with "local:<repo>#<branch>".
-Previews run a ticket's branches as a live app on a local port: list_recipes -> start_preview -> wait_for_preview (repeat while finished=false) -> open web_url (links lists every exposed address, e.g. backend API and admin) -> stop_preview when done. A role can run a local (unpushed) branch: {role, branch: "local:<repo>#<branch>"} or {role, branch, local: true}.
+Previews run a ticket's branches as a live app on a local port: list_recipes -> start_preview -> wait_for_preview (repeat while finished=false) -> open web_url (links lists every exposed address, e.g. backend API and admin) -> stop_preview when done. For a ticket group (see get_ticket), start_preview with just the ticket runs each repo's chain tip (the last branch of its stack, which contains every slice), local when that branch was last reviewed locally; get_ticket_preview_plan shows that plan first, and a live preview that already runs it is returned instead of starting a second one. A role can run a local (unpushed) branch: {role, branch: "local:<repo>#<branch>"} or {role, branch, local: true}.
 A request that times out reached a busy server: do not retry a start, and never restart the server while previews or reviews are live (a restart tears them down); check get_preview / list_previews / list_reviews instead.`;
 
 const idSchema = z.number().int().positive().describe('Review id, as returned by start_review or list_reviews.');
@@ -656,9 +656,11 @@ export function createMcpServer({ api, env = process.env }: CreateServerOptions)
       '- review_id: the reviewed branch runs for its repo, from the review\'s checkout (the reviewed commit) while ' +
       'it is still on disk, else fetched again (a local review: copied from the clone at its current tip, so the ' +
       'branch must still be there). A role picked by hand never needs the reviewed branch.\n' +
-      '- ticket: "ABC-123" or its issue link, a PR URL, "repo#branch", or "local:<repo>#<branch>"; the ticket\'s ' +
-      'branches run for ' +
-      'the repos it touches.\n' +
+      '- ticket alone (no roles, no review_id) for a ticket group: the plan of get_ticket_preview_plan, i.e. each ' +
+      'repo\'s chain tip, local when its latest review was local. A live preview that already runs that plan is ' +
+      'returned (reused=true) unless reuse_live=false.\n' +
+      '- ticket otherwise: "ABC-123" or its issue link, a PR URL, "repo#branch", or "local:<repo>#<branch>"; the ' +
+      'ticket\'s branches run for the repos it touches.\n' +
       'A role with no branch from any of these runs its base branch (used_base=true in the result).',
     inputSchema: {
       recipe: z.string().min(1).max(128).optional()
@@ -677,6 +679,8 @@ export function createMcpServer({ api, env = process.env }: CreateServerOptions)
         .describe('Ticket key or issue link, PR URL, "repo#branch", or "local:repo#branch" to resolve branches from.'),
       dump_mode: z.enum(DUMP_MODES).optional()
         .describe('Database contents: auto (default), pg_dump (fresh dump), dump-dir (stored dump), clean or none.'),
+      reuse_live: z.boolean().optional()
+        .describe('Ticket alone: return a live preview that already runs the plan instead of starting one (default true).'),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   }, (args) => guarded(async () => {
@@ -684,6 +688,37 @@ export function createMcpServer({ api, env = process.env }: CreateServerOptions)
     if (refused) return fail(refused);
     if (!args.roles?.length && args.review_id === undefined && !args.ticket) {
       return fail('Give roles, review_id, or ticket: a preview needs at least one of them to pick branches.');
+    }
+    if (args.ticket && !args.roles?.length && args.review_id === undefined) {
+      let plan: TicketPlanPayload | null = null;
+      try {
+        plan = await api.ticketPreviewPlan<TicketPlanPayload>(args.ticket, args.recipe);
+      } catch (err) {
+        // No ticket group under this key (a PR URL, repo#branch, a new ticket): the ticket is resolved as before.
+        if (!(err instanceof ApiError && err.status === 404)) throw err;
+      }
+      if (plan) {
+        const roles = compactTicketPlan(plan, { page: (id) => api.previewPage(id) }).roles;
+        if (plan.live_preview && args.reuse_live !== false) {
+          return ok({
+            preview: compactPreview(plan.live_preview, { page: api.previewPage(plan.live_preview.review_id) }),
+            reused: true,
+            plan: roles,
+            next: 'A live preview already runs these branches: wait_for_preview with this id, then open web_url. '
+              + 'Pass reuse_live=false to start another one.',
+          });
+        }
+        const { preview } = await api.createPreview<{ preview: PreviewPayload }>({
+          ...plan.request,
+          ...(args.dump_mode ? { dumpMode: args.dump_mode } : {}),
+        });
+        return ok({
+          preview: compactPreview(preview, { page: api.previewPage(preview.review_id) }),
+          plan: roles,
+          ...(plan.notes.length ? { notes: plan.notes } : {}),
+          next: 'Call wait_for_preview with this id until finished=true, then open web_url.',
+        });
+      }
     }
     const body = {
       ...(args.recipe ? { recipe: args.recipe } : {}),
@@ -697,6 +732,26 @@ export function createMcpServer({ api, env = process.env }: CreateServerOptions)
       preview: compactPreview(preview, { page: api.previewPage(preview.review_id) }),
       next: 'Call wait_for_preview with this id until finished=true, then open web_url.',
     });
+  }));
+
+  server.registerTool('get_ticket_preview_plan', {
+    title: 'Plan a ticket preview',
+    description:
+      'What start_preview with just this ticket would run, without starting anything: per recipe role the tip of ' +
+      'its repo\'s chain in the ticket group (the last branch in stack order, which contains the whole stack) and ' +
+      'its source (local when that branch\'s latest review was local, else github), or the base branch ' +
+      '(used_base=true) for a repo with no branch in the group. live_preview is a queued/starting/ready preview ' +
+      'that already runs exactly these branches (open it instead of starting another); other_live lists the ' +
+      'ticket\'s other live previews. Fails with 404 when the key has no ticket group.',
+    inputSchema: {
+      ticket: ticketSchema,
+      recipe: z.string().min(1).max(128).optional()
+        .describe('Recipe name (see list_recipes). Optional when only one recipe is configured.'),
+    },
+    annotations: { readOnlyHint: true, openWorldHint: true },
+  }, ({ ticket, recipe }) => guarded(async () => {
+    const plan = await api.ticketPreviewPlan<TicketPlanPayload>(ticket, recipe);
+    return ok(compactTicketPlan(plan, { page: (id) => api.previewPage(id) }));
   }));
 
   server.registerTool('get_preview', {
