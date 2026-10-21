@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { api } from '../api';
 import History from '../components/History';
-import { Card } from '../components/ui';
+import { Button, Card, CloseButton, Field, Input, Segmented, Select, Toolbar } from '../components/ui';
 import { navigate } from '../router';
 import { readStored, writeStored } from '../storage';
 import { TRACKER_LABEL, ticketLinkRef } from '../tickets';
@@ -15,6 +15,10 @@ const keyOf = (t: ResolvedTarget): string => `${t.repo}#${t.branch}`;
 const REVIEWER_KEY = 'crt.reviewer';
 const MODE_KEY = 'crt.mode';
 type Mode = 'github' | 'local';
+const MODES = [
+  { value: 'github', label: 'GitHub' },
+  { value: 'local', label: 'Local' },
+] as const satisfies readonly { value: Mode; label: string }[];
 const modelKey = (reviewer: string): string => `crt.model.${reviewer}`;
 
 export default function Home() {
@@ -312,26 +316,12 @@ export default function Home() {
 
   return (
     <div className="stack">
-      <div className="mode-switch" role="group" aria-label="Source">
-        {(['github', 'local'] as const).map((m) => (
-          <button
-            key={m}
-            type="button"
-            className={`btn${mode === m ? ' primary' : ' ghost'}`}
-            aria-pressed={mode === m}
-            onClick={() => switchMode(m)}
-          >
-            {m === 'github' ? 'GitHub' : 'Local'}
-          </button>
-        ))}
-      </div>
+      <Segmented label="Source" options={MODES} value={mode} onChange={switchMode} />
 
       {mode === 'local' ? (
-        <form className="reviewer-row" onSubmit={(e) => void submit(e)}>
-          <label className="reviewer-field">
-            <span className="muted">Repository</span>
-            <select
-              className="reviewer-select"
+        <form className="toolbar toolbar-end" onSubmit={(e) => void submit(e)}>
+          <Field label="Repository">
+            <Select
               value={localRepo}
               onChange={(e) => setLocalRepo(e.target.value)}
               disabled={!localRepos?.length}
@@ -341,12 +331,11 @@ export default function Home() {
                   {r.repo}
                 </option>
               ))}
-            </select>
-          </label>
-          <label className="reviewer-field reviewer-model">
-            <span className="muted">Branch</span>
-            <input
-              className="reviewer-input mono"
+            </Select>
+          </Field>
+          <Field label="Branch" grow>
+            <Input
+              mono
               list={`local-branches-${localRepo}`}
               value={localBranch}
               placeholder="Type or pick a branch"
@@ -363,11 +352,10 @@ export default function Home() {
                 </option>
               ))}
             </datalist>
-          </label>
-          <label className="reviewer-field reviewer-model">
-            <span className="muted">{baseLabel}</span>
-            <input
-              className="reviewer-input mono"
+          </Field>
+          <Field label={baseLabel} grow>
+            <Input
+              mono
               list={`local-bases-${localRepo}`}
               value={localBase}
               placeholder={defaultBase || 'Base branch'}
@@ -388,7 +376,7 @@ export default function Home() {
                 </option>
               ))}
             </datalist>
-          </label>
+          </Field>
           <label
             className="local-check"
             aria-disabled={!canIncludeTree}
@@ -406,16 +394,17 @@ export default function Home() {
             />
             Include uncommitted changes
           </label>
-          <button className="btn ghost" type="button" onClick={() => void loadLocalRepos()} disabled={busy}>
+          <Button variant="ghost" onClick={() => void loadLocalRepos()} disabled={busy}>
             Refresh
-          </button>
-          <button className="btn" type="submit" disabled={busy || !localRepo || !localBranch.trim()}>
+          </Button>
+          <Button type="submit" disabled={busy || !localRepo || !localBranch.trim()}>
             {busy ? 'Working…' : 'Review'}
-          </button>
+          </Button>
         </form>
       ) : (
       <form className="launcher" onSubmit={(e) => void submit(e)}>
-        <input
+        <Input
+          mono
           className="launcher-input"
           placeholder={placeholder}
           value={input}
@@ -425,9 +414,9 @@ export default function Home() {
             if (ticket) reset();
           }}
         />
-        <button className="btn" type="submit" disabled={busy || !input.trim()}>
+        <Button type="submit" disabled={busy || !input.trim()}>
           {busy ? 'Working…' : isTicketInput ? 'Find branches' : 'Review'}
-        </button>
+        </Button>
       </form>
       )}
       {mode === 'local' && localError && <p className="muted manual-hint">{localError}</p>}
@@ -438,11 +427,9 @@ export default function Home() {
         </p>
       )}
 
-      <div className="reviewer-row">
-        <label className="reviewer-field">
-          <span className="muted">Reviewer</span>
-          <select
-            className="reviewer-select"
+      <Toolbar align="end">
+        <Field label="Reviewer">
+          <Select
             value={reviewer}
             onChange={(e) => onReviewerChange(e.target.value)}
           >
@@ -451,12 +438,11 @@ export default function Home() {
                 {r.available ? r.label : `${r.label} (not installed)`}
               </option>
             ))}
-          </select>
-        </label>
-        <label className="reviewer-field reviewer-model">
-          <span className="muted">Model</span>
-          <input
-            className="reviewer-input mono"
+          </Select>
+        </Field>
+        <Field label="Model" grow>
+          <Input
+            mono
             value={model}
             spellCheck={false}
             list={`models-${reviewer}`}
@@ -470,8 +456,8 @@ export default function Home() {
               </option>
             ))}
           </datalist>
-        </label>
-      </div>
+        </Field>
+      </Toolbar>
 
       <div className="manual">
         <button
@@ -523,18 +509,15 @@ export default function Home() {
           }
           actions={
             <>
-              <button
-                className="btn primary"
-                type="button"
+              <Button
+                variant="primary"
                 onClick={() => void startPicked()}
                 disabled={busy || picked.length === 0}
                 title={picked.length === 0 ? 'Select at least one branch' : undefined}
               >
                 {busy ? 'Starting…' : `Start review${picked.length > 1 ? ` (${picked.length})` : ''}`}
-              </button>
-              <button className="btn ghost" type="button" onClick={reset}>
-                Clear
-              </button>
+              </Button>
+              <CloseButton onClick={reset} />
             </>
           }
         >

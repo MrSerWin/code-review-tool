@@ -5,7 +5,8 @@ import { readStored, writeStored } from '../storage';
 import { openTicketTitle } from '../tickets';
 import type { Review, ReviewGroup, ReviewGroupBranch, ReviewGroupRun, ReviewStatus, Verdict } from '../types';
 import {
-  BranchLink, Card, Pager, PrLink, StatusPill, TicketExternalLink, VerdictBadge, fmtTime,
+  BranchLink, Card, Icon, IconButton, Input, Pager, PrLink, Segmented, StatusPill, TicketExternalLink, VerdictBadge,
+  fmtTime,
 } from './ui';
 
 const ACTIVE = new Set(['queued', 'fetching', 'reviewing']);
@@ -20,6 +21,10 @@ const DEBOUNCE_MS = 300;
 const BRANCH_RUNS_SHOWN = 5;
 
 type View = 'groups' | 'runs';
+const VIEWS = [
+  { value: 'groups', label: 'By ticket' },
+  { value: 'runs', label: 'All runs' },
+] as const satisfies readonly { value: View; label: string }[];
 
 /** The runs of one expanded group; `runs` is null until the first answer. */
 interface GroupRuns {
@@ -160,21 +165,10 @@ export default function History({
       title="History"
       actions={
         <>
-          <div className="mode-switch" role="group" aria-label="History view">
-            {(['groups', 'runs'] as const).map((v) => (
-              <button
-                key={v}
-                type="button"
-                className={`btn${view === v ? ' primary' : ' ghost'}`}
-                aria-pressed={view === v}
-                onClick={() => switchView(v)}
-              >
-                {v === 'groups' ? 'By ticket' : 'All runs'}
-              </button>
-            ))}
-          </div>
-          <input
-            className="history-search mono"
+          <Segmented label="History view" options={VIEWS} value={view} onChange={switchView} />
+          <Input
+            mono
+            className="history-search"
             placeholder="Filter ticket, repo, branch…"
             aria-label="Filter history"
             value={queryInput}
@@ -313,19 +307,19 @@ function GroupRow({
     <>
       <tr className={`row-link group-row${open ? ' row-open' : ''}`} onClick={onToggle}>
         <td className="col-toggle">
-          <button
-            type="button"
+          <IconButton
+            size="sm"
             className="chevron"
             aria-expanded={open}
             aria-controls={open ? panelId : undefined}
-            aria-label={`${open ? 'Hide' : 'Show'} branches and runs of ${group.key}`}
+            label={`${open ? 'Hide' : 'Show'} branches and runs of ${group.key}`}
             onClick={(e) => {
               e.stopPropagation();
               onToggle();
             }}
           >
-            <span className="chevron-icon" aria-hidden="true" />
-          </button>
+            <Icon name="chevron" />
+          </IconButton>
         </td>
         <td className="group-cell">
           <div className="group-line">

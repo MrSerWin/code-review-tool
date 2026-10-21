@@ -12,9 +12,9 @@ import {
   ApiClient, ApiError, ApiNoAnswerError, ApiUnreachableError, apiBaseUrl, DEFAULT_API_URL,
 } from './mcp/client.js';
 import {
-  compactCoverage, compactFindings, compactGroup, compactLocalRepos, compactPreview, compactTicket, coverageWhere,
+  compactCoverage, compactFindings, compactGroup, compactLocalRepos, compactPreview, compactTicket, compactTicketPlan, coverageWhere,
   findingLocation, isPreviewSettled, isTerminalStatus, isTicketRunFinished, mutationRefusal, parseTargetSelector,
-  reviewDetail, selectTargets, severityCounts, truncate, truncateReport, type CoveragePayload, type PreviewPayload,
+  reviewDetail, selectTargets, severityCounts, truncate, truncateReport, type CoveragePayload, type PreviewPayload, type TicketPlanPayload,
   type TicketPayload,
 } from './mcp/format.js';
 import type { FindingRow, ReviewGroup, ReviewRow } from './types.js';
@@ -488,6 +488,47 @@ function previewPayload(overrides: Partial<PreviewPayload> = {}): PreviewPayload
   };
 }
 
+function ticketPlanPayload(live = false): TicketPlanPayload {
+  return {
+    ticket: 'ABC-123',
+    recipe: live ? 'busy-app' : 'my-app',
+    roles: [
+      {
+        role: 'backend', repo: 'my-service', branch: 'feature/abc-123-b', base: 'main', defaultBranch: 'main',
+        usedBase: false, source: 'local', chain: ['feature/abc-123-a', 'feature/abc-123-b'],
+      },
+      {
+        role: 'frontend', repo: 'my-frontend', branch: 'main', base: 'main', defaultBranch: 'main',
+        usedBase: true, source: 'github', chain: [],
+      },
+    ],
+    request: {
+      ticket: 'ABC-123',
+      recipe: live ? 'busy-app' : 'my-app',
+      roles: [{ role: 'backend', branch: 'feature/abc-123-b', local: true }, { role: 'frontend' }],
+    },
+    live_preview: live ? previewPayload({ id: 6, status: 'ready' }) : null,
+    other_live: live ? [] : [previewPayload({ id: 4, status: 'starting' })],
+    notes: [],
+  };
+}
+
+test('a ticket preview plan is compacted to roles with their chains, and the live previews', () => {
+  const plan = compactTicketPlan(ticketPlanPayload(), { page: () => 'http://ui/previews' });
+  assert.deepEqual(plan.roles, [
+    {
+      role: 'backend', repo: 'my-service', branch: 'feature/abc-123-b', base: 'main', used_base: false, source: 'local',
+      chain: ['feature/abc-123-a', 'feature/abc-123-b'],
+    },
+    { role: 'frontend', repo: 'my-frontend', branch: 'main', base: 'main', used_base: true, source: 'github', chain: [] },
+  ]);
+  assert.equal(plan.live_preview, null);
+  assert.deepEqual(plan.other_live.map((o) => [o.id, o.status, o.roles.length]), [[4, 'starting', 2]]);
+  const live = compactTicketPlan(ticketPlanPayload(true), { page: () => 'http://ui/previews' });
+  assert.equal(live.live_preview?.id, 6);
+  assert.equal(live.live_preview?.web_url, 'http://127.0.0.1:41000');
+});
+
 test('a preview settles once ready or ended; only a ready one has a web_url and credentials', () => {
   assert.equal(isPreviewSettled('ready'), true);
   assert.equal(isPreviewSettled('failed'), true);
@@ -624,6 +665,10 @@ async function startStub(pollsUntilDone = 2): Promise<Stub> {
           errors: [],
         });
       }
+      if (req.method === 'GET' && url.pathname === '/api/ticket-groups/ABC-123/preview-plan') {
+        gets.push({ path: url.pathname, query: Object.fromEntries(url.searchParams) });
+        return send(res, 200, ticketPlanPayload(url.searchParams.get('recipe') === 'busy-app'));
+      }
       if (req.method === 'POST' && url.pathname === '/api/previews') {
         posts.push(JSON.parse(raw));
         return send(res, 201, { preview: previewPayload() });
@@ -712,6 +757,7 @@ test('stdio MCP server: list, start, get, and wait against a stub API', { timeou
     const names = tools.map((t) => t.name).sort();
     assert.deepEqual(names, [
       'cancel_review', 'detect_base', 'get_preview', 'get_report', 'get_review', 'get_ticket', 'get_ticket_coverage',
+      'get_ticket_preview_plan',
       'list_local_repos', 'list_previews', 'list_recipes', 'list_review_groups', 'list_reviewers', 'list_reviews',
       'rerun_review', 'set_branch_parent', 'start_preview', 'start_review', 'start_ticket_review', 'stop_preview',
       'wait_for_preview', 'wait_for_review', 'wait_for_ticket_review',
@@ -901,6 +947,34 @@ test('stdio MCP server: recipes, start, wait, list, and stop a preview', { timeo
       reviewId: 3,
       dumpMode: 'clean',
     });
+
+    // A ticket alone runs the group's plan: every role sent, the chain tip local as its last review was.
+    const planned = json(await client.callTool({ name: 'get_ticket_preview_plan', arguments: { ticket: 'ABC-123' } }));
+    assert.equal(planned.roles[0].branch, 'feature/abc-123-b');
+    assert.equal(planned.live_preview, null);
+    const fromPlan = json(await client.callTool({ name: 'start_preview', arguments: { ticket: 'ABC-123', dump_mode: 'none' } }));
+    assert.equal(fromPlan.preview.id, 5);
+    assert.equal(fromPlan.plan[0].source, 'local');
+    assert.deepEqual(stub.posts.at(-1), {
+      ticket: 'ABC-123',
+      recipe: 'my-app',
+      roles: [{ role: 'backend', branch: 'feature/abc-123-b', local: true }, { role: 'frontend' }],
+      dumpMode: 'none',
+    });
+    // A live preview that runs the plan is returned instead of a second one.
+    const posted = stub.posts.length;
+    const reused = json(await client.callTool({ name: 'start_preview', arguments: { ticket: 'ABC-123', recipe: 'busy-app' } }));
+    assert.equal(reused.reused, true);
+    assert.equal(reused.preview.id, 6);
+    assert.equal(stub.posts.length, posted);
+    const another = json(await client.callTool({
+      name: 'start_preview', arguments: { ticket: 'ABC-123', recipe: 'busy-app', reuse_live: false },
+    }));
+    assert.equal(another.preview.id, 5);
+    assert.equal((stub.posts.at(-1) as { recipe: string }).recipe, 'busy-app');
+    // No ticket group under the key: the ticket is resolved by the server as before.
+    await client.callTool({ name: 'start_preview', arguments: { ticket: 'NEW-1' } });
+    assert.deepEqual(stub.posts.at(-1), { ticket: 'NEW-1' });
 
     const waited = json(await client.callTool({ name: 'wait_for_preview', arguments: { id: 5, timeoutSec: 30, pollSec: 1 } }));
     assert.equal(waited.finished, true);

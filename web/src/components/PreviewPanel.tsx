@@ -10,8 +10,8 @@ import type {
   RecipesPayload,
 } from '../types';
 import {
-  DUMP_CHOICES,
   DumpModeBadge,
+  DumpSelect,
   DumpModeNote,
   PhaseTrack,
   PREVIEW_LIVE,
@@ -23,7 +23,7 @@ import {
   fmtExpiry,
 } from './preview';
 import RoleBranchInputs, { roleRequests } from './RoleBranchInputs';
-import { Card, fmtTime } from './ui';
+import { Button, Card, fmtTime } from './ui';
 
 /** How many log lines a failed preview shows without the user asking. */
 const FAILURE_TAIL = 20;
@@ -241,47 +241,34 @@ export default function PreviewPanel({
         <>
           {!live && (
             <>
-              <button
-                className="btn ghost"
-                type="button"
+              <Button
+                variant="ghost"
                 aria-pressed={custom}
                 onClick={toggleCustom}
                 title="Pick the branch of each repo by hand"
               >
                 Custom…
-              </button>
-              <select
-                className="mini-select"
-                value={dumpMode}
-                onChange={(e) => setDumpMode(e.target.value as DumpModeRequest)}
-                aria-label="Database contents for the preview"
-              >
-                {DUMP_CHOICES.map((c) => (
-                  <option key={c.value} value={c.value}>
-                    {c.label}
-                  </option>
-                ))}
-              </select>
-              <button className="btn primary" type="button" onClick={() => void start()} disabled={busy}>
+              </Button>
+              <DumpSelect value={dumpMode} onChange={setDumpMode} disabled={busy} />
+              <Button variant="primary" onClick={() => void start()} disabled={busy}>
                 {busy ? 'Starting…' : preview ? 'Start again' : 'Start preview'}
-              </button>
+              </Button>
             </>
           )}
           {live && (
-            <button
-              className="btn ghost"
-              type="button"
+            <Button
+              variant="danger"
               onClick={() => void stop()}
               disabled={busy || preview?.status === 'stopping'}
               title={preview?.status === 'stopping' ? 'Teardown is running' : undefined}
             >
               Stop
-            </button>
+            </Button>
           )}
           {preview && (
-            <button className="btn danger" type="button" onClick={() => void remove()} disabled={busy}>
+            <Button variant="danger" onClick={() => void remove()} disabled={busy}>
               Delete
-            </button>
+            </Button>
           )}
         </>
       }
