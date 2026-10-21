@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../api';
+import TicketPreviewCard from '../components/TicketPreviewCard';
 import { BranchLink, Card, PrLink, StatusPill, VerdictBadge, fmtTime } from '../components/ui';
 import { Link, navigate } from '../router';
 import { openTicketLabel, openTicketTitle } from '../tickets';
@@ -9,6 +10,7 @@ import type {
   CoverageStatus,
   GroupBranch,
   ParentReason,
+  Recipe,
   Review,
   ReviewerInfo,
   TicketGroupPayload,
@@ -51,6 +53,20 @@ export default function TicketView({ ticketKey }: { ticketKey: string }) {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Recipes a ticket preview can run; empty when previews are off or none is configured.
+  const [recipes, setRecipes] = useState<Recipe[]>([]);
+  const [previewOpen, setPreviewOpen] = useState(false);
+
+  useEffect(() => {
+    api
+      .recipes()
+      .then((r) => setRecipes(r.enabled ? r.recipes : []))
+      .catch(() => setRecipes([]));
+  }, []);
+
+  useEffect(() => {
+    setPreviewOpen(false);
+  }, [ticketKey]);
 
   const load = useCallback(async () => {
     try {
@@ -123,6 +139,9 @@ export default function TicketView({ ticketKey }: { ticketKey: string }) {
             ticketKey={ticketKey}
             busy={busy}
             running={running}
+            canPreview={recipes.length > 0}
+            previewOpen={previewOpen}
+            onPreview={() => setPreviewOpen((v) => !v)}
             onReview={(body) =>
               act(async () => {
                 const out = await api.reviewTicket(ticketKey, body);
@@ -143,6 +162,9 @@ export default function TicketView({ ticketKey }: { ticketKey: string }) {
               })
             }
           />
+          {previewOpen && recipes.length > 0 && (
+            <TicketPreviewCard ticketKey={ticketKey} recipes={recipes} onClose={() => setPreviewOpen(false)} />
+          )}
           <ChainsCard
             ticket={ticket}
             busy={busy}
@@ -176,6 +198,9 @@ function TicketActions({
   ticketKey,
   busy,
   running,
+  canPreview,
+  previewOpen,
+  onPreview,
   onReview,
   onRecompute,
   onDetect,
@@ -183,6 +208,9 @@ function TicketActions({
   ticketKey: string;
   busy: boolean;
   running: boolean;
+  canPreview: boolean;
+  previewOpen: boolean;
+  onPreview: () => void;
   onReview: (body: { reviewer?: string; model?: string; requirementsText?: string }) => void;
   onRecompute: () => void;
   onDetect: () => void;
@@ -263,6 +291,17 @@ function TicketActions({
         <button className="btn primary" type="submit" disabled={busy} title={`Review every branch of ${ticketKey}`}>
           Review ticket
         </button>
+        {canPreview && (
+          <button
+            className="btn"
+            type="button"
+            aria-pressed={previewOpen}
+            onClick={onPreview}
+            title={`Run ${ticketKey} as a live app: each repo at the tip of its chain`}
+          >
+            Preview ticket
+          </button>
+        )}
         <button className="btn" type="button" disabled={busy} onClick={onRecompute}>
           Recompute coverage
         </button>

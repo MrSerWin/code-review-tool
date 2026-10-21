@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { api } from '../api';
 import {
-  DUMP_CHOICES,
   DumpModeBadge,
+  DumpSelect,
   PREVIEW_LIVE,
   PreviewLinks,
   PreviewStatusPill,
+  RecipeSelect,
   RoleChips,
   TicketLabel,
   baseRoles,
@@ -74,6 +75,12 @@ export default function Previews() {
       setError((err as Error).message);
     }
   }, []);
+
+  // `/previews?open=<id>`, as the ticket page links a preview it started or found running.
+  useEffect(() => {
+    const id = Number(new URLSearchParams(window.location.search).get('open'));
+    if (Number.isInteger(id) && id > 0) void openRow(id);
+  }, [openRow]);
 
   // An open row keeps up with a preview that is still working.
   useEffect(() => {
@@ -172,35 +179,11 @@ export default function Previews() {
     if (ticket.trim()) await launch({ ticket: ticket.trim() });
   };
 
-  const recipeSelect = recipes && recipes.recipes.length > 1 && (
-    <select
-      className="mini-select"
-      value={recipe?.name ?? ''}
-      onChange={(e) => setRecipeName(e.target.value)}
-      aria-label="Recipe to run"
-    >
-      {recipes.recipes.map((r) => (
-        <option key={r.name} value={r.name}>
-          {r.name}
-        </option>
-      ))}
-    </select>
+  const recipeSelect = recipes && (
+    <RecipeSelect recipes={recipes.recipes} value={recipe?.name ?? ''} onChange={setRecipeName} />
   );
 
-  const dumpSelect = (
-    <select
-      className="mini-select"
-      value={dumpMode}
-      onChange={(e) => setDumpMode(e.target.value as DumpModeRequest)}
-      aria-label="Database contents for the preview"
-    >
-      {DUMP_CHOICES.map((c) => (
-        <option key={c.value} value={c.value}>
-          {c.label}
-        </option>
-      ))}
-    </select>
-  );
+  const dumpSelect = <DumpSelect value={dumpMode} onChange={setDumpMode} />;
 
   return (
     <div className="stack">

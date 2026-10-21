@@ -1,5 +1,5 @@
 import { Link } from '../router';
-import type { DumpMode, DumpModeRequest, Preview, PreviewLink, PreviewRole, PreviewStatus } from '../types';
+import type { DumpMode, DumpModeRequest, Preview, PreviewLink, PreviewRole, PreviewStatus, Recipe } from '../types';
 
 /** Database contents offered when starting a preview, shared by every start form. */
 export const DUMP_CHOICES: { value: DumpModeRequest; label: string }[] = [
@@ -266,4 +266,61 @@ export function fmtExpiry(preview: Preview, now: number = Date.now()): string {
   const left = t - now;
   if (left <= 0) return 'expiring now';
   return `in ${humanMinutes(left)}`;
+}
+
+/** The recipe picker; nothing to pick with a single recipe. */
+export function RecipeSelect({
+  recipes,
+  value,
+  onChange,
+  disabled = false,
+}: {
+  recipes: Recipe[];
+  value: string;
+  onChange: (name: string) => void;
+  disabled?: boolean;
+}) {
+  if (recipes.length < 2) return null;
+  return (
+    <select
+      className="mini-select"
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      aria-label="Recipe to run"
+      disabled={disabled}
+    >
+      {recipes.map((r) => (
+        <option key={r.name} value={r.name}>
+          {r.name}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+/** The dump-mode picker of every preview launch. */
+export function DumpSelect({
+  value,
+  onChange,
+  disabled = false,
+}: {
+  value: DumpModeRequest;
+  onChange: (mode: DumpModeRequest) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <select
+      className="mini-select"
+      value={value}
+      onChange={(e) => onChange(e.target.value as DumpModeRequest)}
+      aria-label="Database contents for the preview"
+      disabled={disabled}
+    >
+      {DUMP_CHOICES.map((c) => (
+        <option key={c.value} value={c.value}>
+          {c.label}
+        </option>
+      ))}
+    </select>
+  );
 }

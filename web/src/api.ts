@@ -8,6 +8,7 @@ import type {
   PreviewRoleRequest,
   RecipesPayload,
   RepoBranchesPayload,
+  TicketPreviewPlan,
   Review,
   ReviewDetailPayload,
   ReviewGroupsPayload,
@@ -104,6 +105,9 @@ export const api = {
   coverageReportUrl: (key: string) => `/api/ticket-groups/${encodeURIComponent(key)}/coverage/report`,
 
   recipes: () => req<RecipesPayload>('/api/recipes'),
+  /** What "Preview ticket" runs: per role its repo's chain tip, plus a live preview that runs it already. */
+  ticketPreviewPlan: (key: string, recipe?: string) =>
+    req<TicketPreviewPlan>(withQuery(`/api/ticket-groups/${encodeURIComponent(key)}/preview-plan`, { recipe })),
   listPreviews: (params: Params = {}) =>
     req<{ previews: Preview[]; total: number }>(withQuery('/api/previews', params)),
   preview: (id: number) => req<PreviewDetailPayload>(`/api/previews/${id}`),

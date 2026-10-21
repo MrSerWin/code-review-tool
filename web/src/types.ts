@@ -373,6 +373,27 @@ export interface RepoBranchesPayload {
   truncated: boolean;
 }
 
+/** One role of a ticket preview plan: its repo's chain tip, or the base branch. */
+export interface TicketPlanRole extends PreviewRole {
+  defaultBranch: string;
+  source: 'github' | 'local';
+  /** The repo's branches in chain order; the last one is the tip. */
+  chain: string[];
+}
+
+/** `GET /api/ticket-groups/:key/preview-plan`. */
+export interface TicketPreviewPlan {
+  ticket: string;
+  recipe: string;
+  roles: TicketPlanRole[];
+  /** The body that starts the plan unchanged. */
+  request: { ticket: string; recipe: string; roles: PreviewRoleRequest[] };
+  /** A queued, starting or ready preview that runs exactly these branches. */
+  live_preview: Preview | null;
+  other_live: Preview[];
+  notes: string[];
+}
+
 export interface RecipesPayload {
   enabled: boolean;
   dir: string;
