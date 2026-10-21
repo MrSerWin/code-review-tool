@@ -1,5 +1,6 @@
 import { useEffect, useId, useMemo, useState } from 'react';
 import { api } from '../api';
+import { Input } from './ui';
 import type { LocalBranch, LocalRepo, LocalReposPayload, PreviewRoleRequest, RepoBranchesPayload } from '../types';
 
 /** How long a branch listing is reused before it is asked for again. */
@@ -277,9 +278,10 @@ function BranchRow({
         </label>
       )}
       <div className="role-branch-field">
-        <input
+        <Input
           id={id}
-          className="launcher-input role-branch-input"
+          mono
+          className="role-branch-input"
           list={`${id}-list`}
           placeholder={placeholder}
           value={value}

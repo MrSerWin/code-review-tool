@@ -4,7 +4,7 @@ import { Link, navigate } from '../router';
 import type { DumpModeRequest, PreviewRoleRequest, Recipe, TicketPreviewPlan } from '../types';
 import { DumpSelect, PreviewStatusPill, RecipeSelect, RoleChips } from './preview';
 import RoleBranchInputs, { roleRequests } from './RoleBranchInputs';
-import { Card } from './ui';
+import { Button, Card, CloseButton, Toolbar, ToolbarSpacer } from './ui';
 
 /** The inputs a plan prefills: the chain tip per role, empty (= base branch) where the repo has none. */
 function planInputs(plan: TicketPreviewPlan): { values: Record<string, string>; local: Record<string, boolean> } {
@@ -108,11 +108,7 @@ export default function TicketPreviewCard({
   return (
     <Card
       title="Preview this ticket"
-      actions={
-        <button className="btn ghost btn-sm" type="button" onClick={onClose}>
-          Close
-        </button>
-      }
+      actions={<CloseButton onClick={onClose} />}
     >
       <p className="muted ticket-hint">
         Each repo runs the tip of its chain below (the last branch, which contains the whole stack), from the local
@@ -154,10 +150,8 @@ export default function TicketPreviewCard({
               ))}
             </p>
           )}
-          <div className="custom-launch-foot">
-            <button
-              className="btn ghost btn-sm"
-              type="button"
+          <Toolbar>
+            <Button
               aria-pressed={editing}
               onClick={() => {
                 if (editing) {
@@ -170,21 +164,20 @@ export default function TicketPreviewCard({
               disabled={starting}
             >
               {editing ? 'Reset branches' : 'Change branches'}
-            </button>
-            <div className="custom-launch-actions">
-              <RecipeSelect recipes={recipes} value={recipe.name} onChange={setRecipeName} disabled={starting} />
-              {!reuse && <DumpSelect value={dumpMode} onChange={setDumpMode} disabled={starting} />}
-              {reuse ? (
-                <button className="btn primary" type="button" onClick={() => navigate(`/previews?open=${reuse.id}`)}>
-                  Open preview #{reuse.id}
-                </button>
-              ) : (
-                <button className="btn primary" type="button" onClick={() => void start()} disabled={starting}>
-                  {starting ? 'Starting…' : 'Start preview'}
-                </button>
-              )}
-            </div>
-          </div>
+            </Button>
+            <ToolbarSpacer />
+            <RecipeSelect recipes={recipes} value={recipe.name} onChange={setRecipeName} disabled={starting} />
+            {!reuse && <DumpSelect value={dumpMode} onChange={setDumpMode} disabled={starting} />}
+            {reuse ? (
+              <Button variant="primary" onClick={() => navigate(`/previews?open=${reuse.id}`)}>
+                Open preview #{reuse.id}
+              </Button>
+            ) : (
+              <Button variant="primary" onClick={() => void start()} disabled={starting}>
+                {starting ? 'Starting…' : 'Start preview'}
+              </Button>
+            )}
+          </Toolbar>
         </div>
       )}
     </Card>

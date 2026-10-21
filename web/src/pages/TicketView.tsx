@@ -1,7 +1,21 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../api';
 import TicketPreviewCard from '../components/TicketPreviewCard';
-import { BranchLink, Card, PrLink, StatusPill, VerdictBadge, fmtTime } from '../components/ui';
+import {
+  BranchLink,
+  Button,
+  ButtonLink,
+  Card,
+  Field,
+  Icon,
+  IconButton,
+  Input,
+  PrLink,
+  Select,
+  StatusPill,
+  VerdictBadge,
+  fmtTime,
+} from '../components/ui';
 import { Link, navigate } from '../router';
 import { openTicketLabel, openTicketTitle } from '../tickets';
 import type {
@@ -124,10 +138,10 @@ export default function TicketView({ ticketKey }: { ticketKey: string }) {
         <h1 className="mono">{ticketKey}</h1>
         <p className="muted">{title}</p>
         {url && (
-          <a className="link-btn" href={url} target="_blank" rel="noreferrer" title={openTicketTitle(url, ticketKey)}>
+          <ButtonLink href={url} target="_blank" rel="noreferrer" title={openTicketTitle(url, ticketKey)}>
             {openTicketLabel(url)}
             <span className="link-arrow" aria-hidden="true">↗</span>
-          </a>
+          </ButtonLink>
         )}
       </header>
 
@@ -240,7 +254,7 @@ function TicketActions({
         its own findings; once all are done, one coverage pass checks the ticket requirements across all branches.
       </p>
       <form
-        className="reviewer-row"
+        className="toolbar toolbar-end"
         onSubmit={(e) => {
           e.preventDefault();
           onReview({
@@ -252,10 +266,8 @@ function TicketActions({
       >
         {reviewers.length > 0 && (
           <>
-            <label className="reviewer-field">
-              <span className="label">Reviewer</span>
-              <select
-                className="reviewer-select"
+            <Field label="Reviewer">
+              <Select
                 value={reviewer}
                 onChange={(e) => {
                   setReviewer(e.target.value);
@@ -267,12 +279,11 @@ function TicketActions({
                     {r.available ? r.label : `${r.label} (not installed)`}
                   </option>
                 ))}
-              </select>
-            </label>
-            <label className="reviewer-field reviewer-model">
-              <span className="label">Model</span>
-              <input
-                className="reviewer-input mono"
+              </Select>
+            </Field>
+            <Field label="Model" grow>
+              <Input
+                mono
                 value={model}
                 list={`ticket-models-${reviewer}`}
                 placeholder={info?.defaultModel ?? 'model'}
@@ -285,35 +296,32 @@ function TicketActions({
                   </option>
                 ))}
               </datalist>
-            </label>
+            </Field>
           </>
         )}
-        <button className="btn primary" type="submit" disabled={busy} title={`Review every branch of ${ticketKey}`}>
+        <Button variant="primary" type="submit" disabled={busy} title={`Review every branch of ${ticketKey}`}>
           Review ticket
-        </button>
+        </Button>
         {canPreview && (
-          <button
-            className="btn"
-            type="button"
+          <Button
             aria-pressed={previewOpen}
             onClick={onPreview}
             title={`Run ${ticketKey} as a live app: each repo at the tip of its chain`}
           >
             Preview ticket
-          </button>
+          </Button>
         )}
-        <button className="btn" type="button" disabled={busy} onClick={onRecompute}>
+        <Button disabled={busy} onClick={onRecompute}>
           Recompute coverage
-        </button>
-        <button
-          className="btn ghost"
-          type="button"
+        </Button>
+        <Button
+          variant="ghost"
           disabled={busy || running}
           onClick={onDetect}
           title="Detect every parent again, also those set by hand"
         >
           Re-detect order
-        </button>
+        </Button>
       </form>
       <div className="manual">
         <button className="manual-toggle" type="button" onClick={() => setShowExtra((v) => !v)} aria-expanded={showExtra}>
@@ -446,22 +454,22 @@ function ChainRow({
           {b.links?.pr && <PrLink href={b.links.pr} number={b.prNumber} />}
         </div>
         <div className="chain-sub">
-          <label className="chain-parent">
-            <span className="label">on</span>
-            <select
-              className="reviewer-select mono"
-              value={b.parent ?? def}
-              disabled={busy}
-              onChange={(e) => onParent(e.target.value === def ? null : e.target.value)}
-              aria-label={`Parent of ${b.branch}`}
-            >
-              {options.map((name) => (
-                <option key={name} value={name}>
-                  {name === def ? `${name} (default)` : name}
-                </option>
-              ))}
-            </select>
-          </label>
+          <Select
+            label="on"
+            size="sm"
+            mono
+            className="chain-parent"
+            value={b.parent ?? def}
+            disabled={busy}
+            onChange={(e) => onParent(e.target.value === def ? null : e.target.value)}
+            aria-label={`Parent of ${b.branch}`}
+          >
+            {options.map((name) => (
+              <option key={name} value={name}>
+                {name === def ? `${name} (default)` : name}
+              </option>
+            ))}
+          </Select>
           {b.parentReason && <span className="tag cat">{PARENT_REASON[b.parentReason]}</span>}
           {b.parentInGroup && b.parentReviewed === false && (
             <span className="tag req-partial" title="The parent has no finished review yet">
@@ -493,12 +501,12 @@ function ChainRow({
         )}
       </div>
       <div className="chain-move">
-        <button className="btn ghost ctl" type="button" disabled={busy || !canUp} onClick={onUp} aria-label="Move up">
-          ↑
-        </button>
-        <button className="btn ghost ctl" type="button" disabled={busy || !canDown} onClick={onDown} aria-label="Move down">
-          ↓
-        </button>
+        <IconButton size="sm" label="Move up" disabled={busy || !canUp} onClick={onUp}>
+          <Icon name="up" />
+        </IconButton>
+        <IconButton size="sm" label="Move down" disabled={busy || !canDown} onClick={onDown}>
+          <Icon name="down" />
+        </IconButton>
       </div>
     </div>
   );
@@ -526,10 +534,10 @@ function CoverageCard({ ticketKey, ticket }: { ticketKey: string; ticket: Ticket
       }
       actions={
         coverage?.report_path ? (
-          <a className="link-btn" href={api.coverageReportUrl(ticketKey)} target="_blank" rel="noreferrer">
+          <ButtonLink href={api.coverageReportUrl(ticketKey)} target="_blank" rel="noreferrer">
             Report
             <span className="link-arrow" aria-hidden="true">↗</span>
-          </a>
+          </ButtonLink>
         ) : undefined
       }
     >

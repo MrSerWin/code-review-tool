@@ -1,12 +1,13 @@
 import { Link } from '../router';
+import { Select } from './ui';
 import type { DumpMode, DumpModeRequest, Preview, PreviewLink, PreviewRole, PreviewStatus, Recipe } from '../types';
 
 /** Database contents offered when starting a preview, shared by every start form. */
 export const DUMP_CHOICES: { value: DumpModeRequest; label: string }[] = [
-  { value: 'auto', label: 'data: auto' },
-  { value: 'pg_dump', label: 'data: fresh dump' },
-  { value: 'dump-dir', label: 'data: stored dump' },
-  { value: 'clean', label: 'data: clean install' },
+  { value: 'auto', label: 'auto' },
+  { value: 'pg_dump', label: 'fresh dump' },
+  { value: 'dump-dir', label: 'stored dump' },
+  { value: 'clean', label: 'clean install' },
 ];
 
 /** Statuses in which the preview is still working towards being clickable. */
@@ -282,8 +283,8 @@ export function RecipeSelect({
 }) {
   if (recipes.length < 2) return null;
   return (
-    <select
-      className="mini-select"
+    <Select
+      label="recipe"
       value={value}
       onChange={(e) => onChange(e.target.value)}
       aria-label="Recipe to run"
@@ -294,7 +295,7 @@ export function RecipeSelect({
           {r.name}
         </option>
       ))}
-    </select>
+    </Select>
   );
 }
 
@@ -309,8 +310,8 @@ export function DumpSelect({
   disabled?: boolean;
 }) {
   return (
-    <select
-      className="mini-select"
+    <Select
+      label="data"
       value={value}
       onChange={(e) => onChange(e.target.value as DumpModeRequest)}
       aria-label="Database contents for the preview"
@@ -321,6 +322,6 @@ export function DumpSelect({
           {c.label}
         </option>
       ))}
-    </select>
+    </Select>
   );
 }
