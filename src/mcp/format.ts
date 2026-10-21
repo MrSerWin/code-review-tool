@@ -640,6 +640,44 @@ export function compactPreview(
   };
 }
 
+/** `GET /api/ticket-groups/:key/preview-plan`. */
+export interface TicketPlanPayload {
+  ticket: string;
+  recipe: string;
+  roles: {
+    role: string; repo: string; branch: string; base: string; defaultBranch: string; usedBase: boolean;
+    source: 'github' | 'local'; chain: string[];
+  }[];
+  request: { ticket: string; recipe: string; roles: { role: string; branch?: string; base?: string; local?: boolean }[] };
+  live_preview: PreviewPayload | null;
+  other_live: PreviewPayload[];
+  notes: string[];
+}
+
+/**
+ * A ticket preview plan, compact: per role the branch that runs (the tip of
+ * its repo's chain, or the base branch) and where it comes from, plus a live
+ * preview that already runs exactly these branches.
+ */
+export function compactTicketPlan(p: TicketPlanPayload, opts: { page: (reviewId: number | null) => string }) {
+  return {
+    ticket: p.ticket,
+    recipe: p.recipe,
+    roles: p.roles.map((r) => ({
+      role: r.role,
+      repo: r.repo,
+      branch: r.branch,
+      base: r.base,
+      used_base: r.usedBase,
+      source: r.source,
+      chain: r.chain,
+    })),
+    live_preview: p.live_preview ? compactPreview(p.live_preview, { page: opts.page(p.live_preview.review_id) }) : null,
+    other_live: p.other_live.map((o) => ({ id: o.id, status: o.status, roles: o.roles.map(compactPreviewRole) })),
+    notes: p.notes,
+  };
+}
+
 export interface RecipePayload {
   name: string;
   description: string | null;

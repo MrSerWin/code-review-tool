@@ -894,13 +894,19 @@ Dark-first, compact. What each page offers is described in
   /api/ticket-groups/:key`): chains with parents, drag or ↑ ↓ (`PUT .../order`,
   a linear chain), a parent menu per branch (`PUT .../parent`), the latest run
   and code verdict per branch, the coverage table, and Review ticket /
-  Recompute coverage / Re-detect order; then all runs of the group across
+  Recompute coverage / Re-detect order / Preview ticket (when previews are
+  enabled: `TicketPreviewCard` shows the plan of `GET .../preview-plan`,
+  lets each role be changed with `RoleBranchInputs`, then posts the plan's
+  `request` unchanged, or every role as typed, and navigates to
+  `/previews?open=<id>`; a live preview that runs the plan is offered as
+  Open instead); then all runs of the group across
   repositories, newest first. It polls every 4 s while a run is active or
   coverage is pending. A fallback `repo#branch` group shows its runs only.
   The review page of a slice shows the code verdict banner and a Ticket
   coverage card read from `ticket_group`.
 - **Previews** (`/previews`, only when enabled) — start a preview from a ticket
-  or from custom branches per role, and follow every preview.
+  or from custom branches per role, and follow every preview; `?open=<id>`
+  expands that preview's row.
 
 Routing is a small hand-written history-based router; there is no react-router
 dependency.
@@ -944,6 +950,7 @@ until `PREVIEW_ENABLED` is set. No reviewer CLI is involved.
 |---|---|
 | `recipes.ts` | zod schema, loading (`//` and block comments allowed), validation; errors name the field and the file |
 | `roles.ts` | pure branch-per-role planning: hand-picked overrides, the review's branch, the input's and the ticket's branches, base-branch fallback |
+| `ticketPlan.ts` | the preview of a whole ticket group: per role its repo's chain tip, local when its latest review was, the request body, and a live preview that runs it |
 | `ports.ts` | host port allocation, verified by binding, held until the row records it |
 | `database.ts` | where the data comes from: `pg_dump` → newest file in `dumpDir` → clean |
 | `steps.ts` | runs one recipe command, streams its output, enforces timeouts, kills the process group |
@@ -1019,6 +1026,22 @@ checkout is verified pristine with `assertPristine`; checkouts the preview
 fetched itself are removed, and so is a dump taken for it. A checkout counts
 as the preview's own from before its clone starts (`checkoutDir()`), so a
 fetch that fails halfway leaves no directory behind.
+
+**Ticket preview plan.** `ticketPreviewPlan()` (`ticketPlan.ts`) reads the
+stored group, not the tracker: `orderChains()` per repository, and for each
+recipe role the last branch in chain order, the tip that contains the whole
+stack. Its source is the source of that branch's latest review (from
+`groupHeads()`), else the member's. Its base is the parent of the chain root
+(the branch whose parent is outside the group), so a stack on a branch other
+than the default branch keeps it; a repo without members runs its default
+branch (`usedBase`). A forest or a fork in a repo is reported in `notes`.
+`planRequestRoles()` turns the plan into a `POST /api/previews` body that
+names every role, so the engine resolves nothing again and labels the preview
+with the ticket key. `livePreviewsFor()` returns the newest queued, preparing,
+starting or ready preview of the recipe whose `roles_json` runs the same
+branch (or base) and source for every role. The route
+`GET /api/ticket-groups/:key/preview-plan` and the MCP tools
+`get_ticket_preview_plan` and `start_preview` (ticket alone) share it.
 
 **Stopping.** `POST /api/previews/:id/stop` answers as soon as the row says
 `stopping` (`beginStop()`): `down` can take minutes and goes on in the

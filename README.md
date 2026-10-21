@@ -339,6 +339,20 @@ them as a **ticket group**: per repository, a chain of branches, each with the
   `repo#branch`", or "not covered anywhere". Its report gets a Ticket coverage
   section, refreshed after each pass, and every pass writes
   `reports/<ticket>/coverage-<ts>-<id>.md`.
+- **Preview the ticket.** With previews enabled, **Preview ticket** on the
+  ticket page runs the whole ticket as one [preview](#preview-environments-optional):
+  per recipe role, the tip of its repository's chain (the last branch in
+  chain order, which contains every slice below it), copied from the local
+  clone when that branch's latest review was local, else from GitHub; a
+  repository without a branch in the group runs its base branch. The panel
+  shows these roles, lets you change any of them (Change branches), offers a
+  recipe picker when several recipes exist, and then starts the preview and
+  opens it on `/previews`. When a live preview already runs exactly these
+  branches, it offers **Open preview #N** instead of starting a second one.
+  The plan comes from `GET /api/ticket-groups/<key>/preview-plan`; the MCP
+  tool `start_preview` with only `ticket` uses the same plan
+  (`get_ticket_preview_plan` shows it). A repository whose branches do not
+  stack into one line is noted; the last branch in chain order runs.
 - The CLI reviews branches the same way but does not run coverage (it exits
   when its reviews end); the server's next pass, or a recompute, covers them.
 
@@ -509,6 +523,7 @@ authentication. Errors come back as `{ "error": "…" }` with a 4xx or 5xx statu
 | DELETE | `/api/reviews/:id` | | `{ ok: true }`; cancels it if needed, deletes the row, the report file, and its raw pass outputs |
 | GET | `/api/ticket-groups/:key` | `?run=` | `{ group, coverage, latest_coverage, coverage_pending, run }`: the chains per repository in stack order (each branch with `parent`, `parentReason`, `depth`, `latest` and `latestDone` run with `code_verdict`), the latest finished coverage, a newer running or failed pass, and the latest (or the given) ticket review run; `404` without a group |
 | GET | `/api/ticket-groups/:key/coverage/report` | `?id=` | the coverage report (`text/markdown`) |
+| GET | `/api/ticket-groups/:key/preview-plan` | `?recipe=` (optional with one recipe) | `{ ticket, recipe, roles, request, live_preview, other_live, notes }`: per role the chain tip of its repo (`branch`, `base`, `usedBase`, `source`, `chain`), the `POST /api/previews` body that runs it, a queued/starting/ready preview that runs exactly these branches, the ticket's other live previews; `404` without a group, `400` for an unknown recipe or several recipes and none named, `409` when previews are disabled |
 | POST | `/api/tickets/:key/review` | `{ reviewer?, model?, requirementsText?, branches?, refresh? }` | `201 { run, reviews, notes, group, coverage, ... }`: one queued run per branch, parents first, each against its parent; `branches` (`["repo#branch"]`) narrows it; `refresh: false` skips the tracker; this can take minutes (ticket lookup, branch listing, compare) |
 | POST | `/api/tickets/:key/coverage` | `{ reviewer?, model? }` | `202 { started, coverage }`: a coverage pass now; joins a running one |
 | PUT | `/api/tickets/:key/parent` | `{ repo, branch, parent }` | the ticket payload; `parent: null` = the default branch; `400` for a loop |
@@ -556,7 +571,8 @@ every tool returns an error saying so.
 | `set_branch_parent` | `ticket`, `repo`, `branch` + `parent`, or `order` (+ `root?`) | set one branch's parent (null = default branch), or make the repository one chain in the given order |
 | `rerun_review` | `id`, `reviewer?`, `model?` | run a review again, optionally with another reviewer or model |
 | `list_recipes` | | preview recipes: name, roles (role -> repo), database, ready timeout; `enabled` is false when previews are off |
-| `start_preview` | `recipe?`, `roles?` (`[{role, branch?, base?, local?}]`), `review_id?`, `ticket?`, `dump_mode?` | start a [preview](#preview-environments-optional); a role runs a local branch with `branch: "local:<repo>#<branch>"` or `local: true`; returns the preview id at once |
+| `start_preview` | `recipe?`, `roles?` (`[{role, branch?, base?, local?}]`), `review_id?`, `ticket?`, `dump_mode?`, `reuse_live?` | start a [preview](#preview-environments-optional); a role runs a local branch with `branch: "local:<repo>#<branch>"` or `local: true`; `ticket` alone for a ticket group runs its preview plan (each repo's chain tip) and returns a live preview that already runs it (`reused: true`) unless `reuse_live: false`; returns the preview id at once |
+| `get_ticket_preview_plan` | `ticket`, `recipe?` | what `start_preview` with only this ticket would run: per role the chain tip, its `source` and `chain`, or the base branch (`used_base`); `live_preview` that already runs it, `other_live`, `notes` |
 | `get_preview` | `id`, `tail_logs?` | status, `web_url` and `links` (every exposed address, primary first) once ready, each role's branch, `source` (`github` / `local`) and commit, ports, data mode, expiry, error |
 | `wait_for_preview` | `id`, `timeoutSec?` (default 50, max 600), `pollSec?` (default 5) | poll until the preview is ready or has ended; returns `finished`, call again while it is `false` |
 | `stop_preview` | `id`, `timeoutSec?` (default 50, max 600) | stop a preview; waits up to `timeoutSec` for its teardown, which goes on in the server after that (`stopped=false`) |
@@ -569,8 +585,9 @@ a loop, then `get_ticket`. Review results
 carry each review's page URL in the web UI. A preview follows the same pattern:
 `start_preview`, `wait_for_preview` until `finished`, open `web_url` (or an
 entry of `links`, such as the backend or its admin), then
-`stop_preview`. `start_preview`, `stop_preview` and the review mutations are
-refused inside a reviewer.
+`stop_preview`. For a ticket group, `get_ticket_preview_plan` then
+`start_preview` with only `ticket` previews the whole stack. `start_preview`,
+`stop_preview` and the review mutations are refused inside a reviewer.
 
 Build first (`npm run build`), then register the server. Use an absolute path to
 `node` if the agent is a GUI app that does not see your shell's `PATH` (nvm).

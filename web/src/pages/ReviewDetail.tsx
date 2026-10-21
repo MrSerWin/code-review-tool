@@ -2,11 +2,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api';
 import PreviewPanel from '../components/PreviewPanel';
 import {
+  Button,
+  ButtonLink,
   Card,
+  Icon,
   RequirementStatusTag,
   SeverityTag,
   StatusPill,
   TicketExternalLink,
+  buttonClass,
   fmtDuration,
   fmtTime,
 } from '../components/ui';
@@ -276,20 +280,19 @@ export default function ReviewDetail({ id }: { id: number }) {
           {(links || ticketButton) && (
             <div className="banner-links">
               {links?.pr && (
-                <a className="link-btn link-btn-pr" href={links.pr} target="_blank" rel="noreferrer">
+                <ButtonLink className="link-pr" href={links.pr} target="_blank" rel="noreferrer">
                   PR #{review.pr_number}
                   <span className="link-arrow" aria-hidden="true">↗</span>
-                </a>
+                </ButtonLink>
               )}
               {links && (
-                <a className="link-btn" href={links.branch} target="_blank" rel="noreferrer">
+                <ButtonLink href={links.branch} target="_blank" rel="noreferrer">
                   Branch
                   <span className="link-arrow" aria-hidden="true">↗</span>
-                </a>
+                </ButtonLink>
               )}
               {links?.compare && (
-                <a
-                  className="link-btn"
+                <ButtonLink
                   href={links.compare}
                   target="_blank"
                   rel="noreferrer"
@@ -297,11 +300,10 @@ export default function ReviewDetail({ id }: { id: number }) {
                 >
                   Diff
                   <span className="link-arrow" aria-hidden="true">↗</span>
-                </a>
+                </ButtonLink>
               )}
               {ticketButton && (
-                <a
-                  className="link-btn link-btn-ticket"
+                <ButtonLink
                   href={ticketButton}
                   target="_blank"
                   rel="noreferrer"
@@ -309,7 +311,7 @@ export default function ReviewDetail({ id }: { id: number }) {
                 >
                   {ticketLabel}
                   <span className="link-arrow" aria-hidden="true">↗</span>
-                </a>
+                </ButtonLink>
               )}
               {links && review.source === 'local' && (
                 <span className="banner-note" title="Read from the local clone; GitHub shows only what is pushed">
@@ -324,9 +326,7 @@ export default function ReviewDetail({ id }: { id: number }) {
           <div className="banner-row">
             <StatusPill status={review.status} boxed />
             {running ? (
-              <button className="btn ctl" type="button" onClick={() => void cancel()}>
-                Cancel
-              </button>
+              <Button onClick={() => void cancel()}>Cancel</Button>
             ) : (
               <div className="input-group" role="group" aria-label="Re-run this review">
                 {reviewers.length > 0 && (
@@ -374,19 +374,19 @@ export default function ReviewDetail({ id }: { id: number }) {
             )}
           </div>
           <div className="banner-row">
-            <a className="btn ghost ctl" href={api.reportUrl(review.id)} download={`review-${review.id}.md`}>
+            <ButtonLink variant="ghost" href={api.reportUrl(review.id)} download={`review-${review.id}.md`}>
               <Icon name="download" />
               Download
-            </a>
-            <button className="btn ghost ctl" type="button" onClick={() => void copyReport()}>
+            </ButtonLink>
+            <Button variant="ghost" onClick={() => void copyReport()}>
               <Icon name="copy" />
               Copy report
-            </button>
+            </Button>
             <span className="banner-divider" aria-hidden="true" />
-            <button className="btn ghost ctl ctl-danger" type="button" onClick={() => void remove()}>
+            <Button variant="danger" onClick={() => void remove()}>
               <Icon name="trash" />
               Delete
-            </button>
+            </Button>
           </div>
         </div>
       </div>
@@ -610,7 +610,7 @@ function TicketCoverageCard({ group, finished }: { group: ReviewTicketGroup; fin
         </span>
       }
       actions={
-        <Link to={`/ticket/${encodeURIComponent(group.key)}`} className="link-btn" title={`Every branch of ${group.key}`}>
+        <Link to={`/ticket/${encodeURIComponent(group.key)}`} className={buttonClass()} title={`Every branch of ${group.key}`}>
           {group.key}
         </Link>
       }
@@ -678,24 +678,6 @@ function ShaLink({ sha, href }: { sha: string | null; href: string | null }) {
     </a>
   ) : (
     <>{short}</>
-  );
-}
-
-type IconName = 'rerun' | 'download' | 'copy' | 'trash';
-
-const ICON_PATHS: Record<IconName, string> = {
-  rerun: 'M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.5v3h-3',
-  download: 'M8 2.5v8m0 0L4.8 7.3M8 10.5l3.2-3.2M3 13.5h10',
-  copy: 'M5.5 5.5V3.2c0-.4.3-.7.7-.7h6.6c.4 0 .7.3.7.7v6.6c0 .4-.3.7-.7.7h-2.3M3.2 5.5h6.6c.4 0 .7.3.7.7v6.6c0 .4-.3.7-.7.7H3.2a.7.7 0 0 1-.7-.7V6.2c0-.4.3-.7.7-.7Z',
-  trash: 'M2.5 4.5h11M6.5 4.5V3c0-.3.2-.5.5-.5h2c.3 0 .5.2.5.5v1.5M4 4.5l.6 8.4c0 .3.3.6.7.6h5.4c.4 0 .7-.3.7-.6l.6-8.4',
-};
-
-/** A 14px line icon for the banner buttons; decorative, the button text names the action. */
-function Icon({ name }: { name: IconName }) {
-  return (
-    <svg className="icon" width="14" height="14" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-      <path d={ICON_PATHS[name]} fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
   );
 }
 

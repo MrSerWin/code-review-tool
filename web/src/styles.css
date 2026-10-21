@@ -36,10 +36,29 @@
   --radius: 6px;
   --radius-sm: 4px;
 
-  /* One height for every control in a toolbar row (banner buttons, inputs, links). */
+  /*
+   * Control scale: every button, select and input. `md` is the default
+   * everywhere; `sm` is only for dense rows (table cells, the chain list).
+   */
   --ctl-h: 30px;
+  --ctl-h-sm: 24px;
+  --ctl-px: var(--space-3);
+  --ctl-px-sm: var(--space-2);
+  --ctl-field-px: var(--space-2);
+  --ctl-fs: var(--fs-sm);
+  --ctl-fs-sm: var(--fs-xs);
+  --ctl-radius: var(--radius-sm);
+  --ctl-border-w: 1px;
+  --ctl-border: var(--border-strong);
+  --ctl-gap: var(--space-2);
+  /* Inputs and selects sit sunken; buttons sit raised. */
+  --field-bg: var(--bg-sunken);
+  --btn-bg: var(--bg-hover);
   /* Control fill that sits on any surface, including the tinted verdict banner. */
   --ctl-bg: rgba(8, 10, 15, 0.4);
+  --select-arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 6l4 4 4-4' fill='none' stroke='%239aa7bd' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+
+  color-scheme: dark;
 
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
@@ -138,48 +157,17 @@ p { margin: 0 0 var(--space-2); }
   gap: var(--space-3);
   margin-bottom: var(--space-3);
 }
-.card-actions { display: flex; gap: var(--space-2); }
 
 /* Launcher */
-.launcher { display: flex; gap: var(--space-2); }
-.launcher-input {
-  flex: 1;
-  min-width: 0;
-  padding: var(--space-3) var(--space-3);
-  background: var(--bg-sunken);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  color: var(--fg);
-  font-family: var(--font-mono);
-  font-size: var(--fs-md);
-}
-.launcher-input:focus { outline: none; border-color: var(--accent); }
-.launcher-input::placeholder { color: var(--fg-faint); }
+.launcher { display: flex; gap: var(--ctl-gap); }
+.launcher-input { flex: 1; min-width: 0; }
 
-.reviewer-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-3);
-  align-items: flex-end;
-}
-.reviewer-field {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-  font-size: var(--fs-xs);
-}
-.reviewer-select,
-.reviewer-input,
-.history-search {
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg-sunken);
-  color: var(--fg);
-  font-size: var(--fs-sm);
-}
-.reviewer-model { min-width: 12rem; flex: 1; max-width: 20rem; }
-.history-search { min-width: 14rem; max-width: 22rem; }
+/* A labelled form field: the label above, the control at the shared height. */
+.field { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
+.field-label { color: var(--fg-dim); font-size: var(--fs-xs); }
+.field-grow { flex: 1 1 12rem; max-width: 20rem; }
+.field-grow > .input { width: 100%; }
+.history-search { width: 18rem; max-width: 100%; }
 
 /* Manual requirements, used when there is no ticket to read. */
 .manual { display: flex; flex-direction: column; gap: var(--space-2); }
@@ -213,26 +201,123 @@ p { margin: 0 0 var(--space-2); }
 .manual-input::placeholder { color: var(--fg-faint); }
 .manual-hint { margin: 0; font-size: var(--fs-xs); }
 
-/* Buttons */
+/* Controls: one scale for buttons, selects and inputs (see --ctl-* above). */
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--ctl-gap); min-width: 0; }
+.toolbar-end { align-items: flex-end; column-gap: var(--space-3); }
+.toolbar-spacer { flex: 1 1 0; }
+
 .btn {
+  box-sizing: border-box;
   display: inline-flex;
+  flex: none;
   align-items: center;
-  gap: var(--space-1);
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  background: var(--bg-hover);
+  justify-content: center;
+  gap: 6px;
+  height: var(--ctl-h);
+  padding: 0 var(--ctl-px);
+  border: var(--ctl-border-w) solid var(--ctl-border);
+  border-radius: var(--ctl-radius);
+  background: var(--btn-bg);
   color: var(--fg);
   font: inherit;
-  font-size: var(--fs-sm);
-  cursor: pointer;
+  font-size: var(--ctl-fs);
+  font-weight: 500;
+  line-height: 1;
   white-space: nowrap;
+  cursor: pointer;
 }
-.btn:hover { border-color: var(--accent); text-decoration: none; }
+.btn:hover { text-decoration: none; }
+.btn:not(:disabled):hover { border-color: var(--accent); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); font-weight: 600; }
-.btn.ghost { background: transparent; }
-.btn.danger:hover { border-color: var(--red); color: var(--red); }
+.btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* Inside a clipping group the ring sits inside the segment. */
+.segmented-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.btn-sm { gap: var(--space-1); height: var(--ctl-h-sm); padding: 0 var(--ctl-px-sm); font-size: var(--ctl-fs-sm); }
+.btn-primary { background: var(--accent); border-color: var(--accent); color: var(--bg); font-weight: 600; }
+.btn-primary:not(:disabled):hover {
+  background: color-mix(in srgb, var(--accent) 85%, var(--fg));
+  border-color: color-mix(in srgb, var(--accent) 85%, var(--fg));
+}
+.btn-ghost { background: transparent; border-color: transparent; color: var(--fg-dim); }
+.btn-ghost:not(:disabled):hover { border-color: var(--ctl-border); background: var(--ctl-bg); color: var(--fg); }
+.btn-danger { background: transparent; border-color: color-mix(in srgb, var(--red) 40%, var(--border)); color: var(--red); }
+.btn-danger:not(:disabled):hover { border-color: var(--red); background: var(--red-bg); }
+/* A toggle that is on: Custom..., Change branches, Preview ticket. */
+.btn:not(.btn-primary)[aria-pressed='true'] { border-color: var(--accent); color: var(--accent); }
+.btn-icon { width: var(--ctl-h); padding: 0; }
+.btn-icon.btn-sm { width: var(--ctl-h-sm); }
+.link-arrow { color: var(--fg-faint); }
+.btn:hover .link-arrow { color: inherit; }
+.btn.link-pr { color: var(--violet); }
+.icon { flex: none; }
+
+.input {
+  box-sizing: border-box;
+  height: var(--ctl-h);
+  min-width: 0;
+  padding: 0 var(--ctl-field-px);
+  border: var(--ctl-border-w) solid var(--ctl-border);
+  border-radius: var(--ctl-radius);
+  background: var(--field-bg);
+  color: var(--fg);
+  font: inherit;
+  font-size: var(--ctl-fs);
+}
+.input.mono { font-family: var(--font-mono); }
+.input::placeholder { color: var(--fg-faint); }
+.input:focus { outline: none; border-color: var(--accent); }
+.input:disabled { opacity: 0.5; cursor: not-allowed; }
+.input[aria-invalid='true'] { border-color: var(--amber); }
+.input-sm { height: var(--ctl-h-sm); padding: 0 6px; font-size: var(--ctl-fs-sm); }
+.select,
+.ig-select {
+  appearance: none;
+  padding-right: calc(var(--ctl-field-px) + 16px);
+  background-image: var(--select-arrow);
+  background-repeat: no-repeat;
+  background-position: right var(--ctl-field-px) center;
+  background-size: 10px;
+  cursor: pointer;
+}
+.select option,
+.ig-select option { background: var(--bg-raised); color: var(--fg); }
+
+/*
+ * Joined choices: GitHub | Local, By ticket | All runs. Each segment fills the
+ * full control height, like the segments of .input-group, so the switch reads
+ * as one 30px control next to inputs and buttons rather than chips in a box.
+ */
+.segmented {
+  box-sizing: border-box;
+  display: inline-flex;
+  flex: none;
+  align-items: stretch;
+  height: var(--ctl-h);
+  border: var(--ctl-border-w) solid var(--ctl-border);
+  border-radius: var(--ctl-radius);
+  background: var(--field-bg);
+  overflow: hidden;
+}
+.stack > .segmented { align-self: flex-start; }
+.segmented-btn {
+  display: inline-flex;
+  align-items: center;
+  margin: 0;
+  padding: 0 var(--ctl-px);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--fg-dim);
+  font: inherit;
+  font-size: var(--ctl-fs);
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.segmented-btn + .segmented-btn { border-left: var(--ctl-border-w) solid var(--ctl-border); }
+.segmented-btn:hover { color: var(--fg); }
+.segmented-btn[aria-pressed='true'] { background: var(--btn-bg); color: var(--accent); font-weight: 600; }
 
 /* Tables */
 .table-wrap { overflow-x: auto; }
@@ -340,10 +425,8 @@ table.grid tr:last-child td { border-bottom: none; }
 .tag.tracker { color: var(--accent); border-color: var(--accent); }
 .tag.local { color: var(--amber); border-color: var(--amber); }
 
-/* GitHub | Local switch above the launcher */
-.mode-switch { display: inline-flex; align-self: flex-start; gap: var(--space-1); }
-.mode-switch .btn[aria-pressed='false'] { opacity: 0.6; }
-.local-check { display: inline-flex; align-items: center; gap: var(--space-2); font-size: var(--fs-sm); }
+/* A checkbox in a row of controls, centred on the same line. */
+.local-check { display: inline-flex; align-items: center; gap: var(--space-2); min-height: var(--ctl-h); font-size: var(--ctl-fs); }
 .local-check[aria-disabled='true'] { opacity: 0.5; }
 
 /* Verdict banner: verdict and GitHub links on the left, actions on the right. */
@@ -374,25 +457,6 @@ table.grid tr:last-child td { border-bottom: none; }
 
 /* GitHub pages of the reviewed branch: the most-used targets on this page. */
 .banner-links { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-top: var(--space-3); }
-.link-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: var(--ctl-h);
-  padding: 0 var(--space-3);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  background: var(--ctl-bg);
-  color: var(--fg);
-  font-size: var(--fs-sm);
-  font-weight: 500;
-  white-space: nowrap;
-}
-.link-btn:hover { border-color: var(--accent); color: var(--accent); text-decoration: none; }
-.link-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.link-btn-pr { color: var(--violet); }
-.link-arrow { color: var(--fg-faint); }
-.link-btn:hover .link-arrow { color: inherit; }
 .banner-note { font-size: var(--fs-xs); color: var(--fg-dim); }
 
 /* Actions: status + re-run on top, report actions below, Delete set apart. */
@@ -405,24 +469,21 @@ table.grid tr:last-child td { border-bottom: none; }
   gap: var(--space-2);
 }
 .banner-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-2); }
-.btn.ctl { height: var(--ctl-h); padding: 0 var(--space-3); gap: 6px; }
-.btn.ghost.ctl { border-color: transparent; color: var(--fg-dim); }
-.btn.ghost.ctl:hover { border-color: var(--border-strong); background: var(--ctl-bg); color: var(--fg); }
-/* Quiet until hovered; the confirm dialog still guards it. */
-.btn.ghost.ctl-danger { color: var(--fg-faint); }
-.btn.ghost.ctl-danger:hover { border-color: var(--red); background: var(--red-bg); color: var(--red); }
+/* The tinted banner shows through its controls. */
+.banner .btn-secondary,
+.banner .input-group { background: var(--ctl-bg); }
 .banner-divider { width: 1px; height: 18px; margin: 0 var(--space-1); background: var(--border-strong); }
-.icon { flex: none; }
-
-/* Reviewer + model + Re-run joined into one control. */
+/* Joined segments in one control: reviewer + model + Re-run, or a label + select. */
 .input-group {
+  box-sizing: border-box;
   display: inline-flex;
   align-items: stretch;
+  flex: none;
   height: var(--ctl-h);
   max-width: 100%;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  background: var(--ctl-bg);
+  border: var(--ctl-border-w) solid var(--ctl-border);
+  border-radius: var(--ctl-radius);
+  background: var(--field-bg);
   overflow: hidden;
 }
 .input-group:focus-within { border-color: var(--accent); }
@@ -435,13 +496,31 @@ table.grid tr:last-child td { border-bottom: none; }
   background: transparent;
   color: var(--fg);
   font: inherit;
-  font-size: var(--fs-sm);
+  font-size: var(--ctl-fs);
 }
-.input-group > * + * { border-left: 1px solid var(--border-strong); }
-.ig-field { min-width: 0; padding: 0 var(--space-2); }
-.ig-field:focus { outline: none; background: var(--bg-hover); }
-.ig-select { cursor: pointer; }
-.ig-select option { background: var(--bg-raised); color: var(--fg); }
+.input-group > * + * { border-left: var(--ctl-border-w) solid var(--ctl-border); }
+.ig-field { min-width: 0; padding: 0 var(--ctl-field-px); }
+.ig-field:focus { outline: none; background-color: var(--bg-hover); }
+.ig-field:disabled { opacity: 0.5; cursor: not-allowed; }
+/* After .ig-field, whose padding and background would drop the arrow. */
+.input-group .ig-select {
+  padding-right: calc(var(--ctl-field-px) + 16px);
+  background: var(--select-arrow) no-repeat right var(--ctl-field-px) center / 10px;
+}
+.input-group .ig-select:focus { background-color: var(--bg-hover); }
+.ig-label {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 0 0 var(--ctl-field-px);
+  color: var(--fg-faint);
+  font-size: var(--ctl-fs);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.input-group > .ig-label + .ig-field { border-left: 0; padding-left: 6px; flex: 1 1 auto; }
+.input-group-sm { height: var(--ctl-h-sm); }
+.input-group-sm .ig-label,
+.input-group-sm .ig-field { font-size: var(--ctl-fs-sm); }
 .ig-input { width: 9rem; font-family: var(--font-mono); }
 .ig-input::placeholder { color: var(--fg-faint); }
 .ig-btn {
@@ -450,12 +529,13 @@ table.grid tr:last-child td { border-bottom: none; }
   gap: 6px;
   flex: none;
   padding: 0 var(--space-3);
-  background: var(--bg-hover);
+  background: var(--btn-bg);
   font-weight: 600;
   white-space: nowrap;
   cursor: pointer;
 }
 .ig-btn:hover { color: var(--accent); }
+/* The group clips an outline, so focus shows as a fill. */
 .ig-btn:focus-visible { outline: none; color: var(--accent); background: var(--border); }
 
 /* Targets */
@@ -497,21 +577,6 @@ table.grid tr:last-child td { border-bottom: none; }
 .comparison-title { flex: 1 1 12rem; }
 .comparison-loc { font-size: var(--fs-xs); }
 
-.history-filter {
-  display: flex;
-  gap: var(--space-2);
-  margin-bottom: var(--space-3);
-}
-.history-filter input {
-  flex: 1;
-  min-width: 0;
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg-sunken);
-  color: var(--fg);
-  font: inherit;
-}
 .group-head {
   text-transform: uppercase;
   letter-spacing: 0.06em;
@@ -697,17 +762,6 @@ table.grid tr:last-child td { border-bottom: none; }
 }
 
 /* Preview panel */
-.mini-select {
-  padding: var(--space-1) var(--space-2);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  background: var(--bg-hover);
-  color: var(--fg);
-  font: inherit;
-  font-size: var(--fs-xs);
-}
-.mini-select:focus { outline: none; border-color: var(--accent); }
-
 .preview-intro p:last-child { margin-bottom: 0; }
 
 /* Custom preview launch: one branch input per recipe role. */
@@ -729,8 +783,7 @@ table.grid tr:last-child td { border-bottom: none; }
   white-space: nowrap;
 }
 .role-branch-field { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
-.role-branch-input { flex: none; width: 100%; padding: var(--space-2) var(--space-3); }
-.role-branch-input[aria-invalid='true'] { border-color: var(--amber); }
+.role-branch-input { width: 100%; }
 .role-branch-hint { color: var(--amber); font-size: var(--fs-xs); }
 .role-branch-note { font-size: var(--fs-xs); }
 .role-branch.role-branch-local { grid-template-columns: minmax(7rem, 13rem) auto minmax(0, 1fr); }
@@ -744,7 +797,6 @@ table.grid tr:last-child td { border-bottom: none; }
   gap: var(--space-2) var(--space-3);
 }
 .custom-launch-hint { flex: 1 1 18rem; margin: 0; font-size: var(--fs-sm); }
-.custom-launch-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
 .preview-custom {
   display: flex;
   flex-direction: column;
@@ -755,14 +807,13 @@ table.grid tr:last-child td { border-bottom: none; }
 }
 .preview-custom:last-child { margin-bottom: 0; padding-bottom: 0; border-bottom: 0; }
 .preview-custom .custom-launch-hint { flex: none; margin: 0; font-size: var(--fs-xs); }
-.btn.ghost[aria-pressed='true'] { border-color: var(--accent); color: var(--accent); }
 
 @media (max-width: 520px) {
   .role-branch,
   .role-branch.role-branch-local { grid-template-columns: minmax(0, 1fr); gap: var(--space-1); }
   .role-branch-label { flex-direction: row; align-items: baseline; gap: var(--space-2); }
   .custom-launch-actions { width: 100%; }
-  .custom-launch-actions .btn.primary { margin-left: auto; }
+  .custom-launch-actions .btn-primary { margin-left: auto; }
 }
 .preview-body { display: flex; flex-direction: column; gap: var(--space-3); }
 .preview-head { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; font-size: var(--fs-sm); }
@@ -893,7 +944,6 @@ table.grid tr:last-child td { border-bottom: none; }
   -webkit-box-orient: vertical;
 }
 .row-actions { display: flex; justify-content: flex-end; gap: var(--space-1); white-space: nowrap; }
-.btn.btn-sm { padding: 2px var(--space-2); font-size: var(--fs-xs); }
 /*
  * The branches column gets real room; the rest stay as narrow as their content.
  * Branch names never set the column width (contain), so long ones truncate
@@ -924,9 +974,8 @@ table.grid tr:last-child td { border-bottom: none; }
 .status-toggle:hover { text-decoration: underline; }
 tr.row-open td { background: var(--bg-hover); }
 
-/* History: header controls wrap instead of overflowing */
+/* Card header controls wrap instead of overflowing */
 .card-head { flex-wrap: wrap; }
-.card-actions { flex-wrap: wrap; align-items: center; }
 
 .sr-only {
   position: absolute;
@@ -943,33 +992,10 @@ tr.row-open td { background: var(--bg-hover); }
 /* History grouped by ticket */
 table.grid th.col-toggle,
 table.grid td.col-toggle { width: 28px; padding-right: 0; }
-.chevron {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  padding: 0;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  background: none;
-  color: var(--fg-dim);
-  cursor: pointer;
-}
-.chevron:hover { color: var(--fg); border-color: var(--border-strong); }
-.chevron:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 /* Points right when closed, down when open. */
-.chevron-icon {
-  width: 7px;
-  height: 7px;
-  margin-left: -2px;
-  border-right: 1.5px solid currentColor;
-  border-bottom: 1.5px solid currentColor;
-  transform: rotate(-45deg);
-  transition: transform 0.12s ease;
-}
-.chevron[aria-expanded='true'] .chevron-icon { margin: -3px 0 0; transform: rotate(45deg); }
-@media (prefers-reduced-motion: reduce) { .chevron-icon { transition: none; } }
+.chevron .icon { transition: transform 0.12s ease; }
+.chevron[aria-expanded='true'] .icon { transform: rotate(90deg); }
+@media (prefers-reduced-motion: reduce) { .chevron .icon { transition: none; } }
 
 /* Fixed layout: the ticket column takes what the others leave, so long titles truncate instead of widening. */
 table.group-grid { table-layout: fixed; }
@@ -1139,8 +1165,7 @@ tr.group-runs > td {
 .chain-title { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-width: 0; }
 .chain-arrow { color: var(--fg-faint); }
 .chain-sub { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
-.chain-parent { display: inline-flex; align-items: center; gap: var(--space-1); }
-.chain-parent .reviewer-select { max-width: 22rem; }
+.chain-parent { max-width: 22rem; }
 .chain-run { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
 .chain-base { font-size: var(--fs-xs); }
 .chain-move { display: flex; gap: 2px; }

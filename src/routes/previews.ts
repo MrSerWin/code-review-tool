@@ -7,6 +7,9 @@ import {
 import { subscribePreview } from '../preview/events.js';
 import { loadRecipes, primaryPort } from '../preview/recipes.js';
 import { getPreview, getPreviewLogs, listPreviews } from '../preview/store.js';
+import {
+  defaultTicketPlanDeps, PlanError, ticketPreviewPlan, type TicketPlanDeps,
+} from '../preview/ticketPlan.js';
 
 const idParams = z.object({ id: z.coerce.number().int().positive() });
 
@@ -42,7 +45,39 @@ const listQuery = z.object({
   offset: z.coerce.number().int().min(0).optional(),
 });
 
-export async function previewRoutes(app: FastifyInstance): Promise<void> {
+const planParams = z.object({ key: z.string().trim().min(1).max(200) });
+const planQuery = z.object({ recipe: z.string().min(1).max(128).optional() });
+
+export async function previewRoutes(
+  app: FastifyInstance,
+  opts: { planDeps?: TicketPlanDeps } = {},
+): Promise<void> {
+  const planDeps = opts.planDeps ?? defaultTicketPlanDeps;
+
+  // What "Preview ticket" runs: per role the tip of its repo's chain, plus a live preview that already runs it.
+  app.get('/api/ticket-groups/:key/preview-plan', async (req, reply) => {
+    if (!previewsEnabled()) return reply.code(409).send({ error: 'Previews are disabled (PREVIEW_ENABLED)' });
+    const params = planParams.safeParse(req.params);
+    const query = planQuery.safeParse(req.query);
+    if (!params.success || !query.success) return reply.code(400).send({ error: 'Invalid request' });
+    try {
+      const plan = await ticketPreviewPlan(params.data.key, query.data.recipe, planDeps);
+      const { recipes } = loadRecipes();
+      return {
+        ticket: plan.ticket,
+        recipe: plan.recipe,
+        roles: plan.roles,
+        request: plan.request,
+        live_preview: plan.livePreview ? decoratePreview(plan.livePreview, recipes) : null,
+        other_live: plan.otherLive.map((row) => decoratePreview(row, recipes)),
+        notes: plan.notes,
+      };
+    } catch (err) {
+      const status = err instanceof PlanError ? err.status : 400;
+      return reply.code(status).send({ error: (err as Error).message });
+    }
+  });
+
   app.get('/api/recipes', async () => {
     const { recipes, errors } = loadRecipes();
     return {
