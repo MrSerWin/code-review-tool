@@ -1181,6 +1181,12 @@ tr.group-runs > td {
 .coverage-where.where-elsewhere { color: var(--accent); }
 .coverage-where.where-nowhere { color: var(--red); }
 
+/* --- the cross-repository contract check --- */
+.contract { margin-top: var(--space-4); }
+.contract-title { margin: 0 0 var(--space-2); font-size: var(--fs-sm); }
+.contract-list { list-style: none; margin: 0 0 var(--space-3); padding: 0; display: flex; flex-direction: column; gap: var(--space-3); }
+.contract-issue { display: flex; flex-direction: column; gap: var(--space-1); }
+
 /* --- the stored requirement checklist --- */
 .checklist { list-style: none; margin: 0 0 var(--space-3); padding: 0; display: flex; flex-direction: column; gap: var(--space-1); }
 .checklist-item {

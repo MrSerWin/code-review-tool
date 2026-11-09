@@ -216,7 +216,9 @@ and before synthesis:
 ```
 
 A check runs when its key is present and not `false`; `true` or `{}` takes the
-defaults; unknown keys are rejected and an invalid file runs no checks.
+defaults; unknown keys are rejected and an invalid file runs no checks. The
+same file may set `contractGlobs` (top level, next to `checks`): the contract
+files of the ticket coverage's [cross-repository contract](#tickets-split-into-several-branches) check.
 
 | check | result | config keys (default) |
 |---|---|---|
@@ -403,6 +405,24 @@ them as a **ticket group**: per repository, a chain of branches, each with the
   planned slice that has no branch yet shows as "not covered anywhere".
   **Recompute coverage**, `POST /api/tickets/<key>/coverage`, or
   `get_ticket_coverage` with `recompute: true` runs a pass at once.
+- **Cross-repository contract.** The coverage pass also gets, per branch,
+  the diff of its contract files (`git diff <base>..<head>` in the sandbox,
+  from the branch's checkout, at most 400 lines per branch with a note naming
+  the files cut), and compares what the backend returns, renames, or removes
+  with what the frontend reads or sends. It reports `contract_issues`
+  (`problem`, `severity` `major`/`minor`, and `sites`: repo, branch, file,
+  line), only for a mismatch it can show at both ends; each site is checked
+  like a finding anchor in that branch, and an issue with fewer than two sites
+  that exist is dropped. Contract files are `contractGlobs` from
+  `RULES_DIR/<repo>.json` when that file sets them, else
+  `**/*serializers*.py`, `**/*views*.py`, `**/*urls*.py`, `**/*schemas*.py`,
+  `src/Services/**`, `src/Models/**`, `src/**/*Models.ts`,
+  `src/**/*Service.ts`, without tests (a glob starting with `!` excludes). The
+  issues show under the coverage table on the ticket page ("No contract
+  mismatch found" when there are none), in the coverage report, and in
+  `get_ticket_coverage` and `wait_for_ticket_review` (`contract.checked` is
+  false for a pass that predates the check). They do not change the coverage
+  verdict.
 - **Where it shows.** The ticket page lists the chains (parent, why it was
   picked, the latest run and code verdict per branch; drag or ↑ ↓ to make a
   repository one chain in that order, or pick a parent per branch), the

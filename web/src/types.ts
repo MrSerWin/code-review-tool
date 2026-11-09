@@ -506,6 +506,21 @@ export interface CoverageRequirement {
   branches: CoverageBranch[];
 }
 
+/** One end of a contract mismatch between branches. */
+export interface ContractSite {
+  repo: string;
+  branch: string;
+  file: string;
+  line: number | null;
+  anchor_status: AnchorStatus;
+}
+
+export interface ContractIssue {
+  problem: string;
+  severity: 'major' | 'minor';
+  sites: ContractSite[];
+}
+
 export interface Coverage {
   id: number;
   ticket_key: string;
@@ -513,6 +528,8 @@ export interface Coverage {
   verdict: CoverageVerdict | null;
   summary: string | null;
   requirements: CoverageRequirement[];
+  /** The cross-repository contract check; null or absent for a pass that predates it. */
+  contract_issues?: ContractIssue[] | null;
   review_ids: number[];
   reviewer: string | null;
   model: string | null;

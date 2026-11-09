@@ -4,7 +4,7 @@ import { config } from './config.js';
 import { branchCoverage, openRequirements, whereLabel } from './coverageView.js';
 import { listReviewers } from './reviewers/index.js';
 import type {
-  AnchorStatus, CheckoutResult, CoverageRequirement, CoverageVerdict, Finding, FindingKind, ReviewOutput, ReviewRow,
+  AnchorStatus, CheckoutResult, ContractIssue, CoverageRequirement, CoverageVerdict, Finding, FindingKind, ReviewOutput, ReviewRow,
   Severity, TicketInfo,
 } from './types.js';
 
@@ -357,6 +357,8 @@ export interface CoverageForReport {
   summary: string;
   requirements: CoverageRequirement[];
   createdAt: string;
+  /** Absent: the pass did not run the contract check. */
+  contractIssues?: ContractIssue[];
 }
 
 const COVERAGE_VERDICT_TEXT: Record<CoverageVerdict, string> = {
@@ -467,6 +469,22 @@ export function renderCoverageReport(
     lines.push(`| ${label} | ${cell(r.text)} | ${COVERAGE_ICON[r.status] ?? r.status} | ${cell(by)} | ${cell(r.note) || '-'} |`);
   });
   lines.push('');
+
+  if (coverage.contractIssues) {
+    lines.push('## Cross-repository contract', '');
+    if (coverage.contractIssues.length === 0) lines.push('No contract mismatch found between the branches.', '');
+    else {
+      for (const issue of coverage.contractIssues) {
+        const sites = issue.sites.map((s) => {
+          const loc = s.line ? `${s.file}:${s.line}` : s.file;
+          const warn = anchorWarning(s.anchor_status);
+          return `${s.repo}#${s.branch} \`${loc}\`${warn ? ` [${warn}]` : ''}`;
+        }).join('; ');
+        lines.push(`- **${issue.severity}**: ${inline(issue.problem)} (${sites})`);
+      }
+      lines.push('');
+    }
+  }
 
   const open = openRequirements(coverage.requirements);
   lines.push('## Still required', '');

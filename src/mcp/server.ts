@@ -502,7 +502,9 @@ export function createMcpServer({ api, env = process.env }: CreateServerOptions)
     description:
       'The ticket coverage of a group: verdict (covered when every requirement is covered, else needs_work), ' +
       'summary, and per requirement its status (covered | partial | missing) with the branches that cover it ' +
-      'and their evidence. Coverage is recomputed on its own once a batch of branch reviews ends; ' +
+      'and their evidence, plus contract: the cross-repository contract check (issues where what one branch\'s API ' +
+      'returns or accepts and what another branch reads or sends disagree, each with severity and both sites). ' +
+      'Coverage is recomputed on its own once a batch of branch reviews ends; ' +
       'recompute=true starts a pass now (it takes a few minutes; call again with recompute=false to read it). ' +
       'A planned slice with no branch, or a branch not reviewed yet, shows as missing.',
     inputSchema: {

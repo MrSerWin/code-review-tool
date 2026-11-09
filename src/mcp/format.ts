@@ -7,7 +7,8 @@
  * pulls in nothing that reads configuration or secrets.
  */
 import type {
-  AnchorStatus, CoverageRequirement, CoverageStatus, CoverageVerdict, FindingKind, FindingRow, FindingSource, LogRow, ParentReason,
+  AnchorStatus, ContractIssue, CoverageRequirement, CoverageStatus, CoverageVerdict, FindingKind, FindingRow, FindingSource, LogRow,
+  ParentReason,
   PreviewRole, PreviewStatus, RequirementRow, ReviewGroup, ReviewRow, ReviewSource, ReviewStatus, Severity, Verdict,
 } from '../types.js';
 
@@ -357,6 +358,8 @@ export interface CoveragePayload {
   verdict: CoverageVerdict | null;
   summary: string | null;
   requirements: CoverageRequirement[];
+  /** null or absent: the pass predates the contract check. */
+  contract_issues?: ContractIssue[] | null;
   review_ids: number[];
   reviewer: string | null;
   model: string | null;
@@ -416,6 +419,21 @@ export function compactCoverage(c: CoveragePayload | null, maxRequirements = DEF
       ...(r.note ? { note: truncate(r.note, 200) } : {}),
     })),
     ...(c.requirements.length > reqs.length ? { requirements_omitted: c.requirements.length - reqs.length } : {}),
+    // The cross-repository contract check: checked=false for a pass that predates it.
+    contract: c.contract_issues
+      ? {
+          checked: true,
+          issues: c.contract_issues.map((i) => ({
+            severity: i.severity,
+            problem: truncate(i.problem, 400),
+            sites: i.sites.map((x) => ({
+              branch: `${x.repo}#${x.branch}`,
+              location: x.line ? `${x.file}:${x.line}` : x.file,
+              anchor_status: x.anchor_status,
+            })),
+          })),
+        }
+      : { checked: false, issues: [] },
     open: c.requirements.filter((r) => r.status !== 'covered')
       .map((r) => `${r.status}: ${r.requirement_id ? `${requirementRef(r.requirement_id)} ` : ''}${truncate(r.text, 120)}`),
     review_ids: c.review_ids,

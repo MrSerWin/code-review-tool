@@ -7,7 +7,7 @@ import { db } from './db.js';
 import { fallbackGroupKey } from './groupKey.js';
 import { orderChains } from './ticketChains.js';
 import type {
-  CoverageRequirement, CoverageVerdict, ParentReason, ReviewRow, ReviewSource, TicketBranchRow, TicketCoverageRow,
+  ContractIssue, CoverageRequirement, CoverageVerdict, ParentReason, ReviewRow, ReviewSource, TicketBranchRow, TicketCoverageRow,
   TicketGroupRow, TicketRunRow,
 } from './types.js';
 
@@ -220,14 +220,20 @@ export function latestDoneCoverage(key: string): TicketCoverageRow | undefined {
 export function finishCoverage(
   id: number,
   result:
-    | { status: 'done'; verdict: CoverageVerdict; summary: string; requirements: CoverageRequirement[]; reportPath: string | null }
+    | {
+        status: 'done'; verdict: CoverageVerdict; summary: string; requirements: CoverageRequirement[]; reportPath: string | null;
+        contractIssues?: ContractIssue[];
+      }
     | { status: 'failed'; error: string },
 ): void {
   if (result.status === 'done') {
     db.prepare(
       `UPDATE ticket_coverage SET status = 'done', verdict = ?, summary = ?, requirements_json = ?, report_path = ?,
-              error = NULL, finished_at = ? WHERE id = ?`,
-    ).run(result.verdict, result.summary, JSON.stringify(result.requirements), result.reportPath, now(), id);
+              contract_json = ?, error = NULL, finished_at = ? WHERE id = ?`,
+    ).run(
+      result.verdict, result.summary, JSON.stringify(result.requirements), result.reportPath,
+      result.contractIssues ? JSON.stringify(result.contractIssues) : null, now(), id,
+    );
   } else {
     db.prepare(`UPDATE ticket_coverage SET status = 'failed', error = ?, finished_at = ? WHERE id = ?`)
       .run(result.error.slice(0, 4000), now(), id);

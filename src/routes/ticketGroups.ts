@@ -17,6 +17,7 @@ import {
   parseIds, syncMembersFromReviews,
 } from '../ticketStore.js';
 import type { ResolvedTarget, ReviewRow, TicketCoverageRow, TicketInfo, TicketRunRow } from '../types.js';
+import { parseContractIssues } from '../contract.js';
 import { logger } from '../logger.js';
 import { deriveOnce, derivationError, derivationRunning, storedTicket, type DeriveOptions, type DeriveResult } from '../requirements.js';
 import {
@@ -115,6 +116,8 @@ export function coveragePayload(row: TicketCoverageRow | undefined | null) {
     verdict: row.verdict,
     summary: row.summary,
     requirements: parseCoverageRequirements(row),
+    // null: the pass predates the contract check; [] means it found no mismatch.
+    contract_issues: parseContractIssues(row.contract_json),
     review_ids: parseIds(row.review_ids),
     reviewer: row.reviewer,
     model: row.model,

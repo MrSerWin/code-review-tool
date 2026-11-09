@@ -10,6 +10,10 @@ import path from 'node:path';
 import { z } from 'zod';
 import { createAnchorContext, checkAnchor } from './anchors.js';
 import { config } from './config.js';
+import {
+  collectContractHunks, contractGlobsFor, contractIssuesSchema, normalizeContractIssues, renderContractHunks, type ContractHunks, type DiffRunner,
+  type SiteTarget,
+} from './contract.js';
 import { coverageVerdict, branchCoverage, openRequirements } from './coverageView.js';
 import { db, getRequirements, getReviewFiles } from './db.js';
 import { checkoutDir, pruneCheckout } from './gitSandbox.js';
@@ -30,7 +34,7 @@ import {
   syncMembersFromReviews,
 } from './ticketStore.js';
 import type {
-  AnchorStatus, CoverageBranch, CoverageEvidence, CoverageRequirement, CoverageStatus, OnLog, RequirementRow,
+  AnchorStatus, ContractIssue, CoverageBranch, CoverageEvidence, CoverageRequirement, CoverageStatus, OnLog, RequirementRow,
   ReviewFileRow, ReviewRow, TicketBranchRow, TicketCoverageRow,
 } from './types.js';
 
@@ -76,12 +80,14 @@ const coverageRequirementSchema = z.object({
 export const coverageOutputSchema = z.object({
   summary: z.string().nullish().transform((v) => v ?? ''),
   requirements: z.array(coverageRequirementSchema.refine((r) => r.text.length > 0, 'text is required')).min(1),
+  contract_issues: contractIssuesSchema,
 });
 
 /** The answer for a stored checklist: every entry names its id. */
 export const checklistCoverageOutputSchema = z.object({
   summary: z.string().nullish().transform((v) => v ?? ''),
   requirements: z.array(coverageRequirementSchema.refine((r) => r.id !== null, 'id is required')),
+  contract_issues: contractIssuesSchema,
 });
 
 export type CoverageOutput = z.infer<typeof coverageOutputSchema>;
@@ -98,6 +104,8 @@ export interface CoverageBranchInput {
   latest: ReviewRow | null;
   files: ReviewFileRow[];
   requirements: RequirementRow[];
+  /** The diff of its contract files, for the cross-repository contract check; set by `attachContractHunks`. */
+  contract?: ContractHunks | null;
 }
 
 export interface CoverageInputs {
@@ -215,7 +223,42 @@ export async function buildCoveragePrompt(inputs: CoverageInputs): Promise<strin
     TICKET: inputs.ticket.text,
     BRANCHES: renderCoverageBranches(inputs.branches),
     REQUIREMENTS_STEP: renderCoverageRequirementsStep(inputs.checklist),
+    CONTRACT: renderContractHunks(inputs.branches.map((b) => ({
+      repo: b.member.repo, branch: b.member.branch, hunks: b.review ? b.contract ?? null : null,
+    }))),
   });
+}
+
+/** Reads the contract hunks of every reviewed branch from its checkout, before the checkouts are pruned. */
+export async function attachContractHunks(
+  branches: CoverageBranchInput[],
+  opts: { run?: DiffRunner; rulesDir?: string } = {},
+): Promise<void> {
+  for (const b of branches) {
+    if (!b.review) continue;
+    b.contract = await collectContractHunks(b.review, b.files, checkoutDir(b.member, b.review.id), {
+      ...(opts.run ? { run: opts.run } : {}),
+      ...(opts.rulesDir ? { globs: contractGlobsFor(b.member.repo, opts.rulesDir) } : {}),
+    });
+  }
+}
+
+/** Contract sites resolved to the group's reviewed branches, each checked in that branch. */
+export function contractResolver(
+  branches: readonly CoverageBranchInput[],
+  checkerFor: (b: CoverageBranchInput) => EvidenceChecker,
+): (repo: string | null, branch: string) => SiteTarget | undefined {
+  const checkers = new Map<CoverageBranchInput, EvidenceChecker>();
+  return (repo, branch) => {
+    const member = findMember(branches, repo, branch);
+    if (!member?.review) return undefined;
+    let check = checkers.get(member);
+    if (!check) {
+      check = checkerFor(member);
+      checkers.set(member, check);
+    }
+    return { repo: member.member.repo, branch: member.member.branch, check };
+  };
 }
 
 // --- evidence anchors -------------------------------------------------------------
@@ -302,19 +345,7 @@ function normalizeRequirements(
   onLog: OnLog,
 ): CoverageRequirement[] {
   const checkers = new Map<CoverageBranchInput, EvidenceChecker>();
-  const find = (repo: string | null, branch: string): CoverageBranchInput | undefined => {
-    let name = branch.trim();
-    let r = repo;
-    const hash = name.indexOf('#');
-    if (!r && hash > 0) {
-      r = name.slice(0, hash);
-      name = name.slice(hash + 1);
-    } else if (r && name.startsWith(`${r}#`)) {
-      name = name.slice(r.length + 1);
-    }
-    const matches = branches.filter((b) => b.member.branch === name && (!r || b.member.repo === r));
-    return matches.length === 1 ? matches[0] : undefined;
-  };
+  const find = (repo: string | null, branch: string) => findMember(branches, repo, branch);
   return requirements.map((req) => {
     const out: CoverageBranch[] = [];
     if (req.status !== 'missing') {
@@ -349,6 +380,21 @@ function normalizeRequirements(
   });
 }
 
+/** The member a model-written `repo` and `branch` (or `repo#branch`) name; undefined when none or several match. */
+function findMember(branches: readonly CoverageBranchInput[], repo: string | null, branch: string): CoverageBranchInput | undefined {
+  let name = branch.trim();
+  let r = repo;
+  const hash = name.indexOf('#');
+  if (!r && hash > 0) {
+    r = name.slice(0, hash);
+    name = name.slice(hash + 1);
+  } else if (r && name.startsWith(`${r}#`)) {
+    name = name.slice(r.length + 1);
+  }
+  const matches = branches.filter((b) => b.member.branch === name && (!r || b.member.repo === r));
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
 // --- the pass -----------------------------------------------------------------------
 
 export interface CoverageRunOptions {
@@ -358,6 +404,8 @@ export interface CoverageRunOptions {
   /** For tests: the reviewer to run instead of looking one up. */
   reviewerDefinition?: ReviewerDefinition;
   timeoutMs?: number;
+  /** For tests: how a checkout's contract diff is read (default: git in the sandbox). */
+  contractDiff?: DiffRunner;
 }
 
 const ACTIVE_SQL = `status IN ('queued', 'fetching', 'reviewing')`;
@@ -414,6 +462,9 @@ export async function runCoverage(key: string, opts: CoverageRunOptions = {}): P
   try {
     fs.mkdirSync(workDir, { recursive: true });
     log('info', `started with ${reviewed.length} of ${inputs.branches.length} branch(es) reviewed, ${reviewer.label} (${model})`);
+    await attachContractHunks(inputs.branches, opts.contractDiff ? { run: opts.contractDiff } : {});
+    const withDiff = inputs.branches.filter((b) => b.contract?.diff).length;
+    log('info', `contract check: ${withDiff} branch(es) with contract hunks`);
     const prompt = await buildCoveragePrompt(inputs);
     const passOpts = {
       dir: workDir,
@@ -425,27 +476,28 @@ export async function runCoverage(key: string, opts: CoverageRunOptions = {}): P
     const { data } = inputs.checklist.length > 0
       ? await runPass('coverage', prompt, checklistCoverageOutputSchema, log, passOpts)
       : await runPass('coverage', prompt, coverageOutputSchema, log, passOpts);
-    const requirements = normalizeCoverage(
-      data,
-      inputs.branches,
-      (b) => evidenceChecker(b.review ? checkoutDir(b.member, b.review.id) : null, b.files),
-      log,
-      inputs.checklist,
+    const checkerFor = (b: CoverageBranchInput) => evidenceChecker(b.review ? checkoutDir(b.member, b.review.id) : null, b.files);
+    const requirements = normalizeCoverage(data, inputs.branches, checkerFor, log, inputs.checklist);
+    const contractIssues: ContractIssue[] = normalizeContractIssues(
+      data.contract_issues,
+      contractResolver(inputs.branches, checkerFor),
+      (message) => log('warn', message),
     );
     const verdict = coverageVerdict(requirements);
     const open = openRequirements(requirements);
     const summary = data.summary.trim() || (open.length === 0
       ? 'Every requirement is covered by some branch.'
       : `${open.length} requirement(s) are not fully covered.`);
-    const report: CoverageForReport = { id: row.id, verdict, summary, requirements, createdAt: row.created_at };
+    const report: CoverageForReport = { id: row.id, verdict, summary, requirements, createdAt: row.created_at, contractIssues };
     const reportPath = await writeCoverageReport(
       { key, title: inputs.ticket.title, url: inputs.ticket.url },
       report,
       inputs.branches.map(reportBranch),
       { reviewer: reviewer.name, model },
     );
-    finishCoverage(row.id, { status: 'done', verdict, summary, requirements, reportPath });
-    log('info', `done: ${verdict}, ${requirements.length} requirement(s), ${open.length} open; report ${reportPath}`);
+    finishCoverage(row.id, { status: 'done', verdict, summary, requirements, reportPath, contractIssues });
+    log('info', `done: ${verdict}, ${requirements.length} requirement(s), ${open.length} open, ` +
+      `${contractIssues.length} contract issue(s); report ${reportPath}`);
     for (const b of reviewed) {
       if (!b.review?.report_path) continue;
       await updateReportCoverage(b.review.report_path, renderBranchCoverageSection(key, report, b.member.repo, b.member.branch));

@@ -26,6 +26,15 @@ Short sentences. No filler.
 
 {{BRANCHES}}
 
+# Contract files
+
+The diff of each branch's contract files: what an API returns, accepts, or
+routes (serializers, views, URL maps, schemas) and what a client reads or sends
+(API services, response models). Long diffs are cut; a note says which files
+were not shown in full.
+
+{{CONTRACT}}
+
 # How to work
 
 {{REQUIREMENTS_STEP}}
@@ -45,6 +54,21 @@ Short sentences. No filler.
    evidence, or a path from that branch's changed-file list. Do not move
    evidence from one branch to another. The tool checks every location
    against that branch's checkout.
+5. **Cross-repository contract.** Compare, across the branches, what the
+   backend returns, renames, or removes with what the frontend reads or sends:
+   a field renamed or dropped in a serializer that a frontend model or service
+   still reads, a new required request field the frontend never sends, a
+   changed URL or HTTP method, a changed type or enum value, a response shape
+   (list versus object, nesting) the client does not expect. Use the contract
+   diffs above; a file outside them may be named only when the diff makes the
+   other end certain. Report a mismatch only when you can show BOTH ends: one
+   site where it is defined and one where it is used, each with the branch,
+   the file, and the line in that branch. When the two ends live in different
+   repositories, give at least one site in each. A field the frontend never
+   uses is not an issue. A mismatch inside one repository counts too, with two
+   sites. `major`: a request fails or a screen shows wrong or missing data;
+   `minor`: a cosmetic or edge-case mismatch. When you find none, return an
+   empty list and say so in the summary.
 
 # Output
 
@@ -53,7 +77,7 @@ It must match this shape exactly:
 
 ```json
 {
-  "summary": "2-6 sentences: how the ticket is split, what is covered, and what is still missing, naming the branch that should hold it when that is clear.",
+  "summary": "2-6 sentences: how the ticket is split, what is covered, what is still missing (naming the branch that should hold it when that is clear), and whether the contract check found a mismatch.",
   "requirements": [
     {
       "id": "R12 (the checklist id) or null",
@@ -70,6 +94,16 @@ It must match this shape exactly:
         }
       ]
     }
+  ],
+  "contract_issues": [
+    {
+      "problem": "what the backend returns or accepts versus what the frontend reads or sends, in one or two sentences",
+      "severity": "major|minor",
+      "sites": [
+        { "repo": "backend repository", "branch": "its branch", "file": "app/serializers.py", "line": 40 },
+        { "repo": "frontend repository", "branch": "its branch", "file": "src/Services/RiskService.ts", "line": 12 }
+      ]
+    }
   ]
 }
 ```
@@ -79,4 +113,6 @@ Rules for the JSON block:
 - `branches` is empty for a `missing` requirement, and never empty otherwise.
 - `repo` and `branch` must name a branch from the list above.
 - `line` may be `null` when the evidence is a whole file.
+- `contract_issues` is an empty array when there is no mismatch; every issue
+  has at least two `sites`, each naming a branch from the list above.
 - Output valid JSON. No comments, no trailing commas, no text after the block.

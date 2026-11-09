@@ -470,6 +470,24 @@ export interface TicketCoverageRow {
   trigger: string | null;
   created_at: string;
   finished_at: string | null;
+  /** JSON array of `ContractIssue`; null on rows written before the contract check. */
+  contract_json: string | null;
+}
+
+/** One end of a cross-repository contract mismatch, checked like a finding anchor. */
+export interface ContractSite {
+  repo: string;
+  branch: string;
+  file: string;
+  line: number | null;
+  anchor_status: AnchorStatus;
+}
+
+/** A mismatch between what one side of an API returns or accepts and what the other reads or sends. */
+export interface ContractIssue {
+  problem: string;
+  severity: 'major' | 'minor';
+  sites: ContractSite[];
 }
 
 /** Mirrors a row of the `ticket_runs` table: one "review the ticket" batch. */

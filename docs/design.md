@@ -741,6 +741,7 @@ CREATE TABLE ticket_requirements (
 );
 -- ticket_groups gains requirements_derived_at TEXT and requirements_notes TEXT (JSON: not verifiable work);
 -- requirements gains requirement_id INTEGER, reviews gains proposed_requirements TEXT (JSON); NULL on older rows.
+-- ticket_coverage gains contract_json TEXT (JSON: [{ problem, severity, sites: [{ repo, branch, file, line, anchor_status }] }]).
 ```
 
 The tables are created with `IF NOT EXISTS` and the columns with
@@ -833,6 +834,20 @@ The pass writes `reports/<ticket>/coverage-<ts>-<id>.md`, refreshes the
 section between `<!-- ticket-coverage:start -->` and `:end` in each branch
 report, and closes the ticket runs whose reviews have all settled (also when
 the pass failed, so a waiter never hangs).
+
+**Contract check (`contract.ts`).** Before the prompt is built,
+`attachContractHunks()` reads per reviewed branch the diff of its contract
+files from its checkout (`collectContractHunks()`: changed files matching
+`contractGlobsFor(repo)`, `git diff --no-ext-diff -M <base_sha>..<head_sha>`
+through `runInSandbox`, capped by `capDiff()` at 400 lines with the cut files
+named; a missing checkout or commit gives a note instead). The prompt's
+`{{CONTRACT}}` block holds them; step 5 asks for `contract_issues` with both
+ends. `normalizeContractIssues()` resolves each site to a reviewed member
+(`findMember()`, as for coverage branches), checks it with that branch's
+evidence checker, and keeps an issue only with two sites whose status is
+`ok`, `off_diff`, or `unverified` (an untouched consumer file is `off_diff`
+and still counts). The list is stored in `ticket_coverage.contract_json`: NULL
+for a pass before the check, `[]` for none found.
 
 `createCoverageScheduler()` debounces: every settled run (done, failed,
 cancelled) of a group restarts the group's timer (`COVERAGE_DEBOUNCE_MS`);

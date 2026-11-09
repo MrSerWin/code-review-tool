@@ -298,6 +298,32 @@ test('a ticket is compacted to chains in stack order, latest runs, and its cover
     evidence: [{ location: 'src/export.py:4', anchor_status: 'ok' }, { location: 'src/x.py', anchor_status: 'off_diff' }],
   }]);
   assert.deepEqual(cov.open, ['missing: Button tests']);
+  // A pass that predates the contract check says so; one that ran it lists both ends of each issue.
+  assert.deepEqual(cov.contract, { checked: false, issues: [] });
+  const base = coveragePayload();
+  const checked = compactCoverage({
+    ...base,
+    requirements: base.requirements.map((r, i) => ({ ...r, requirement_id: 20 + i })),
+    contract_issues: [{
+      problem: 'name became title', severity: 'major',
+      sites: [
+        { repo: 'my-service', branch: 'feature/abc-123-a', file: 'api/serializers.py', line: 4, anchor_status: 'ok' },
+        { repo: 'my-frontend', branch: 'feature/abc-123-b', file: 'src/RiskModels.ts', line: null, anchor_status: 'off_diff' },
+      ],
+    }],
+  })!;
+  assert.equal(checked.requirements[0]!.id, 'R20');
+  assert.deepEqual(checked.open, ['missing: R21 Button tests']);
+  assert.deepEqual(checked.contract, {
+    checked: true,
+    issues: [{
+      severity: 'major', problem: 'name became title',
+      sites: [
+        { branch: 'my-service#feature/abc-123-a', location: 'api/serializers.py:4', anchor_status: 'ok' },
+        { branch: 'my-frontend#feature/abc-123-b', location: 'src/RiskModels.ts', anchor_status: 'off_diff' },
+      ],
+    }],
+  });
 });
 
 test('a review of a ticket group carries its code verdict and the coverage seen from it', () => {

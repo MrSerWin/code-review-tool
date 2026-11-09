@@ -35,6 +35,14 @@ const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'crt-reqs-db-'));
       key TEXT PRIMARY KEY, title TEXT, ticket_url TEXT, requirements_text TEXT,
       created_at TEXT NOT NULL, updated_at TEXT NOT NULL
     );
+    CREATE TABLE ticket_coverage (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, ticket_key TEXT NOT NULL, status TEXT NOT NULL, verdict TEXT, summary TEXT,
+      review_ids TEXT NOT NULL, requirements_json TEXT, reviewer TEXT, model TEXT, report_path TEXT, error TEXT,
+      trigger TEXT, created_at TEXT NOT NULL, finished_at TEXT
+    );
+    INSERT INTO ticket_coverage (ticket_key, status, verdict, summary, review_ids, requirements_json, created_at)
+      VALUES ('OLD-2', 'done', 'covered', 'Old pass', '[1]', '[{"text":"Old requirement","status":"covered","note":"","branches":[]}]',
+              '2026-01-01T00:05:00.000Z');
     INSERT INTO reviews (ticket_key, repo, branch, base_branch, run_index, status, created_at, group_key)
       VALUES ('OLD-2', 'svc', 'feat/old-2', 'main', 1, 'done', '2026-01-01T00:00:00.000Z', 'OLD-2');
     INSERT INTO requirements (review_id, text, status, evidence, ord) VALUES (1, 'Old requirement', 'met', 'a.py:1', 0);
@@ -47,13 +55,15 @@ process.env.DATA_DIR = dataDir;
 process.env.ALLOWED_REPOS = 'svc';
 const store = await import('./db.js');
 const { checklistPayload, addUserRequirements } = await import('./ticketRequirements.js');
+const { coveragePayload } = await import('./routes/ticketGroups.js');
+const { latestDoneCoverage } = await import('./ticketStore.js');
 
 test.after(() => {
   store.db.close();
   fs.rmSync(dataDir, { recursive: true, force: true });
 });
 
-test('an old database gains the checklist table and columns; old rows keep their text, without an id', () => {
+test('an old database gains the checklist table and columns and the contract column; old rows read as before', () => {
   const cols = (table: string) => (store.db.pragma(`table_info(${table})`) as { name: string }[]).map((c) => c.name);
   assert.ok(cols('requirements').includes('requirement_id'));
   assert.ok(cols('reviews').includes('proposed_requirements'));
@@ -70,6 +80,12 @@ test('an old database gains the checklist table and columns; old rows keep their
   assert.equal(checklistPayload('OLD-2').derived_at, null);
   addUserRequirements('OLD-2', ['Decision: keep it']);
   assert.equal(checklistPayload('OLD-2').items.length, 1);
+
+  // An old coverage pass was never contract-checked: null, not an empty list; its requirements have no id.
+  assert.ok(cols('ticket_coverage').includes('contract_json'));
+  const old2 = coveragePayload(latestDoneCoverage('OLD-2'))!;
+  assert.equal(old2.contract_issues, null);
+  assert.equal(old2.requirements[0]!.requirement_id, undefined);
 
   // A second migration changes nothing.
   store.migrate();
