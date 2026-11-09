@@ -20,6 +20,7 @@ import {
 } from './processOwnership.js';
 import { checkoutChangedFiles, runReview, stopAllReviewers, type PreviousFinding, type SliceInfo } from './reviewRunner.js';
 import { writeReport } from './reportWriter.js';
+import { buildCheckContext } from './checks/sources.js';
 import { coverageSchedulingEnabled, onGroupReviewSettled } from './coverage.js';
 import { sliceContext } from './ticketGroups.js';
 import { isTicketGroupKey } from './ticketStore.js';
@@ -360,6 +361,12 @@ async function processReview(reviewId: number, signal: AbortSignal): Promise<voi
     log(reviewId, 'info', `Carrying ${previousFindings.length} open finding(s) from the previous run.`);
   }
 
+  const checkContext = await buildCheckContext(
+    review,
+    checkout,
+    checkoutChangedFiles(checkout),
+    slice ? slice.members.filter((m) => !m.self) : [],
+  );
   const output = await runReview(
     review,
     checkout,
@@ -373,6 +380,7 @@ async function processReview(reviewId: number, signal: AbortSignal): Promise<voi
       // Persisted so a later recovery can stop them if this process dies.
       onProcessGroups: (groups) => finishRow(reviewId, { reviewer_pgids: JSON.stringify(groups) }),
       ...(slice ? { slice } : {}),
+      checkContext,
     },
   );
   throwIfCancelled(signal);
@@ -412,7 +420,10 @@ async function processReview(reviewId: number, signal: AbortSignal): Promise<voi
     reviewId,
     'info',
     `Done: verdict ${output.verdict}, can_merge=${output.can_merge}, code verdict ${output.code_verdict ?? output.verdict}, ` +
-      `${output.findings.length} finding(s), ${output.observations.length} observation(s).`,
+      `${output.findings.length} finding(s), ${output.observations.length} observation(s)` +
+      (output.toolChecks.ran.length
+        ? ` (tool checks: ${output.toolChecks.findings.length} finding(s), ${output.toolChecks.observations.length} observation(s)).`
+        : '.'),
   );
   publish(reviewId, {
     type: 'done',

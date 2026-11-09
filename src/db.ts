@@ -216,6 +216,7 @@ export function migrate(): void {
       'findings', 'anchor_status', `ALTER TABLE findings ADD COLUMN anchor_status TEXT NOT NULL DEFAULT 'unverified'`,
     );
     ensureColumn('findings', 'lens', `ALTER TABLE findings ADD COLUMN lens TEXT`);
+    ensureColumn('observations', 'lens', `ALTER TABLE observations ADD COLUMN lens TEXT`);
     // The code-only verdict; NULL on older rows, which only have the combined one.
     ensureColumn('reviews', 'code_verdict', `ALTER TABLE reviews ADD COLUMN code_verdict TEXT`);
     ensureColumn('reviews', 'code_can_merge', `ALTER TABLE reviews ADD COLUMN code_can_merge INTEGER`);
@@ -654,8 +655,8 @@ export function replaceRequirements(reviewId: number, reqs: ReviewOutput['requir
 
 export function replaceObservations(reviewId: number, rows: ReviewOutput['observations']): void {
   const insert = db.prepare(
-    `INSERT INTO observations (review_id, file, line, note, rationale, ord)
-     VALUES (@review_id, @file, @line, @note, @rationale, @ord)`,
+    `INSERT INTO observations (review_id, file, line, note, rationale, lens, ord)
+     VALUES (@review_id, @file, @line, @note, @rationale, @lens, @ord)`,
   );
   const run = db.transaction(() => {
     db.prepare(`DELETE FROM observations WHERE review_id = ?`).run(reviewId);
@@ -666,6 +667,7 @@ export function replaceObservations(reviewId: number, rows: ReviewOutput['observ
         line: observation.line ?? null,
         note: observation.note,
         rationale: observation.rationale ?? null,
+        lens: observation.lens ?? null,
         ord: index,
       });
     });

@@ -6,6 +6,8 @@ export type RequirementStatus = 'met' | 'partial' | 'missing' | 'not_verifiable'
 /** The independent review passes that run before synthesis. */
 export const LENS_NAMES = ['correctness', 'security', 'tests', 'contracts', 'regressions'] as const;
 export type LensName = (typeof LENS_NAMES)[number];
+/** Where a finding came from: a lens, or `tool` for a deterministic tool check (src/checks). */
+export type FindingSource = LensName | 'tool';
 
 export interface TicketInfo {
   /** Which tracker produced this ticket, or 'manual' for pasted requirements. */
@@ -63,6 +65,8 @@ export interface ChangedFile {
 
 export interface CheckoutResult {
   dir: string; headSha: string; baseSha: string;
+  /** The base branch tip as fetched (newer than `baseSha` when the base moved on); absent on hand-built results. */
+  baseTipSha?: string;
   filesChanged: number; additions: number; deletions: number;
   /** HEAD-side paths of every changed file, in `changedFileList` order. */
   changedFiles: string[];
@@ -81,6 +85,8 @@ export interface Observation {
   line: number | null;
   note: string;
   rationale: string;
+  /** `tool` for a deterministic tool check; absent or null for the model's remarks. */
+  lens?: 'tool' | null;
 }
 
 export interface Finding {
@@ -100,8 +106,8 @@ export interface Finding {
   cause_line: number | null;
   /** The diff hunk header (`@@ -a,b +c,d @@`) a diff finding sits in, when given. */
   hunk: string | null;
-  /** The lens whose candidate (and anchor) synthesis kept, when known. */
-  lens: LensName | null;
+  /** The lens whose candidate (and anchor) synthesis kept, when known; `tool` for a tool check. */
+  lens: FindingSource | null;
   /** Set by anchor validation after synthesis; lens output carries none. */
   anchor_status?: AnchorStatus;
 }
@@ -251,7 +257,7 @@ export interface FindingRow {
   hunk: string | null;
   /** 'unverified' on rows written before anchor validation existed. */
   anchor_status: AnchorStatus;
-  lens: LensName | null;
+  lens: FindingSource | null;
   ord: number;
 }
 
@@ -269,6 +275,8 @@ export interface ObservationRow {
   line: number | null;
   note: string;
   rationale: string | null;
+  /** `tool` for a deterministic tool check; null for the model's remarks and older rows. */
+  lens: 'tool' | null;
   ord: number;
 }
 

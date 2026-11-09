@@ -791,6 +791,7 @@ function ObservationCard({ observation }: { observation: Observation }) {
     : null;
   return (
     <article className="observation">
+      {observation.lens === 'tool' && <ToolTag />}
       {location && <div className="mono loc">{location}</div>}
       <p className="observation-note">{observation.note}</p>
       {observation.rationale && <p className="observation-why muted">{observation.rationale}</p>}
@@ -836,11 +837,21 @@ function FindingLocation({ finding }: { finding: Finding }) {
   );
 }
 
+/** Marks a result of a deterministic tool check: the tool adds it, the model cannot drop it. */
+function ToolTag() {
+  return (
+    <span className="tag tool" title="Deterministic tool check: added by the tool, not by the review model">
+      tool
+    </span>
+  );
+}
+
 function FindingCard({ finding }: { finding: Finding }) {
   return (
     <article className={`finding sev-border-${finding.severity}`}>
       <header>
         <SeverityTag severity={finding.severity} />
+        {finding.lens === 'tool' && <ToolTag />}
         {finding.category && <span className="tag cat">{finding.category}</span>}
         <h4>{finding.title}</h4>
       </header>

@@ -601,6 +601,8 @@ table.grid tr:last-child td { border-bottom: none; }
 .finding .loc-row .loc { margin-bottom: 0; }
 .finding .cause { font-size: var(--fs-sm); overflow-wrap: anywhere; }
 .tag.kind { color: var(--violet); border-color: var(--violet); }
+.tag.tool { color: var(--accent); border-color: var(--accent); }
+.observation .tag.tool { margin-bottom: var(--space-1); }
 .tag.anchor-warning { color: var(--amber); border-color: var(--amber); background: var(--amber-bg); }
 .finding p:last-child { margin-bottom: 0; }
 .finding p, .observation p { overflow-wrap: anywhere; }

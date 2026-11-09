@@ -20,6 +20,8 @@ Changed files (the changed set; renames are listed under their new path):
 
 {{TICKET_SCOPE}}
 
+{{REPO_RULES}}
+
 # Findings from the previous review of this branch
 
 {{PREVIOUS_FINDINGS}}
@@ -75,4 +77,6 @@ diff touches, plus any docs they point to. If they exist, they are binding rules
 for this repository and you must review against them: architecture and layering
 rules, security and isolation requirements, testing expectations, copy and
 documentation standards. Read the real files instead of assuming what they say,
-and never carry a rule from one repository over to another.
+and never carry a rule from one repository over to another. When a "Repository
+rules (binding)" section is given above, it is the binding summary of these
+files and takes precedence where they differ.

@@ -195,35 +195,38 @@ export function renderReport(
     lines.push(COVERAGE_END, '');
   }
 
+  const toolFindings = output.findings.filter((f) => f.lens === 'tool');
+  const toolObservations = output.observations.filter((o) => o.lens === 'tool');
   lines.push('## Issues to fix', '');
-  const findings = [...output.findings].sort(
+  const findings = output.findings.filter((f) => f.lens !== 'tool').sort(
     (a, b) => SEVERITY_ORDER.indexOf(a.severity) - SEVERITY_ORDER.indexOf(b.severity),
   );
   if (findings.length === 0) {
-    lines.push('No issues found.', '');
+    lines.push(toolFindings.length ? 'No issues found by the review passes; see Tool checks below.' : 'No issues found.', '');
   } else {
-    findings.forEach((finding, index) => {
-      lines.push(`### ${index + 1}. [${finding.severity.toUpperCase()}] ${finding.title}`, '');
-      lines.push(`- **File:** ${location(finding.file, finding.line, finding.end_line)}${anchorNote(finding)}`);
-      if (finding.kind && finding.kind !== 'diff') lines.push(`- **Caused by:** ${causeText(finding)}`);
-      if (finding.hunk) lines.push(`- **Hunk:** \`${finding.hunk}\``);
-      if (finding.category) lines.push(`- **Category:** ${finding.category}`);
-      lines.push(`- **Problem:** ${finding.problem}`);
-      if (finding.why) lines.push(`- **Why it matters:** ${finding.why}`);
-      if (finding.suggestion) lines.push(`- **Suggested fix:** ${finding.suggestion}`);
+    renderFindings(lines, findings);
+  }
+
+  if (toolFindings.length || toolObservations.length) {
+    lines.push('## Tool checks', '');
+    lines.push('Deterministic checks the tool ran on the checkout. Their findings count toward the verdict like any other.', '');
+    renderFindings(lines, [...toolFindings].sort(
+      (a, b) => SEVERITY_ORDER.indexOf(a.severity) - SEVERITY_ORDER.indexOf(b.severity),
+    ));
+    if (toolObservations.length) {
+      lines.push('Non-blocking:', '');
+      toolObservations.forEach((o) => lines.push(`- ${location(o.file, o.line, null)}: ${inline(o.note)}`));
       lines.push('');
-      if (finding.snippet) {
-        lines.push('```', finding.snippet.replace(/```/g, "'''"), '```', '');
-      }
-    });
+    }
   }
 
   // Non-blocking by construction: nothing here feeds the merge gate.
+  const observations = output.observations.filter((o) => o.lens !== 'tool');
   lines.push('## Suggestions (non-blocking)', '');
-  if (output.observations.length === 0) {
+  if (observations.length === 0) {
     lines.push('None.', '');
   } else {
-    output.observations.forEach((observation) => {
+    observations.forEach((observation) => {
       lines.push(`- ${location(observation.file, observation.line, null)} — ${inline(observation.note)}`);
       if (observation.rationale) lines.push(`  ${inline(observation.rationale)}`);
     });
@@ -235,6 +238,23 @@ export function renderReport(
   lines.push('');
 
   return lines.join('\n');
+}
+
+function renderFindings(lines: string[], findings: readonly Finding[]): void {
+  findings.forEach((finding, index) => {
+    lines.push(`### ${index + 1}. [${finding.severity.toUpperCase()}] ${finding.title}`, '');
+    lines.push(`- **File:** ${location(finding.file, finding.line, finding.end_line)}${anchorNote(finding)}`);
+    if (finding.kind && finding.kind !== 'diff') lines.push(`- **Caused by:** ${causeText(finding)}`);
+    if (finding.hunk) lines.push(`- **Hunk:** \`${finding.hunk}\``);
+    if (finding.category) lines.push(`- **Category:** ${finding.category}`);
+    lines.push(`- **Problem:** ${finding.problem}`);
+    if (finding.why) lines.push(`- **Why it matters:** ${finding.why}`);
+    if (finding.suggestion) lines.push(`- **Suggested fix:** ${finding.suggestion}`);
+    lines.push('');
+    if (finding.snippet) {
+      lines.push('```', finding.snippet.replace(/```/g, "'''"), '```', '');
+    }
+  });
 }
 
 function ticketCell(review: ReportableReview, ticket: TicketInfo | null): string {

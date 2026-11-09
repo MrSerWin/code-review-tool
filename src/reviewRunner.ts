@@ -10,12 +10,15 @@ import { getReviewer } from './reviewers/index.js';
 import { parseAnthropicStreamLine } from './reviewers/anthropicStream.js';
 import type { ReviewerDefinition } from './reviewers/types.js';
 import {
-  anchorFindings, changedFilesFromPaths, createAnchorContext, reanchorOutputSchema, type AnchorRunResult,
+  anchorFindings, changedFilesFromPaths, checkAnchor, createAnchorContext, reanchorOutputSchema, type AnchorRunResult,
 } from './anchors.js';
 import { anchorFields, attributeLenses, normalizeLens } from './findingFields.js';
+import { emptyToolCheckRun, renderToolChecks, runToolChecks, type CheckContext, type ToolCheckRun } from './checks/index.js';
+import { parseChecksConfig, type ChecksConfig } from './checks/config.js';
+import { loadRepoRules, readRepoChecksFile, renderRepoRules, type RepoRules } from './repoRules.js';
 import { LENS_NAMES } from './types.js';
 import type {
-  ChangedFile, CheckoutResult, LensName, LensOutput, OnLog, ReviewOutput, ReviewRow, TicketInfo,
+  ChangedFile, CheckoutResult, Finding, LensName, LensOutput, OnLog, ReviewOutput, ReviewRow, TicketInfo,
 } from './types.js';
 
 export interface PreviousFinding {
@@ -50,6 +53,12 @@ export interface RunReviewOptions {
    * implement are not findings, and its verdict judges its code only.
    */
   slice?: SliceInfo;
+  /** The repository rules; read from RULES_DIR when absent. */
+  rules?: RepoRules;
+  /** Which tool checks run; read from `<RULES_DIR>/<repo>.json` when absent, null runs none. */
+  checksConfig?: ChecksConfig | null;
+  /** What the tool checks may read beyond the checkout; a checkout-only context when absent. */
+  checkContext?: CheckContext;
 }
 
 /** Where a branch sits among the branches of its ticket. */
@@ -137,6 +146,8 @@ export interface PromptVars {
   checkout: CheckoutResult;
   previousFindings: PreviousFinding[];
   slice?: SliceInfo;
+  /** The rendered "Repository rules (binding)" section; empty without rules. */
+  repoRules?: string;
 }
 
 const PLACEHOLDER = /\{\{([A-Z_]+)\}\}/g;
@@ -155,7 +166,7 @@ export function renderTemplate(template: string, values: Record<string, string>)
 }
 
 /** The values every prompt file may reference. */
-export function promptValues(vars: PromptVars, lensOutputs = ''): Record<string, string> {
+export function promptValues(vars: PromptVars, lensOutputs = '', toolChecks = ''): Record<string, string> {
   return {
     TICKET: renderTicket(vars.ticket, vars.review),
     REPO: vars.review.repo,
@@ -166,6 +177,8 @@ export function promptValues(vars: PromptVars, lensOutputs = ''): Record<string,
     LENS_OUTPUTS: lensOutputs,
     TICKET_SCOPE: renderTicketScope(vars.slice, vars.review),
     SLICE_RULES: vars.slice ? SLICE_RULES : '',
+    REPO_RULES: vars.repoRules ?? '',
+    TOOL_CHECKS: toolChecks,
   };
 }
 
@@ -223,8 +236,8 @@ export async function buildReanchorPrompt(vars: PromptVars, findingsBlock: strin
   return renderTemplate(await loadPromptFile('reanchor.md'), values);
 }
 
-export async function buildSynthesisPrompt(vars: PromptVars, lensOutputs: string): Promise<string> {
-  const values = promptValues(vars, lensOutputs);
+export async function buildSynthesisPrompt(vars: PromptVars, lensOutputs: string, toolChecks = ''): Promise<string> {
+  const values = promptValues(vars, lensOutputs, toolChecks);
   const [preamble, synthesis] = await Promise.all([
     loadPromptFile('common-preamble.md'),
     loadPromptFile('synthesis.md'),
@@ -347,6 +360,8 @@ export interface ReviewRunOutput extends ReviewOutput {
   /** The re-anchor answer as returned; null when the pass did not run or failed. */
   reanchorRaw: unknown;
   anchors: AnchorRunResult;
+  /** The tool checks as they ran; their findings and observations are already in the output. */
+  toolChecks: ToolCheckRun;
 }
 
 export interface PassOptions {
@@ -514,12 +529,14 @@ export async function runReview(
   onLog: OnLog,
   opts: RunReviewOptions = {},
 ): Promise<ReviewRunOutput> {
+  const rules = loadRules(review.repo, opts, onLog);
   const vars: PromptVars = {
     ticket,
     review,
     checkout,
     previousFindings: opts.previousFindings ?? [],
     ...(opts.slice ? { slice: opts.slice } : {}),
+    repoRules: renderRepoRules(review.repo, rules),
   };
   const reviewer = opts.reviewerDefinition ?? getReviewer(opts.reviewer ?? review.reviewer);
   const model = opts.model ?? review.model ?? reviewer.defaultModel;
@@ -544,10 +561,14 @@ export async function runReview(
     );
   }
 
+  // Reads the checkout only; assertPristine afterwards still guards it.
+  const toolChecks = await runChecks(review.repo, checkout, opts, onLog);
+  if (opts.signal?.aborted) throw new Error('Review cancelled');
+
   const totalCandidates = lensResults.reduce((n, r) => n + (r.output?.findings.length ?? 0), 0);
   onLog('info', `synthesis: started with ${countLabel(totalCandidates, 'candidate finding')}.`);
 
-  const prompt = await buildSynthesisPrompt(vars, renderLensOutputs(lensResults));
+  const prompt = await buildSynthesisPrompt(vars, renderLensOutputs(lensResults), renderToolChecks(toolChecks));
   const { data: output, json: synthesisRaw } = await runPass(
     'synthesis',
     prompt,
@@ -563,7 +584,6 @@ export async function runReview(
   );
 
   const attributed = attributeLenses(output.findings as ReviewOutput['findings'], lensResults);
-  // Reads the checkout only; assertPristine afterwards still guards it.
   const anchorCtx = createAnchorContext(checkout.dir, checkoutChangedFiles(checkout));
   const reanchorLog: OnLog = (level, message) => onLog(level, `[re-anchor] ${message}`);
   let reanchorRaw: unknown = null;
@@ -581,13 +601,71 @@ export async function runReview(
   );
   if (opts.signal?.aborted) throw new Error('Review cancelled');
 
+  // Tool results are appended by the tool, after synthesis, so synthesis cannot drop them.
+  const toolFindings: Finding[] = toolChecks.findings.map((f) => checkAnchor(anchorCtx, f).finding);
   return {
-    ...normalize({ ...(output as ReviewOutput), findings: anchors.findings }, { slice: Boolean(opts.slice) }),
+    ...normalize(
+      {
+        ...(output as ReviewOutput),
+        findings: [...anchors.findings, ...toolFindings],
+        observations: [...output.observations, ...toolChecks.observations],
+      },
+      { slice: Boolean(opts.slice) },
+    ),
     lensResults,
     synthesisRaw,
     reanchorRaw,
     anchors,
+    toolChecks,
   };
+}
+
+function loadRules(repo: string, opts: RunReviewOptions, onLog: OnLog): RepoRules {
+  if (opts.rules) return opts.rules;
+  try {
+    const rules = loadRepoRules(repo);
+    if (rules.files.length) onLog('info', `Repository rules: ${rules.files.join(', ')} added to the prompts.`);
+    return rules;
+  } catch (err) {
+    onLog('warn', `Repository rules could not be read, reviewing without them: ${(err as Error).message}`);
+    return { text: '', files: [] };
+  }
+}
+
+function loadChecksConfig(repo: string, opts: RunReviewOptions, onLog: OnLog): ChecksConfig | null {
+  if (opts.checksConfig !== undefined) return opts.checksConfig;
+  try {
+    const raw = readRepoChecksFile(repo);
+    return raw === null ? null : parseChecksConfig(raw);
+  } catch (err) {
+    onLog('warn', `Tool checks skipped: ${repo}.json is invalid: ${(err as Error).message}`);
+    return null;
+  }
+}
+
+async function runChecks(repo: string, checkout: CheckoutResult, opts: RunReviewOptions, onLog: OnLog): Promise<ToolCheckRun> {
+  const checksConfig = loadChecksConfig(repo, opts, onLog);
+  if (!checksConfig) return emptyToolCheckRun();
+  const ctx: CheckContext = opts.checkContext ?? {
+    repo,
+    checkoutDir: checkout.dir,
+    baseSha: checkout.baseSha,
+    headSha: checkout.headSha,
+    changedFiles: checkoutChangedFiles(checkout),
+    baseTip: checkout.baseTipSha && checkout.baseTipSha !== checkout.baseSha
+      ? { label: 'the base branch tip', dir: checkout.dir, ref: checkout.baseTipSha }
+      : null,
+    defaultBranch: null,
+    siblings: [],
+    syntheticCommits: checkout.workingTreeSnapshot ? [checkout.workingTreeSnapshot.sha] : [],
+  };
+  const run = await runToolChecks(ctx, checksConfig, onLog);
+  onLog(
+    'info',
+    `tool checks: ${run.ran.length} ran${run.failed.length ? `, ${run.failed.length} failed` : ''}; ` +
+      `${countLabel(run.findings.length, 'finding')}, ${countLabel(run.observations.length, 'observation')}.`,
+  );
+  return run;
 }
 
 function correctivePrompt(basePrompt: string, problem: string): string {

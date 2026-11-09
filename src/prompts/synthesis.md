@@ -17,6 +17,8 @@ guessed. Verify before you keep anything.
 
 {{LENS_OUTPUTS}}
 
+{{TOOL_CHECKS}}
+
 # How to work, in this order
 
 1. **Verify every candidate.**
@@ -56,6 +58,9 @@ guessed. Verify before you keep anything.
      longer does.
    - `minor` — small correctness or clarity problem with limited impact.
    - `nit` — cosmetic. Never blocks a merge.
+   Documentation that the repository's rules require to be updated together
+   with a behaviour change (customer docs) is `major` when it is left stale;
+   other internal docs (agent instructions, design notes) are `minor`.
 
 3. **Derive the ticket requirements.**
    Read the ticket above, including its comments. Turn it into a numbered list
