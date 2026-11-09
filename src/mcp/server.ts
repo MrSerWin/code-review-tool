@@ -446,7 +446,7 @@ export function createMcpServer({ api, env = process.env }: CreateServerOptions)
       reviewer: z.enum(REVIEWER_NAMES).optional().describe('Reviewer CLI (see list_reviewers).'),
       model: z.string().min(1).max(64).optional().describe("Model id for that reviewer. Default: the reviewer's default."),
       requirementsText: z.string().min(1).max(20_000).optional()
-        .describe('Added to the ticket text for every branch and for coverage: approved decisions, scope notes.'),
+        .describe('Approved decisions or scope notes, one per line or list entry: each joins the ticket\'s requirement checklist as a user item.'),
       branches: z.array(z.string().min(3).max(300)).min(1).max(40).optional()
         .describe('Only these branches of the group, each as "repo#branch". Default: all.'),
       refresh: z.boolean().optional()
