@@ -223,8 +223,8 @@ defaults; unknown keys are rejected and an invalid file runs no checks.
 | `migration-collision` | `major` finding: a migration the branch adds whose number already exists in the same app directory on the base commit, the base tip, the default branch as last fetched in the local clone, or a sibling branch of the ticket group (its review checkout, else the local clone) | `globs` (`apps/*/migrations/[0-9][0-9][0-9][0-9]_*.py`) |
 | `data-migration-idempotence` | observation: a new migration with `RunPython` that creates rows without `get_or_create`, `update_or_create` or an existence check | `globs` (as above) |
 | `forbidden-paths` | `blocker` for env/venv paths, `major` for other patterns and for files above the size limit, among added or modified paths | `blockerPatterns` (`.venv/`, `venv/`, `.env`), `patterns` (`node_modules/`, `__pycache__/`, `*.pyc`, `.DS_Store`), `maxFileBytes` (5 MB) |
-| `em-dash` | `minor` finding per file: an em dash in an added line of a user-facing file | `globs` (required), `exclude` (test paths) |
-| `commit-identity` | `minor` finding, no location: commits in base..HEAD by an author outside the allow list, or with a Claude/Anthropic co-author trailer or "Generated with Claude" | `allowedEmails` (required) |
+| `em-dash` | `minor` finding per file: an em dash in an added line of a user-facing file | `globs` (required), `excludeGlobs` (test files: `**/*.test.*`, `**/*.spec.*`, `**/__tests__/**`, `**/tests/**`, `**/test_*.py`; an explicit list replaces it, `[]` checks tests too) |
+| `commit-identity` | `minor` finding, no location: commits in base..HEAD whose author matches neither an allowed address nor an allowed domain (case-insensitive), or with a Claude/Anthropic co-author trailer or "Generated with Claude" | `allowedEmails`, `allowedDomains` (at least one entry in either) |
 | `doc-update-heuristic` | observation: behaviour files changed and no customer doc did | `behaviourGlobs`, `docGlobs` (both required) |
 | `diff-size` | observation: more changed files than the limit; consider a stack of smaller branches | `maxFiles` (40) |
 

@@ -2,10 +2,8 @@ import { z } from 'zod';
 
 /** Django-style numbered migrations. */
 export const DEFAULT_MIGRATION_GLOBS = ['apps/*/migrations/[0-9][0-9][0-9][0-9]_*.py'];
-export const DEFAULT_TEST_EXCLUDES = [
-  '**/tests/**', '**/test/**', '**/__tests__/**', '**/test_*.py', '**/*_test.py', '**/tests.py',
-  '**/*.test.*', '**/*.spec.*', '**/setupTests.*',
-];
+/** Test files the em-dash check skips unless the config sets `excludeGlobs`. */
+export const DEFAULT_TEST_EXCLUDES = ['**/*.test.*', '**/*.spec.*', '**/__tests__/**', '**/tests/**', '**/test_*.py'];
 export const DEFAULT_BLOCKER_PATTERNS = ['.venv/', 'venv/', '.env'];
 export const DEFAULT_FORBIDDEN_PATTERNS = ['node_modules/', '__pycache__/', '*.pyc', '.DS_Store'];
 export const DEFAULT_MAX_FILE_BYTES = 5 * 1024 * 1024;
@@ -30,7 +28,8 @@ export const checksConfigSchema = z.object({
     }),
     'em-dash': toggle({
       globs: globs.min(1),
-      exclude: globs.default(DEFAULT_TEST_EXCLUDES),
+      // Explicit `excludeGlobs` replace the defaults; `[]` checks test files too.
+      excludeGlobs: globs.default(DEFAULT_TEST_EXCLUDES),
     }),
     'forbidden-paths': toggle({
       blockerPatterns: globs.default(DEFAULT_BLOCKER_PATTERNS),
@@ -38,7 +37,10 @@ export const checksConfigSchema = z.object({
       maxFileBytes: z.number().int().positive().default(DEFAULT_MAX_FILE_BYTES),
     }),
     'commit-identity': toggle({
-      allowedEmails: z.array(z.string().min(3)).min(1),
+      allowedEmails: z.array(z.string().min(3)).default([]),
+      allowedDomains: z.array(z.string().min(1)).default([]),
+    }).refine((v) => v === null || v.allowedEmails.length + v.allowedDomains.length > 0, {
+      message: 'needs allowedEmails or allowedDomains',
     }),
     'doc-update-heuristic': toggle({
       behaviourGlobs: globs.min(1),

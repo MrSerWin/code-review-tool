@@ -3,8 +3,11 @@
     "migration-collision": { "globs": ["apps/*/migrations/[0-9][0-9][0-9][0-9]_*.py"] },
     "data-migration-idempotence": true,
     "forbidden-paths": { "maxFileBytes": 5242880 },
-    "em-dash": { "globs": ["docs/customer/**", "apps/**/serializers*.py"] },
-    "commit-identity": { "allowedEmails": ["dev@example.com"] },
+    "em-dash": {
+      "globs": ["docs/customer/**", "apps/**/serializers*.py"],
+      "excludeGlobs": ["**/*.test.*", "**/tests/**", "**/test_*.py"]
+    },
+    "commit-identity": { "allowedEmails": ["dev@contractor.example.net"], "allowedDomains": ["example.com"] },
     "doc-update-heuristic": {
       "behaviourGlobs": ["apps/*/views*.py", "apps/*/serializers*.py", "apps/*/urls.py"],
       "docGlobs": ["docs/customer/**"]

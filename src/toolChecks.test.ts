@@ -102,6 +102,11 @@ test('parseChecksConfig: defaults, toggles, and rejected keys', () => {
   assert.equal(c.checks['migration-collision'], null);
   assert.equal(c.checks['em-dash'], null);
   assert.throws(() => parseChecksConfig({ checks: { 'em-dash': true } }), /em-dash\.globs/);
+  assert.deepEqual(parseChecksConfig({ checks: { 'em-dash': { globs: ['x/**'] } } }).checks['em-dash']!.excludeGlobs,
+    ['**/*.test.*', '**/*.spec.*', '**/__tests__/**', '**/tests/**', '**/test_*.py']);
+  assert.throws(() => parseChecksConfig({ checks: { 'commit-identity': {} } }), /needs allowedEmails or allowedDomains/);
+  assert.deepEqual(parseChecksConfig({ checks: { 'commit-identity': { allowedDomains: ['a.com'] } } }).checks['commit-identity'],
+    { allowedEmails: [], allowedDomains: ['a.com'] });
   assert.throws(() => parseChecksConfig({ checks: { 'migration-colision': true } }), /Unrecognized key/);
 });
 
@@ -189,6 +194,20 @@ test('data-migration-idempotence: flags an unguarded create in RunPython, not a 
 
 // --- em-dash -----------------------------------------------------------------------
 
+test('em-dash: test files are excluded by default; explicit excludeGlobs replace the defaults', async () => {
+  const dash = 'a \u2014 b\n';
+  const r = makeRepo({}, {
+    'src/A.tsx': dash, 'src/A.test.tsx': dash, 'src/B.spec.tsx': dash, 'src/__tests__/C.tsx': dash,
+    'apps/x/tests/d.py': dash, 'apps/x/test_e.py': dash, 'apps/x/serializers.py': dash,
+  });
+  const files = async (checks: unknown) =>
+    (await runToolChecks(r.ctx, parseChecksConfig({ checks }), noLog)).findings.map((f) => f.file).sort();
+  assert.deepEqual(await files({ 'em-dash': { globs: ['src/**', 'apps/**'] } }), ['apps/x/serializers.py', 'src/A.tsx']);
+  assert.deepEqual(await files({ 'em-dash': { globs: ['src/**'], excludeGlobs: ['**/*.spec.*'] } }),
+    ['src/A.test.tsx', 'src/A.tsx', 'src/__tests__/C.tsx']);
+  assert.equal((await files({ 'em-dash': { globs: ['src/**', 'apps/**'], excludeGlobs: [] } })).length, 7);
+});
+
 test('em-dash: added lines of user-facing files only, tests excluded, one finding per file', async () => {
   const r = makeRepo(
     { 'docs/content/a.md': 'old \u2014 line\n', 'docs/content/b.md': 'b\n' },
@@ -251,6 +270,22 @@ test('commit-identity: wrong author and AI trailers, synthetic commits skipped',
 
   const ok = makeRepo({}, { 'b.txt': 'b\n' }, { authorEmail: 'Dev@Example.invalid' });
   assert.deepEqual((await runToolChecks(ok.ctx, cfg, noLog)).findings, []);
+});
+
+test('commit-identity: an allowed domain passes a teammate, case-insensitive; a personal address still fails', async () => {
+  const cfg = parseChecksConfig({
+    checks: { 'commit-identity': { allowedEmails: ['me@work.invalid'], allowedDomains: ['work.invalid', '@Team.Invalid'] } },
+  });
+  const teammate = makeRepo({}, { 'a.txt': 'a\n' }, { authorEmail: 'Colleague@TEAM.invalid' });
+  assert.deepEqual((await runToolChecks(teammate.ctx, cfg, noLog)).findings, []);
+  const sameDomain = makeRepo({}, { 'a.txt': 'a\n' }, { authorEmail: 'other@work.invalid' });
+  assert.deepEqual((await runToolChecks(sameDomain.ctx, cfg, noLog)).findings, []);
+  const personal = makeRepo({}, { 'a.txt': 'a\n' }, { authorEmail: 'me@gmail.invalid' });
+  const [f] = (await runToolChecks(personal.ctx, cfg, noLog)).findings;
+  assert.match(f!.problem, /me@gmail\.invalid.*\(me@work\.invalid, @work\.invalid, @Team\.Invalid\)/);
+  // A subdomain is not the domain.
+  const sub = makeRepo({}, { 'a.txt': 'a\n' }, { authorEmail: 'x@evil.work.invalid' });
+  assert.equal((await runToolChecks(sub.ctx, cfg, noLog)).findings.length, 1);
 });
 
 // --- doc-update-heuristic and diff-size --------------------------------------------

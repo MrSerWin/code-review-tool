@@ -4,14 +4,19 @@ import { toolFinding, type CheckResult, type ToolCheck } from './types.js';
 const AI_TRAILER = /^Co-Authored-By:.*(Claude|Anthropic)/im;
 const AI_FOOTER = /Generated with \[?Claude/i;
 
-export const commitIdentity: ToolCheck<{ allowedEmails: string[] }> = {
+export const commitIdentity: ToolCheck<{ allowedEmails: string[]; allowedDomains: string[] }> = {
   id: 'commit-identity',
   async run(ctx, config): Promise<CheckResult> {
     const result: CheckResult = { findings: [], observations: [] };
     const allowed = new Set(config.allowedEmails.map((e) => e.trim().toLowerCase()));
+    const domains = new Set(config.allowedDomains.map((d) => d.trim().toLowerCase().replace(/^@/, '')));
+    const isAllowed = (email: string) => {
+      const e = email.toLowerCase();
+      return allowed.has(e) || domains.has(e.slice(e.lastIndexOf('@') + 1));
+    };
     const synthetic = new Set(ctx.syntheticCommits);
     const commits = (await listCommits(ctx.checkoutDir, ctx.baseSha, ctx.headSha)).filter((c) => !synthetic.has(c.sha));
-    const wrongAuthor = commits.filter((c) => !allowed.has(c.email.toLowerCase()));
+    const wrongAuthor = commits.filter((c) => !isAllowed(c.email));
     const attributed = commits.filter((c) => AI_TRAILER.test(c.message) || AI_FOOTER.test(c.message));
     const short = (list: typeof commits, withEmail: boolean) =>
       list.slice(0, 20).map((c) => (withEmail ? `${c.sha.slice(0, 9)} (${c.email || 'no email'})` : c.sha.slice(0, 9))).join(', ') +
@@ -21,7 +26,7 @@ export const commitIdentity: ToolCheck<{ allowedEmails: string[] }> = {
         severity: 'minor',
         category: 'style',
         title: `${wrongAuthor.length} commit${wrongAuthor.length === 1 ? '' : 's'} by an author outside the allow list`,
-        problem: `Commits ${short(wrongAuthor, true)} are authored by an address that is not allowed for this repository (${config.allowedEmails.join(', ')}).`,
+        problem: `Commits ${short(wrongAuthor, true)} are authored by an address that is not allowed for this repository (${[...config.allowedEmails, ...config.allowedDomains.map((d) => `@${d.replace(/^@/, '')}`)].join(', ')}).`,
         why: 'Repository rule: every commit uses the configured work identity.',
         suggestion: 'Rewrite the author of these commits (`git rebase --exec "git commit --amend --no-edit --reset-author"` with the right identity) before the PR.',
       }));

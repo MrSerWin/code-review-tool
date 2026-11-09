@@ -4,12 +4,12 @@ import { toolFinding, type CheckResult, type ToolCheck } from './types.js';
 
 const EM_DASH = '\u2014';
 
-export const emDash: ToolCheck<{ globs: string[]; exclude: string[] }> = {
+export const emDash: ToolCheck<{ globs: string[]; excludeGlobs: string[] }> = {
   id: 'em-dash',
   async run(ctx, config): Promise<CheckResult> {
     const result: CheckResult = { findings: [], observations: [] };
     const candidates = ctx.changedFiles.filter((f) => f.status !== 'D').map((f) => f.path);
-    const files = selectPaths(candidates, new GlobSet(config.globs), new GlobSet(config.exclude));
+    const files = selectPaths(candidates, new GlobSet(config.globs), new GlobSet(config.excludeGlobs));
     if (files.length === 0) return result;
     const added = await addedLines(ctx.checkoutDir, ctx.baseSha, ctx.headSha, files);
     for (const file of files) {
