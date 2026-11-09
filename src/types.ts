@@ -124,12 +124,20 @@ export interface ReviewOutput {
   code_verdict?: Verdict;
   code_can_merge?: boolean;
   summary: string;
-  requirements: { text: string; status: RequirementStatus; evidence: string }[];
+  requirements: { text: string; status: RequirementStatus; evidence: string; requirement_id?: number | null }[];
   findings: Finding[];
   observations: Observation[];
   verdict: Verdict;
   can_merge: boolean;
   conclusion: string;
+  /** Additions to the ticket's stored checklist that the synthesis pass suggests; never stored on the ticket by itself. */
+  proposed_requirements?: ProposedRequirement[];
+}
+
+/** A requirement a review suggests adding to the ticket's checklist. */
+export interface ProposedRequirement {
+  text: string;
+  reason: string;
 }
 
 export type LogLevel = 'info' | 'warn' | 'error';
@@ -195,6 +203,8 @@ export interface ReviewRow {
    * starts this one only after that one has ended. NULL otherwise.
    */
   depends_on: number | null;
+  /** JSON array of `ProposedRequirement` from the synthesis pass; NULL when it proposed nothing or on older rows. */
+  proposed_requirements: string | null;
 }
 
 /** `active`: a run is queued/fetching/reviewing; `failed`: some branch's latest run failed; `done`: see db.ts. */
@@ -288,6 +298,8 @@ export interface RequirementRow {
   status: RequirementStatus;
   evidence: string | null;
   ord: number;
+  /** The `ticket_requirements` item this status is for; null on rows written without a stored checklist. */
+  requirement_id: number | null;
 }
 
 /** Mirrors a row of the `review_logs` table. */
@@ -369,6 +381,25 @@ export interface TicketGroupRow {
   ticket_url: string | null;
   /** Pasted requirements or approved decisions, added to the ticket text for coverage. */
   requirements_text: string | null;
+  /** When the checklist was last derived from the ticket; null until the first derivation. */
+  requirements_derived_at: string | null;
+  /** JSON array of strings: ticket work no repository can show, set aside by the derivation. */
+  requirements_notes: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export type TicketRequirementSource = 'derived' | 'user';
+export type TicketRequirementState = 'active' | 'removed';
+
+/** Mirrors a row of the `ticket_requirements` table: one item of a ticket's stored checklist. */
+export interface TicketRequirementRow {
+  id: number;
+  ticket_key: string;
+  position: number;
+  text: string;
+  source: TicketRequirementSource;
+  state: TicketRequirementState;
   created_at: string;
   updated_at: string;
 }
@@ -413,6 +444,8 @@ export interface CoverageBranch {
 }
 
 export interface CoverageRequirement {
+  /** The stored checklist item; absent when the pass derived its own list. */
+  requirement_id?: number | null;
   text: string;
   status: CoverageStatus;
   note: string;

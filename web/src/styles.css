@@ -1181,7 +1181,32 @@ tr.group-runs > td {
 .coverage-where.where-elsewhere { color: var(--accent); }
 .coverage-where.where-nowhere { color: var(--red); }
 
+/* --- the stored requirement checklist --- */
+.checklist { list-style: none; margin: 0 0 var(--space-3); padding: 0; display: flex; flex-direction: column; gap: var(--space-1); }
+.checklist-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunken);
+}
+.checklist-id { flex: 0 0 auto; min-width: 2.5rem; font-size: var(--fs-xs); }
+.checklist-text { flex: 1 1 auto; min-width: 0; }
+.checklist-edit { flex: 1 1 auto; display: flex; gap: var(--space-2); min-width: 0; }
+.checklist-edit .input { flex: 1 1 auto; }
+.checklist-actions { display: flex; align-items: center; gap: 2px; }
+.checklist-add { margin-bottom: var(--space-3); }
+.checklist-input { flex: 1 1 18rem; }
+.checklist-notes ul { margin: 0 0 var(--space-3); padding-left: var(--space-5); font-size: var(--fs-sm); }
+.checklist.removed { margin-top: var(--space-2); }
+.proposed-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-2); }
+.proposed-list li { display: flex; align-items: center; gap: var(--space-3); }
+.proposed-text { flex: 1 1 auto; min-width: 0; }
+
 @media (max-width: 640px) {
   .chain-row { flex-wrap: wrap; }
+  .checklist-item, .proposed-list li { flex-wrap: wrap; }
   .chain-item { padding-left: 0 !important; }
 }

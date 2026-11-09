@@ -62,13 +62,10 @@ guessed. Verify before you keep anything.
    with a behaviour change (customer docs) is `major` when it is left stale;
    other internal docs (agent instructions, design notes) are `minor`.
 
-3. **Derive the ticket requirements.**
-   Read the ticket above, including its comments. Turn it into a numbered list
-   of concrete, checkable requirements. Split compound sentences. Include
-   acceptance criteria, explicit "must" statements, and clear implied work (a
-   behaviour change usually needs tests, and the repository may require a
-   documentation update). Do not add wishes of your own. Then check each one
-   against the code yourself:
+3. **Check the ticket requirements.**
+{{REQUIREMENTS_STEP}}
+
+   Then check each one against the code yourself:
    - `met` — the code does it. Evidence as `path/file.ts:123`.
    - `partial` — done for some cases only. Say which case is not covered.
    - `missing` — not done at all.
@@ -119,7 +116,10 @@ It must match this shape exactly:
 {
   "summary": "3-8 sentences. What the branch does, whether it matches the ticket, and the state of previous findings if any.",
   "requirements": [
-    { "text": "requirement in your own short words", "status": "met|partial|missing|not_verifiable", "evidence": "src/file.ts:44 or a one-line explanation" }
+    { "id": "R12 (the checklist id) or null", "text": "requirement in your own short words", "status": "met|partial|missing|not_verifiable", "evidence": "src/file.ts:44 or a one-line explanation" }
+  ],
+  "proposed_requirements": [
+    { "text": "a requirement the stored checklist misses", "reason": "where the ticket asks for it" }
   ],
   "findings": [
     {
@@ -156,7 +156,8 @@ It must match this shape exactly:
 
 Rules for the JSON block:
 - `findings` and `observations` may be empty arrays. `requirements` must never
-  be empty.
+  be empty. `proposed_requirements` is an empty array unless step 3 gave you a
+  stored checklist.
 - `file`, `line`, `end_line` and `snippet` may be `null` only when the entry is
   genuinely not tied to one place (rare). Prefer a real location.
 - For a regression, `file` and `line` point at the DEPENDENT site that breaks,

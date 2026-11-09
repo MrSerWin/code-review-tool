@@ -182,6 +182,7 @@ export function compactGroup(
 
 /** A requirement of a group coverage as one branch reads it (see coverageView.ts). */
 export interface BranchCoverageLinePayload {
+  requirement_id?: number | null;
   text: string;
   status: CoverageStatus;
   where: 'here' | 'elsewhere' | 'nowhere';
@@ -205,6 +206,7 @@ export interface ReviewTicketGroupPayload {
     requirements: BranchCoverageLinePayload[];
   } | null;
   coverage_pending: boolean;
+  checklist?: { id: number; text: string; source: string }[];
 }
 
 /** What `GET /api/reviews/:id` returns (the parts the MCP uses). */
@@ -214,6 +216,12 @@ export interface ReviewDetailPayload {
   findings?: FindingRow[];
   logs?: LogRow[];
   ticket_group?: ReviewTicketGroupPayload | null;
+  proposed_requirements?: { text: string; reason: string }[];
+}
+
+/** `R12` for the stored checklist item 12. */
+export function requirementRef(id: number | null | undefined): string | null {
+  return id ? `R${id}` : null;
 }
 
 /** `in this branch`, `in repo#b`, `not covered anywhere`. */
@@ -240,6 +248,7 @@ export function reviewTicketGroup(group: ReviewTicketGroupPayload | null | undef
           verdict: c.verdict,
           includes_this_review: c.includes_this_review,
           requirements: c.requirements.slice(0, maxRequirements).map((r) => ({
+            ...(r.requirement_id ? { id: requirementRef(r.requirement_id) } : {}),
             status: r.status, text: truncate(r.text, 200), where: coverageWhere(r),
           })),
           ...(c.requirements.length > maxRequirements ? { requirements_omitted: c.requirements.length - maxRequirements } : {}),
@@ -265,7 +274,9 @@ export function reviewDetail(payload: ReviewDetailPayload, url: string, opts: Re
   const unmet = requirements
     .filter((r) => r.status !== 'met')
     .slice(0, 20)
-    .map((r) => ({ status: r.status, text: truncate(r.text, 200) }));
+    .map((r) => ({ ...(r.requirement_id ? { id: requirementRef(r.requirement_id) } : {}), status: r.status, text: truncate(r.text, 200) }));
+  const byId = requirements.some((r) => r.requirement_id);
+  const proposed = payload.proposed_requirements ?? [];
 
   return {
     ...reviewRef(review, url),
@@ -280,8 +291,17 @@ export function reviewDetail(payload: ReviewDetailPayload, url: string, opts: Re
     ticket_group: reviewTicketGroup(payload.ticket_group),
     summary: done ? truncate(review.summary, SUMMARY_MAX) : null,
     requirements: done
-      ? { met: review.requirements_met ?? 0, total: review.requirements_total ?? 0, unmet }
+      ? {
+          met: review.requirements_met ?? 0,
+          total: review.requirements_total ?? 0,
+          // by_id: the statuses are for the ticket's stored checklist (see get_ticket_requirements).
+          ...(byId ? { by_id: true } : {}),
+          unmet,
+        }
       : null,
+    ...(done && proposed.length
+      ? { proposed_requirements: proposed.slice(0, 20).map((p) => ({ text: truncate(p.text, 300), reason: truncate(p.reason, 300) })) }
+      : {}),
     blocking_count: done ? review.blocking_count ?? 0 : null,
     severity_counts: done ? severityCounts(findings) : null,
     findings: done ? compact.findings : [],
@@ -382,6 +402,7 @@ export function compactCoverage(c: CoveragePayload | null, maxRequirements = DEF
     verdict: c.verdict,
     summary: truncate(c.summary, SUMMARY_MAX),
     requirements: reqs.map((r) => ({
+      ...(r.requirement_id ? { id: requirementRef(r.requirement_id) } : {}),
       status: r.status,
       text: truncate(r.text, 200),
       branches: r.branches.map((b) => ({
@@ -395,7 +416,8 @@ export function compactCoverage(c: CoveragePayload | null, maxRequirements = DEF
       ...(r.note ? { note: truncate(r.note, 200) } : {}),
     })),
     ...(c.requirements.length > reqs.length ? { requirements_omitted: c.requirements.length - reqs.length } : {}),
-    open: c.requirements.filter((r) => r.status !== 'covered').map((r) => `${r.status}: ${truncate(r.text, 120)}`),
+    open: c.requirements.filter((r) => r.status !== 'covered')
+      .map((r) => `${r.status}: ${r.requirement_id ? `${requirementRef(r.requirement_id)} ` : ''}${truncate(r.text, 120)}`),
     review_ids: c.review_ids,
     error: truncate(c.error, 600),
     created_at: c.created_at,
@@ -452,6 +474,38 @@ export function compactTicket(
 /** Whether a ticket review batch is over: every queued run ended and its coverage was computed. */
 export function isTicketRunFinished(payload: TicketPayload): boolean {
   return payload.run?.status === 'done';
+}
+
+/** What `GET /api/ticket-groups/:key/requirements` returns. */
+export interface ChecklistPayload {
+  key: string;
+  derived_at: string | null;
+  not_verifiable_notes: string[];
+  items: { id: number; position: number; text: string; source: 'derived' | 'user'; state: string }[];
+  removed: { id: number; text: string; source: 'derived' | 'user' }[];
+  deriving: boolean;
+  derive_error?: { error: string; at: string } | null;
+}
+
+/** A ticket's stored checklist, compact: active items with their ids, then the not verifiable notes. */
+export function compactChecklist(c: ChecklistPayload, maxRemoved = 20) {
+  return {
+    ticket: c.key,
+    derived_at: c.derived_at,
+    deriving: c.deriving,
+    ...(c.derive_error ? { derive_error: c.derive_error } : {}),
+    items: c.items.map((r) => ({ id: requirementRef(r.id), text: r.text, source: r.source })),
+    not_verifiable_notes: c.not_verifiable_notes,
+    removed: c.removed.slice(0, maxRemoved).map((r) => ({ id: requirementRef(r.id), text: truncate(r.text, 160) })),
+    ...(c.removed.length > maxRemoved ? { removed_omitted: c.removed.length - maxRemoved } : {}),
+  };
+}
+
+/** `R12`, `r12` or `12` as the item id 12; null for anything else. */
+export function parseRequirementRef(value: string | number): number | null {
+  const m = /^\s*R?(\d+)\s*$/i.exec(String(value));
+  const n = m ? Number(m[1]) : NaN;
+  return Number.isInteger(n) && n > 0 ? n : null;
 }
 
 export const DEFAULT_REPORT_MAX = 40_000;

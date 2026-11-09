@@ -12,7 +12,7 @@ import { REVIEWER_NAMES } from '../reviewers/types.js';
 import type { ResolvedTarget, ReviewGroup, ReviewRow, TicketInfo } from '../types.js';
 import { ApiClient, ApiError, ApiNoAnswerError, ApiUnreachableError } from './client.js';
 import {
-  ALL_STATUSES, ACTIVE_STATUSES, compactCoverage, compactGroup, compactLocalRepos, compactPreview, compactRecipes,
+  ALL_STATUSES, ACTIVE_STATUSES, compactChecklist, compactCoverage, parseRequirementRef, type ChecklistPayload, compactGroup, compactLocalRepos, compactPreview, compactRecipes,
   compactReviewers, compactTicket, compactTicketPlan, DEFAULT_MAX_BRANCHES, DEFAULT_MAX_FINDINGS, DEFAULT_MAX_REQUIREMENTS, DEFAULT_REPORT_MAX,
   isPreviewSettled, isTerminalStatus, isTicketRunFinished, mutationRefusal, parseTargetSelector, PREVIEW_END_STATUSES,
   PREVIEW_LIVE_STATUSES, reviewDetail, reviewListRow, reviewRef, selectTargets, truncateReport, type CoveragePayload,
@@ -30,7 +30,7 @@ const STOP_POLL_MS = 2_000;
 const INSTRUCTIONS = `code-review-tool runs read-only code reviews of git branches (GitHub or local clones) with a reviewer CLI (Claude Code, Codex, Cursor Agent, or Grok) and returns a verdict, a requirement checklist, and findings.
 Typical flow: start_review -> wait_for_review (repeat while finished=false) -> get_review / get_report.
 A review takes several minutes (often 5-20). Never start the same review twice to check on it: poll the id you got.
-A ticket split into several branches (BE and FE repos, stacked slices base -> child) is reviewed as a group: start_ticket_review -> wait_for_ticket_review (repeat while finished=false) -> get_ticket. Each branch is diffed against its parent in the group and gets a code_verdict from its own findings; whether the whole ticket is implemented is the group's coverage (covered | needs_work, per requirement with the covering branches), computed once the batch ends. get_ticket shows the chains; set_branch_parent fixes a wrong parent or order; get_ticket_coverage with recompute=true recomputes coverage. start_review of a branch that belongs to a group also defaults its base to the group parent.
+A ticket split into several branches (BE and FE repos, stacked slices base -> child) is reviewed as a group: start_ticket_review -> wait_for_ticket_review (repeat while finished=false) -> get_ticket. Each branch is diffed against its parent in the group and gets a code_verdict from its own findings; whether the whole ticket is implemented is the group's coverage (covered | needs_work, per requirement with the covering branches), computed once the batch ends. get_ticket shows the chains; set_branch_parent fixes a wrong parent or order; get_ticket_coverage with recompute=true recomputes coverage. A ticket has one stored requirement checklist (ids R1, R2, ...), derived once by its first review and shared by every branch review and the coverage, so statuses compare across runs: get_ticket_requirements reads it, set_ticket_requirements edits it (approved decisions go there), derive_ticket_requirements derives it again. start_review of a branch that belongs to a group also defaults its base to the group parent.
 For a branch that is not pushed yet, use list_local_repos to find the repo name and branch, then start_review with "local:<repo>#<branch>".
 Previews run a ticket's branches as a live app on a local port: list_recipes -> start_preview -> wait_for_preview (repeat while finished=false) -> open web_url (links lists every exposed address, e.g. backend API and admin) -> stop_preview when done. For a ticket group (see get_ticket), start_preview with just the ticket runs each repo's chain tip (the last branch of its stack, which contains every slice), local when that branch was last reviewed locally; get_ticket_preview_plan shows that plan first, and a live preview that already runs it is returned instead of starting a second one. A role can run a local (unpushed) branch: {role, branch: "local:<repo>#<branch>"} or {role, branch, local: true}.
 A request that times out reached a busy server: do not retry a start, and never restart the server while previews or reviews are live (a restart tears them down); check get_preview / list_previews / list_reviews instead.`;
@@ -534,6 +534,96 @@ export function createMcpServer({ api, env = process.env }: CreateServerOptions)
       coverage: compactCoverage(payload.coverage, maxRequirements ?? DEFAULT_MAX_REQUIREMENTS),
       ...(payload.latest_coverage ? { latest_coverage: payload.latest_coverage } : {}),
       ...(payload.coverage_pending ? { next: 'A coverage pass is pending or running; call get_ticket_coverage again in a minute.' } : {}),
+    });
+  }));
+
+  server.registerTool('get_ticket_requirements', {
+    title: 'Get a ticket checklist',
+    description:
+      'The stored requirement checklist of a ticket group: active items in order with their ids (R12), each ' +
+      'derived (from the ticket text and comments) or user (added by hand), the ticket work no repository can show ' +
+      '(not_verifiable_notes), and removed items. Every branch review of the ticket and the ticket coverage evaluate ' +
+      'exactly these items by id. Empty until the first review of the ticket derives it (or derive_ticket_requirements).',
+    inputSchema: { ticket: ticketSchema },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  }, ({ ticket }) => guarded(async () => {
+    const payload = await api.ticketRequirements<ChecklistPayload>(ticket);
+    return ok(compactChecklist(payload));
+  }));
+
+  server.registerTool('set_ticket_requirements', {
+    title: 'Edit a ticket checklist',
+    description:
+      'Edit the stored requirement checklist of a ticket. Give exactly one of: add (texts appended as user items; ' +
+      'duplicates of an active item are skipped), user (texts that replace every user item; derived items stay), or ' +
+      'items (the whole active list in order: {id, text} keeps and may reword that item, {text} adds a user item, an ' +
+      'active item left out is removed; a reworded derived item becomes a user item). Takes effect for the next ' +
+      'review and coverage pass. Returns the new checklist.',
+    inputSchema: {
+      ticket: ticketSchema,
+      add: z.array(z.string().min(1).max(2_000)).min(1).max(200).optional().describe('User items to append.'),
+      user: z.array(z.string().min(1).max(2_000)).max(200).optional().describe('Replaces every user item.'),
+      items: z.array(z.object({
+        id: z.union([z.string(), z.number()]).optional().describe('Item id, e.g. "R12"; absent for a new item.'),
+        text: z.string().min(1).max(2_000),
+      })).max(200).optional().describe('The whole active checklist, in order.'),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  }, ({ ticket, add, user, items }) => guarded(async () => {
+    const refused = refusal();
+    if (refused) return fail(refused);
+    const given = [add, user, items].filter((v) => v !== undefined).length;
+    if (given !== 1) return fail('Give exactly one of add, user, or items.');
+    let body: unknown;
+    if (add) body = { add };
+    else if (user) body = { user };
+    else {
+      const list: { id?: number; text: string }[] = [];
+      for (const item of items!) {
+        if (item.id === undefined || item.id === '') {
+          list.push({ text: item.text });
+          continue;
+        }
+        const id = parseRequirementRef(item.id);
+        if (id === null) return fail(`Not a requirement id: ${JSON.stringify(item.id)} (expected e.g. "R12").`);
+        list.push({ id, text: item.text });
+      }
+      body = { items: list };
+    }
+    const payload = await api.setTicketRequirements<ChecklistPayload>(ticket, body);
+    return ok(compactChecklist(payload));
+  }));
+
+  server.registerTool('derive_ticket_requirements', {
+    title: 'Derive a ticket checklist again',
+    description:
+      'Derive the ticket\'s requirement checklist again from the ticket text and its comments (one reviewer pass ' +
+      'without code, usually 1-3 minutes). Derived items are replaced (an unchanged text keeps its id), user items ' +
+      'stay. Waits up to timeoutSec for the result; if deriving=true in the answer, call get_ticket_requirements ' +
+      'later. Use it when the ticket text changed; for approved decisions, set_ticket_requirements is enough.',
+    inputSchema: {
+      ticket: ticketSchema,
+      reviewer: z.enum(REVIEWER_NAMES).optional().describe('Reviewer CLI. Default: the one of the ticket\'s latest review.'),
+      model: z.string().min(1).max(64).optional().describe('Model. Default: the one of the ticket\'s latest review.'),
+      timeoutSec: z.number().int().min(1).max(WAIT_MAX_SEC).optional(),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  }, ({ ticket, reviewer, model, timeoutSec }, extra) => guarded(async () => {
+    const refused = refusal();
+    if (refused) return fail(refused);
+    const out = await api.deriveTicketRequirements<ChecklistPayload & { started: boolean }>(ticket, {
+      ...(reviewer ? { reviewer } : {}), ...(model ? { model } : {}),
+    });
+    const deadline = Date.now() + (timeoutSec ?? WAIT_DEFAULT_SEC) * 1000;
+    let payload: ChecklistPayload = out;
+    while (payload.deriving && Date.now() < deadline) {
+      await sleep(Math.min(POLL_DEFAULT_SEC * 1000, Math.max(0, deadline - Date.now())), extra.signal);
+      payload = await api.ticketRequirements<ChecklistPayload>(ticket, extra.signal);
+    }
+    return ok({
+      started: out.started,
+      ...compactChecklist(payload),
+      ...(payload.deriving ? { next: 'Still deriving. Call get_ticket_requirements in a minute.' } : {}),
     });
   }));
 

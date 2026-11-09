@@ -715,7 +715,7 @@ CREATE TABLE ticket_coverage (
   verdict TEXT,                   -- covered|needs_work
   summary TEXT,
   review_ids TEXT NOT NULL,       -- JSON: the branch runs the pass read
-  requirements_json TEXT,         -- JSON: [{ text, status, note, branches: [{ repo, branch, review_id, status, note, evidence: [{ file, line, anchor_status }] }] }]
+  requirements_json TEXT,         -- JSON: [{ requirement_id?, text, status, note, branches: [{ repo, branch, review_id, status, note, evidence: [{ file, line, anchor_status }] }] }]
   reviewer TEXT, model TEXT, report_path TEXT, error TEXT, trigger TEXT,
   created_at TEXT NOT NULL, finished_at TEXT
 );
@@ -728,6 +728,19 @@ CREATE TABLE ticket_runs (           -- one "review the ticket" batch
   created_at TEXT NOT NULL, finished_at TEXT
 );
 -- reviews gains code_verdict TEXT and code_can_merge INTEGER (NULL on older rows).
+
+-- Stored requirement checklists (added).
+CREATE TABLE ticket_requirements (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ticket_key TEXT NOT NULL,
+  position INTEGER NOT NULL,
+  text TEXT NOT NULL,
+  source TEXT NOT NULL,           -- derived|user
+  state TEXT NOT NULL DEFAULT 'active',  -- active|removed (never deleted)
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+-- ticket_groups gains requirements_derived_at TEXT and requirements_notes TEXT (JSON: not verifiable work);
+-- requirements gains requirement_id INTEGER, reviews gains proposed_requirements TEXT (JSON); NULL on older rows.
 ```
 
 The tables are created with `IF NOT EXISTS` and the columns with
@@ -762,6 +775,44 @@ branch); `wouldCycle()`; `linearParents()` for a hand-made order; and
   hand-set parent, `default`), unless the caller chose a base explicitly.
 - `setParentByHand()` and `setChainOrder()` refuse loops and unknown branches.
 - `ticketGroupView()` is what the ticket page and `get_ticket` show.
+
+### Requirement checklist (`ticketRequirements.ts`, `requirements.ts`, `prompts/requirements.md`)
+
+Without it, synthesis derived the requirement list on every run of every
+branch, so wording and numbering differed between runs and branches, and
+coverage matched texts. Now a ticket has one list in `ticket_requirements`
+(`position`, `text`, `source` `derived`/`user`, `state` `active`/`removed`;
+rows are never deleted, so a per-review status keeps its item).
+`ticket_groups.requirements_derived_at` and `requirements_notes` record the
+derivation and the work it set aside as not verifiable.
+
+- `ensureTicketRequirements()` is called by the queue for every review of a
+  ticket group, after the checkout and before the lenses. It derives once per
+  key (`deriveOnce()` shares one in-flight pass per key in the process), then
+  returns the active list; `null` (derivation failed, or an empty list) makes
+  the review fall back to deriving in synthesis, with the group's added text
+  in the ticket. A failed derivation leaves `requirements_derived_at` empty,
+  so the next review tries again.
+- The pass runs with the review's reviewer and model in an empty directory
+  under `DATA_DIR/requirements/`; the ticket comes from the tracker (comments
+  included), else the stored body. Active user items are in the prompt so the
+  pass does not repeat them; `replaceDerivedRequirements()` also drops a
+  derived text equal to a user item, reuses the id of an earlier derived item
+  with the same normalised text, and soft-removes the rest.
+- `requirementsText` at review start is split into items
+  (`splitRequirementsText()`) and appended as user items, deduplicated by
+  normalised text (case, spacing, list markers, end punctuation); a removed
+  item with that text comes back with its id. It is no longer pasted into the
+  ticket body.
+- Synthesis gets the list as `R<id> text` (`{{REQUIREMENTS_STEP}}`) and answers
+  with `checklistReviewOutputSchema`: a status per id, and
+  `proposed_requirements`. `applyChecklist()` keeps the list's order and
+  wording, drops unknown ids, and marks an item the answer skipped `missing`.
+  Statuses are stored with `requirements.requirement_id`; proposals in
+  `reviews.proposed_requirements` (JSON) for the review page.
+- Coverage takes the same list (`checklistCoverageOutputSchema`, entries by
+  id, the same fill and drop rules) and stores `requirement_id` on each
+  coverage requirement.
 
 ### Ticket coverage (`coverage.ts`, `coverageView.ts`, `prompts/coverage.md`)
 
@@ -986,8 +1037,8 @@ in `mcp/format.ts`; the tool list is in
 this server configured. Each reviewer's argv keeps user MCP servers out of the
 run, and as a second line of defence `mutationRefusal()` makes `start_review`,
 `rerun_review`, `cancel_review`, `start_preview`, and `stop_preview` refuse
-(and `start_ticket_review`, `set_branch_parent`, and `get_ticket_coverage`
-with `recompute`) whenever `CODE_REVIEW_TOOL_REVIEWER` is set (and not `0`/`false`) in the MCP process's environment.
+(and `start_ticket_review`, `set_branch_parent`, `set_ticket_requirements`,
+`derive_ticket_requirements`, and `get_ticket_coverage` with `recompute`) whenever `CODE_REVIEW_TOOL_REVIEWER` is set (and not `0`/`false`) in the MCP process's environment.
 
 **Failures are told apart.** `ApiUnreachableError` means nothing listens at
 the address (connection refused, unknown host, no route); only it suggests

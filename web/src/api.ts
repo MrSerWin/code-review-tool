@@ -14,6 +14,7 @@ import type {
   ReviewGroupsPayload,
   ReviewersPayload,
   ResolvedTarget,
+  TicketChecklist,
   TicketGroupPayload,
   TicketInfo,
 } from './types';
@@ -102,6 +103,13 @@ export const api = {
     req<TicketGroupPayload>(`/api/tickets/${encodeURIComponent(key)}/order`, { method: 'PUT', body: JSON.stringify(body) }),
   detectParents: (key: string, reset = false) =>
     req<TicketGroupPayload>(`/api/tickets/${encodeURIComponent(key)}/detect`, { method: 'POST', body: JSON.stringify({ reset }) }),
+  /** The ticket's stored requirement checklist. */
+  ticketRequirements: (key: string) => req<TicketChecklist>(`/api/ticket-groups/${encodeURIComponent(key)}/requirements`),
+  /** `items`: the whole active list in order; `add`: user items to append. */
+  setTicketRequirements: (key: string, body: { items: { id?: number; text: string }[] } | { add: string[] }) =>
+    req<TicketChecklist>(`/api/ticket-groups/${encodeURIComponent(key)}/requirements`, { method: 'PUT', body: JSON.stringify(body) }),
+  deriveTicketRequirements: (key: string) =>
+    req<TicketChecklist>(`/api/tickets/${encodeURIComponent(key)}/requirements/derive`, { method: 'POST', body: JSON.stringify({}) }),
   coverageReportUrl: (key: string) => `/api/ticket-groups/${encodeURIComponent(key)}/coverage/report`,
 
   recipes: () => req<RecipesPayload>('/api/recipes'),

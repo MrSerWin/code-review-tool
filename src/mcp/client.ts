@@ -280,6 +280,18 @@ export class ApiClient {
     return this.requestJson<T>(`/api/tickets/${encodeURIComponent(key)}/coverage`, { method: 'POST', body });
   }
 
+  ticketRequirements<T>(key: string, signal?: AbortSignal): Promise<T> {
+    return this.requestJson<T>(`/api/ticket-groups/${encodeURIComponent(key)}/requirements`, { signal });
+  }
+
+  setTicketRequirements<T>(key: string, body: unknown): Promise<T> {
+    return this.requestJson<T>(`/api/ticket-groups/${encodeURIComponent(key)}/requirements`, { method: 'PUT', body });
+  }
+
+  deriveTicketRequirements<T>(key: string, body: { reviewer?: string; model?: string }): Promise<T> {
+    return this.requestJson<T>(`/api/tickets/${encodeURIComponent(key)}/requirements/derive`, { method: 'POST', body });
+  }
+
   setBranchParent<T>(key: string, body: { repo: string; branch: string; parent: string | null }): Promise<T> {
     return this.requestJson<T>(`/api/tickets/${encodeURIComponent(key)}/parent`, { method: 'PUT', body });
   }

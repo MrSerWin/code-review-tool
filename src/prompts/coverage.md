@@ -28,14 +28,7 @@ Short sentences. No filler.
 
 # How to work
 
-1. **Derive the ticket requirements.** Read the ticket, including its comments
-   and any added requirements or decisions. Turn it into a numbered list of
-   concrete, checkable requirements. Split compound sentences. Include
-   acceptance criteria, explicit "must" statements, and clear implied work (a
-   behaviour change usually needs tests). Leave out work no repository can show
-   (manual QA, a deployment, a decision still to be made) and name it in the
-   summary instead. Where a decision in the ticket or its comments replaced the
-   original text, the decision wins.
+{{REQUIREMENTS_STEP}}
 2. **Find the branches.** For each requirement, find the branch or branches
    that implement it, from their checklists (`met` / `partial`, with evidence)
    and their changed files. A requirement is often split across branches: an
@@ -63,6 +56,7 @@ It must match this shape exactly:
   "summary": "2-6 sentences: how the ticket is split, what is covered, and what is still missing, naming the branch that should hold it when that is clear.",
   "requirements": [
     {
+      "id": "R12 (the checklist id) or null",
       "text": "the requirement in your own short words",
       "status": "covered|partial|missing",
       "note": "one line: what is missing, or why it counts as covered",
@@ -81,7 +75,7 @@ It must match this shape exactly:
 ```
 
 Rules for the JSON block:
-- `requirements` must never be empty.
+- `requirements` must never be empty when step 1 asks you to derive them.
 - `branches` is empty for a `missing` requirement, and never empty otherwise.
 - `repo` and `branch` must name a branch from the list above.
 - `line` may be `null` when the evidence is a whole file.

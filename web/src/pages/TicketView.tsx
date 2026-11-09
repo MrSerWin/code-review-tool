@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../api';
+import TicketChecklistCard, { requirementRef } from '../components/TicketChecklistCard';
 import TicketPreviewCard from '../components/TicketPreviewCard';
 import {
   BranchLink,
@@ -195,6 +196,7 @@ export default function TicketView({ ticketKey }: { ticketKey: string }) {
               })
             }
           />
+          <TicketChecklistCard key={ticketKey} ticketKey={ticketKey} live={running} />
           <CoverageCard ticketKey={ticketKey} ticket={ticket} />
         </>
       )}
@@ -332,7 +334,7 @@ function TicketActions({
             className="manual-input"
             rows={4}
             value={extra}
-            placeholder="Approved decisions that change the ticket, or scope notes. Added to the ticket text for every branch and for coverage."
+            placeholder="Approved decisions that change the ticket, or scope notes. One per line; each becomes an item of the requirement checklist."
             onChange={(e) => setExtra(e.target.value)}
           />
         )}
@@ -578,7 +580,7 @@ function CoverageTable({ coverage }: { coverage: Coverage }) {
         <tbody>
           {coverage.requirements.map((r, i) => (
             <tr key={`${i}-${r.text}`}>
-              <td className="num mono">{i + 1}</td>
+              <td className="num mono">{r.requirement_id ? requirementRef(r.requirement_id) : i + 1}</td>
               <td>
                 {r.text}
                 {r.note && <div className="muted coverage-note">{r.note}</div>}

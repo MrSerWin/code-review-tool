@@ -34,6 +34,7 @@ function reviewRow(overrides: Partial<ReviewRow> = {}): ReviewRow {
     files_changed: null, additions: null, deletions: null, created_at: '2026-01-01T00:00:00.000Z',
     started_at: null, finished_at: null, group_key: 'ABC-123',
     runner_pid: null, runner_started_at: null, reviewer_pgids: null, code_verdict: null, code_can_merge: null, depends_on: null,
+    proposed_requirements: null,
     ...overrides,
   };
 }
@@ -138,16 +139,25 @@ test('a finished review carries its outcome, unmet requirements, and capped find
     review: doneRow(7),
     findings,
     requirements: [
-      { id: 1, review_id: 7, text: 'Reject expired tokens', status: 'met', evidence: null, ord: 0 },
-      { id: 2, review_id: 7, text: 'Log the rejection', status: 'missing', evidence: null, ord: 1 },
+      { id: 1, review_id: 7, text: 'Reject expired tokens', status: 'met', evidence: null, ord: 0, requirement_id: 11 },
+      { id: 2, review_id: 7, text: 'Log the rejection', status: 'missing', evidence: null, ord: 1, requirement_id: 12 },
     ],
   }, 'http://x/review/7');
   assert.equal(detail.terminal, true);
   assert.equal(detail.verdict, 'changes_requested');
   assert.equal(detail.can_merge, false);
+  // Statuses of a stored checklist carry the item id.
   assert.deepEqual(detail.requirements, {
-    met: 1, total: 2, unmet: [{ status: 'missing', text: 'Log the rejection' }],
+    met: 1, total: 2, by_id: true, unmet: [{ id: 'R12', status: 'missing', text: 'Log the rejection' }],
   });
+  assert.equal(detail.proposed_requirements, undefined);
+  const proposed = reviewDetail({
+    review: doneRow(8),
+    requirements: [{ id: 3, review_id: 8, text: 'Old row', status: 'partial', evidence: null, ord: 0, requirement_id: null }],
+    proposed_requirements: [{ text: 'Audit the export', reason: 'Comment 2 asks for it' }],
+  }, 'http://x/review/8');
+  assert.deepEqual(proposed.requirements, { met: 1, total: 2, unmet: [{ status: 'partial', text: 'Old row' }] });
+  assert.deepEqual(proposed.proposed_requirements, [{ text: 'Audit the export', reason: 'Comment 2 asks for it' }]);
   assert.equal(detail.findings.length, 50);
   assert.equal(detail.findings_omitted, 10);
   assert.equal(detail.severity_counts?.blocker, 1);
@@ -585,6 +595,7 @@ async function startStub(pollsUntilDone = 2): Promise<Stub> {
   const polls = new Map<number, number>();
   let previewPolls = 0;
   let ticketPolls = 0;
+  let requirementGets = 0;
   const targets = [
     { repo: 'my-service', branch: 'feature/abc-123-a', baseBranch: 'main', prNumber: null },
     { repo: 'my-frontend', branch: 'feature/abc-123-b', baseBranch: 'main', prNumber: 7 },
@@ -629,6 +640,20 @@ async function startStub(pollsUntilDone = 2): Promise<Stub> {
           ...ticketPayload('running'),
           reviews: [reviewRow({ id: 10, branch: 'feature/abc-123-a' }), reviewRow({ id: 11, branch: 'feature/abc-123-b', base_branch: 'feature/abc-123-a' })],
           notes: ['my-service#feature/abc-123-b: its parent feature/abc-123-a has no finished review yet; it is queued first in this batch.'],
+        });
+      }
+      if (url.pathname === '/api/ticket-groups/ABC-123/requirements' || url.pathname === '/api/tickets/ABC-123/requirements/derive') {
+        if (req.method !== 'GET') posts.push({ path: url.pathname, ...JSON.parse(raw || '{}') });
+        const deriving = req.method === 'POST' || (requirementGets += 1) < 2;
+        return send(res, req.method === 'POST' ? 202 : 200, {
+          key: 'ABC-123', derived_at: '2026-01-01T00:00:00.000Z', not_verifiable_notes: ['Manual QA on staging'],
+          items: [
+            { id: 12, position: 0, text: 'Export risks to CSV', source: 'derived', state: 'active' },
+            { id: 15, position: 1, text: 'Decision: no Excel', source: 'user', state: 'active' },
+          ],
+          removed: [{ id: 9, text: 'Export to Excel', source: 'derived' }],
+          deriving,
+          ...(req.method === 'POST' ? { started: true } : {}),
         });
       }
       if (req.method === 'POST' && url.pathname === '/api/tickets/ABC-123/coverage') {
@@ -756,10 +781,10 @@ test('stdio MCP server: list, start, get, and wait against a stub API', { timeou
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     assert.deepEqual(names, [
-      'cancel_review', 'detect_base', 'get_preview', 'get_report', 'get_review', 'get_ticket', 'get_ticket_coverage',
-      'get_ticket_preview_plan',
+      'cancel_review', 'derive_ticket_requirements', 'detect_base', 'get_preview', 'get_report', 'get_review', 'get_ticket',
+      'get_ticket_coverage', 'get_ticket_preview_plan', 'get_ticket_requirements',
       'list_local_repos', 'list_previews', 'list_recipes', 'list_review_groups', 'list_reviewers', 'list_reviews',
-      'rerun_review', 'set_branch_parent', 'start_preview', 'start_review', 'start_ticket_review', 'stop_preview',
+      'rerun_review', 'set_branch_parent', 'set_ticket_requirements', 'start_preview', 'start_review', 'start_ticket_review', 'stop_preview',
       'wait_for_preview', 'wait_for_review', 'wait_for_ticket_review',
     ]);
     assert.match(tools.find((t) => t.name === 'start_preview')!.description ?? '', /local:<repo>#<branch>/);
@@ -900,6 +925,30 @@ test('stdio MCP server: review a ticket, wait for it, read it, recompute coverag
     assert.equal(read.started, undefined);
     assert.equal(read.coverage.id, 4);
 
+    // The stored checklist: read, edit, derive again.
+    const checklist = json(await client.callTool({ name: 'get_ticket_requirements', arguments: { ticket: 'ABC-123' } }));
+    assert.deepEqual(checklist.items, [
+      { id: 'R12', text: 'Export risks to CSV', source: 'derived' },
+      { id: 'R15', text: 'Decision: no Excel', source: 'user' },
+    ]);
+    assert.deepEqual(checklist.not_verifiable_notes, ['Manual QA on staging']);
+    assert.deepEqual(checklist.removed, [{ id: 'R9', text: 'Export to Excel' }]);
+    await client.callTool({
+      name: 'set_ticket_requirements', arguments: { ticket: 'ABC-123', items: [{ id: 'R15', text: 'No Excel' }, { text: 'Audit log' }] },
+    });
+    assert.deepEqual(stub.posts.at(-1), {
+      path: '/api/ticket-groups/ABC-123/requirements', items: [{ id: 15, text: 'No Excel' }, { text: 'Audit log' }],
+    });
+    const twoModes = await client.callTool({ name: 'set_ticket_requirements', arguments: { ticket: 'ABC-123', add: ['a'], user: ['b'] } });
+    assert.equal(twoModes.isError, true);
+    const badId = await client.callTool({ name: 'set_ticket_requirements', arguments: { ticket: 'ABC-123', items: [{ id: 'X1', text: 'a' }] } });
+    assert.match(text(badId), /Not a requirement id/);
+    const derived = json(await client.callTool({ name: 'derive_ticket_requirements', arguments: { ticket: 'ABC-123', timeoutSec: 20 } }));
+    assert.equal(derived.started, true);
+    assert.equal(derived.deriving, false);
+    assert.equal(derived.next, undefined);
+    assert.deepEqual(stub.posts.at(-1), { path: '/api/tickets/ABC-123/requirements/derive' });
+
     const parent = json(await client.callTool({
       name: 'set_branch_parent', arguments: { ticket: 'ABC-123', repo: 'my-service', branch: 'feature/abc-123-b', parent: null },
     }));
@@ -1021,6 +1070,8 @@ test('stdio MCP server: guard inside a reviewer, and an unreachable API', { time
       ['start_ticket_review', { ticket: 'ABC-123' }],
       ['get_ticket_coverage', { ticket: 'ABC-123', recompute: true }],
       ['set_branch_parent', { ticket: 'ABC-123', repo: 'r', branch: 'b', parent: null }],
+      ['set_ticket_requirements', { ticket: 'ABC-123', add: ['x'] }],
+      ['derive_ticket_requirements', { ticket: 'ABC-123' }],
     ] as const) {
       const result = await client.callTool({ name, arguments: args });
       assert.equal(result.isError, true, name);

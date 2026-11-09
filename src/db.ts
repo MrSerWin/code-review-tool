@@ -192,6 +192,18 @@ const MIGRATIONS: string[] = [
      finished_at TEXT
    )`,
   `CREATE INDEX IF NOT EXISTS idx_ticket_runs_key ON ticket_runs(ticket_key, id)`,
+  // The stored requirement checklist of a ticket: derived once, then edited by hand.
+  `CREATE TABLE IF NOT EXISTS ticket_requirements (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     ticket_key TEXT NOT NULL,
+     position INTEGER NOT NULL,
+     text TEXT NOT NULL,
+     source TEXT NOT NULL,
+     state TEXT NOT NULL DEFAULT 'active',
+     created_at TEXT NOT NULL,
+     updated_at TEXT NOT NULL
+   )`,
+  `CREATE INDEX IF NOT EXISTS idx_ticket_requirements_key ON ticket_requirements(ticket_key, state, position)`,
 ];
 
 export function migrate(): void {
@@ -221,6 +233,11 @@ export function migrate(): void {
     ensureColumn('reviews', 'code_verdict', `ALTER TABLE reviews ADD COLUMN code_verdict TEXT`);
     ensureColumn('reviews', 'code_can_merge', `ALTER TABLE reviews ADD COLUMN code_can_merge INTEGER`);
     ensureColumn('reviews', 'depends_on', `ALTER TABLE reviews ADD COLUMN depends_on INTEGER`);
+    // Stored ticket checklists: per-review statuses point at an item; NULL on older rows, which keep their text.
+    ensureColumn('requirements', 'requirement_id', `ALTER TABLE requirements ADD COLUMN requirement_id INTEGER`);
+    ensureColumn('reviews', 'proposed_requirements', `ALTER TABLE reviews ADD COLUMN proposed_requirements TEXT`);
+    ensureColumn('ticket_groups', 'requirements_derived_at', `ALTER TABLE ticket_groups ADD COLUMN requirements_derived_at TEXT`);
+    ensureColumn('ticket_groups', 'requirements_notes', `ALTER TABLE ticket_groups ADD COLUMN requirements_notes TEXT`);
     // After ensureColumn: on an older database the column only exists from here on.
     db.prepare(`CREATE INDEX IF NOT EXISTS idx_reviews_group ON reviews(group_key, created_at)`).run();
     syncGroupKeys();
@@ -266,6 +283,7 @@ const REVIEW_COLUMNS = [
   'files_changed', 'additions', 'deletions', 'created_at', 'started_at', 'finished_at',
   'source', 'working_tree', 'base_reason', 'group_key',
   'runner_pid', 'runner_started_at', 'reviewer_pgids', 'code_verdict', 'code_can_merge', 'depends_on',
+  'proposed_requirements',
 ] as const satisfies readonly (keyof ReviewRow)[];
 
 /** Columns group_key is derived from; changing one of them re-derives it. */
@@ -298,7 +316,7 @@ export function createReview(input: CreateReviewInput): ReviewRow {
     // The creating process enqueues the row right away, so it owns it from
     // the first moment: no other process's recovery can see it unowned.
     runner_pid: SELF.pid, runner_started_at: SELF.startedAt, reviewer_pgids: null,
-    code_verdict: null, code_can_merge: null, depends_on: null,
+    code_verdict: null, code_can_merge: null, depends_on: null, proposed_requirements: null,
   };
   for (const column of REVIEW_COLUMNS) {
     const value = (input as Record<string, unknown>)[column];
@@ -635,8 +653,8 @@ export function getFindings(reviewId: number): FindingRow[] {
 
 export function replaceRequirements(reviewId: number, reqs: ReviewOutput['requirements']): void {
   const insert = db.prepare(
-    `INSERT INTO requirements (review_id, text, status, evidence, ord)
-     VALUES (@review_id, @text, @status, @evidence, @ord)`,
+    `INSERT INTO requirements (review_id, text, status, evidence, ord, requirement_id)
+     VALUES (@review_id, @text, @status, @evidence, @ord, @requirement_id)`,
   );
   const run = db.transaction(() => {
     db.prepare(`DELETE FROM requirements WHERE review_id = ?`).run(reviewId);
@@ -647,6 +665,7 @@ export function replaceRequirements(reviewId: number, reqs: ReviewOutput['requir
         status: req.status,
         evidence: req.evidence ?? null,
         ord: index,
+        requirement_id: req.requirement_id ?? null,
       });
     });
   });

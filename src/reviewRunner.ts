@@ -18,7 +18,7 @@ import { parseChecksConfig, type ChecksConfig } from './checks/config.js';
 import { loadRepoRules, readRepoChecksFile, renderRepoRules, type RepoRules } from './repoRules.js';
 import { LENS_NAMES } from './types.js';
 import type {
-  ChangedFile, CheckoutResult, Finding, LensName, LensOutput, OnLog, ReviewOutput, ReviewRow, TicketInfo,
+  ChangedFile, CheckoutResult, Finding, LensName, LensOutput, OnLog, ProposedRequirement, ReviewOutput, ReviewRow, TicketInfo,
 } from './types.js';
 
 export interface PreviousFinding {
@@ -59,6 +59,17 @@ export interface RunReviewOptions {
   checksConfig?: ChecksConfig | null;
   /** What the tool checks may read beyond the checkout; a checkout-only context when absent. */
   checkContext?: CheckContext;
+  /**
+   * The ticket's stored checklist. Synthesis then evaluates exactly these
+   * items by id instead of deriving its own list.
+   */
+  checklist?: ChecklistItem[];
+}
+
+/** One item of a ticket's stored checklist, as a review evaluates it. */
+export interface ChecklistItem {
+  id: number;
+  text: string;
 }
 
 /** Where a branch sits among the branches of its ticket. */
@@ -68,11 +79,33 @@ export interface SliceInfo {
   members: { repo: string; branch: string; parent: string | null; self: boolean }[];
 }
 
+const requirementStatusSchema = z.enum(['met', 'partial', 'missing', 'not_verifiable']);
+
 const requirementSchema = z.object({
   text: z.string().min(1),
-  status: z.enum(['met', 'partial', 'missing', 'not_verifiable']),
+  status: requirementStatusSchema,
   evidence: z.string().nullish().transform((v) => v ?? ''),
 });
+
+/** A status for one item of a stored checklist: the id is what counts, the text is ignored. */
+const checklistAnswerSchema = z.object({
+  id: z.union([z.number(), z.string().regex(/^\s*R?\d+\s*$/i)])
+    .transform((v) => Number(String(v).replace(/[^\d]/g, ''))),
+  text: z.string().nullish(),
+  status: requirementStatusSchema,
+  evidence: z.string().nullish().transform((v) => v ?? ''),
+});
+
+const proposedSchema = z
+  .array(z.union([
+    z.string().transform((text) => ({ text, reason: '' })),
+    z.object({
+      text: z.string(),
+      reason: z.string().nullish().transform((v) => v ?? ''),
+    }),
+  ]))
+  .nullish()
+  .transform((v) => (v ?? []).map((p) => ({ text: p.text.trim(), reason: p.reason.trim() })).filter((p) => p.text));
 
 const findingSchema = z.object({
   severity: z.enum(['blocker', 'major', 'minor', 'nit']),
@@ -112,6 +145,43 @@ export const reviewOutputSchema = z.object({
   conclusion: z.string().nullish().transform((v) => v ?? ''),
 });
 
+/** The synthesis answer when the ticket has a stored checklist: statuses by id, plus proposed additions. */
+export const checklistReviewOutputSchema = reviewOutputSchema.extend({
+  requirements: z.array(checklistAnswerSchema),
+  proposed_requirements: proposedSchema,
+});
+
+type ChecklistAnswer = z.infer<typeof checklistAnswerSchema>;
+
+/**
+ * The statuses of a stored checklist, in its order, with its wording. An item
+ * the answer left out is `missing` with a note; an id that is not on the list
+ * is dropped.
+ */
+export function applyChecklist(
+  answers: readonly ChecklistAnswer[],
+  checklist: readonly ChecklistItem[],
+  onLog: OnLog = () => {},
+): ReviewOutput['requirements'] {
+  const byId = new Map<number, ChecklistAnswer>();
+  const known = new Set(checklist.map((c) => c.id));
+  for (const a of answers) {
+    if (!known.has(a.id)) {
+      onLog('warn', `synthesis: dropped a status for requirement id ${a.id}, which is not on the checklist`);
+      continue;
+    }
+    if (!byId.has(a.id)) byId.set(a.id, a);
+  }
+  const skipped = checklist.filter((c) => !byId.has(c.id)).map((c) => c.id);
+  if (skipped.length) onLog('warn', `synthesis: no status for requirement id(s) ${skipped.join(', ')}; marked missing`);
+  return checklist.map((c) => {
+    const a = byId.get(c.id);
+    return a
+      ? { requirement_id: c.id, text: c.text, status: a.status, evidence: a.evidence }
+      : { requirement_id: c.id, text: c.text, status: 'missing' as const, evidence: 'The review did not evaluate this item.' };
+  });
+}
+
 // Prompts sit beside the module in both layouts: src/prompts under tsx, and
 // dist/prompts after `npm run build:assets` copies them. The src fallback keeps
 // a dist built without that step working instead of failing every lens.
@@ -128,6 +198,7 @@ export const PROMPT_FILES = [
   'synthesis.md',
   'reanchor.md',
   'coverage.md',
+  'requirements.md',
 ] as const;
 
 const cachedTemplates = new Map<string, string>();
@@ -148,6 +219,7 @@ export interface PromptVars {
   slice?: SliceInfo;
   /** The rendered "Repository rules (binding)" section; empty without rules. */
   repoRules?: string;
+  checklist?: ChecklistItem[];
 }
 
 const PLACEHOLDER = /\{\{([A-Z_]+)\}\}/g;
@@ -179,7 +251,47 @@ export function promptValues(vars: PromptVars, lensOutputs = '', toolChecks = ''
     SLICE_RULES: vars.slice ? SLICE_RULES : '',
     REPO_RULES: vars.repoRules ?? '',
     TOOL_CHECKS: toolChecks,
+    REQUIREMENTS_STEP: renderRequirementsStep(vars.checklist),
   };
+}
+
+/** The `id` an item has in prompts: `R12` for the stored item 12. */
+export function requirementLabel(id: number): string {
+  return `R${id}`;
+}
+
+export function renderChecklist(checklist: readonly ChecklistItem[]): string {
+  return checklist.map((c) => `   - \`${requirementLabel(c.id)}\` ${c.text.replace(/\s+/g, ' ')}`).join('\n');
+}
+
+const DERIVE_STEP = [
+  '   Read the ticket above, including its comments. Turn it into a numbered list',
+  '   of concrete, checkable requirements. Split compound sentences. Include',
+  '   acceptance criteria, explicit "must" statements, and clear implied work (a',
+  '   behaviour change usually needs tests, and the repository may require a',
+  '   documentation update). Where a decision in the ticket comments, or an added',
+  '   requirement, replaced the original text, the decision wins. Do not add wishes',
+  '   of your own. Set `id` to null on every entry; `proposed_requirements` stays',
+  '   empty.',
+].join('\n');
+
+/** Step 3 of the synthesis prompt: derive the requirements, or evaluate the stored checklist by id. */
+export function renderRequirementsStep(checklist: readonly ChecklistItem[] | undefined): string {
+  if (!checklist?.length) return DERIVE_STEP;
+  return [
+    '   The ticket\'s requirements are a stored checklist, agreed for the whole ticket',
+    '   and shared by every branch of it. Evaluate EXACTLY these items: one entry per',
+    '   id, every id once, with `id` set to it (for example `"R12"`). Do not add, drop,',
+    '   merge, split, or reword items; `text` may be left out. The checklist already',
+    '   folds in the decisions from the ticket comments.',
+    '',
+    renderChecklist(checklist),
+    '',
+    '   When the ticket clearly asks for something this checklist does not hold, put',
+    '   it in `proposed_requirements` with the reason. A proposal is only shown to the',
+    '   user as a suggestion: it is not a requirement of this review, and it never',
+    '   changes `verdict` or `can_merge`.',
+  ].join('\n');
 }
 
 /** Where the branch sits among the ticket's slices; empty for a branch without a ticket group. */
@@ -257,7 +369,7 @@ export function renderLensOutputs(results: LensResult[]): string {
     .join('\n\n');
 }
 
-function renderTicket(ticket: TicketInfo | null, review: RunnableReview): string {
+export function renderTicket(ticket: TicketInfo | null, review: Pick<RunnableReview, 'ticket_key' | 'ticket_title' | 'ticket_url' | 'ticket_body'>): string {
   if (!ticket) {
     if (review.ticket_body) {
       return [
@@ -530,6 +642,7 @@ export async function runReview(
   opts: RunReviewOptions = {},
 ): Promise<ReviewRunOutput> {
   const rules = loadRules(review.repo, opts, onLog);
+  const checklist = opts.checklist?.length ? opts.checklist : undefined;
   const vars: PromptVars = {
     ticket,
     review,
@@ -537,6 +650,7 @@ export async function runReview(
     previousFindings: opts.previousFindings ?? [],
     ...(opts.slice ? { slice: opts.slice } : {}),
     repoRules: renderRepoRules(review.repo, rules),
+    ...(checklist ? { checklist } : {}),
   };
   const reviewer = opts.reviewerDefinition ?? getReviewer(opts.reviewer ?? review.reviewer);
   const model = opts.model ?? review.model ?? reviewer.defaultModel;
@@ -569,13 +683,23 @@ export async function runReview(
   onLog('info', `synthesis: started with ${countLabel(totalCandidates, 'candidate finding')}.`);
 
   const prompt = await buildSynthesisPrompt(vars, renderLensOutputs(lensResults), renderToolChecks(toolChecks));
-  const { data: output, json: synthesisRaw } = await runPass(
-    'synthesis',
-    prompt,
-    reviewOutputSchema,
-    (level, message) => onLog(level, `[synthesis] ${message}`),
-    passOpts,
-  );
+  const synthesisLog: OnLog = (level, message) => onLog(level, `[synthesis] ${message}`);
+  let output: ReviewOutput;
+  let synthesisRaw: unknown;
+  if (checklist) {
+    const pass = await runPass('synthesis', prompt, checklistReviewOutputSchema, synthesisLog, passOpts);
+    synthesisRaw = pass.json;
+    const { proposed_requirements: proposed, requirements, ...rest } = pass.data;
+    output = {
+      ...(rest as Omit<ReviewOutput, 'requirements'>),
+      requirements: applyChecklist(requirements, checklist, synthesisLog),
+      proposed_requirements: dedupeProposals(proposed, checklist),
+    };
+  } else {
+    const pass = await runPass('synthesis', prompt, reviewOutputSchema, synthesisLog, passOpts);
+    synthesisRaw = pass.json;
+    output = pass.data as ReviewOutput;
+  }
   onLog(
     'info',
     `synthesis: ${countLabel(output.findings.length, 'finding')}, ` +
@@ -606,7 +730,7 @@ export async function runReview(
   return {
     ...normalize(
       {
-        ...(output as ReviewOutput),
+        ...output,
         findings: [...anchors.findings, ...toolFindings],
         observations: [...output.observations, ...toolChecks.observations],
       },
@@ -666,6 +790,21 @@ async function runChecks(repo: string, checkout: CheckoutResult, opts: RunReview
       `${countLabel(run.findings.length, 'finding')}, ${countLabel(run.observations.length, 'observation')}.`,
   );
   return run;
+}
+
+/** Proposals that are not already on the checklist, at most 20. */
+function dedupeProposals(proposed: readonly ProposedRequirement[], checklist: readonly ChecklistItem[]): ProposedRequirement[] {
+  const key = (t: string) => t.toLowerCase().replace(/\s+/g, ' ').replace(/[\s.;:,!]+$/, '').trim();
+  const seen = new Set(checklist.map((c) => key(c.text)));
+  const out: ProposedRequirement[] = [];
+  for (const p of proposed) {
+    const k = key(p.text);
+    if (!k || seen.has(k)) continue;
+    seen.add(k);
+    out.push({ text: p.text.slice(0, 2_000), reason: p.reason.slice(0, 2_000) });
+    if (out.length >= 20) break;
+  }
+  return out;
 }
 
 function correctivePrompt(basePrompt: string, problem: string): string {

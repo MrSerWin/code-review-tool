@@ -21,7 +21,8 @@ import {
 } from './reportWriter.js';
 import { getReviewer } from './reviewers/index.js';
 import type { ReviewerDefinition } from './reviewers/types.js';
-import { loadPromptFile, renderTemplate, runPass } from './reviewRunner.js';
+import { loadPromptFile, renderChecklist, renderTemplate, requirementLabel, runPass, type ChecklistItem } from './reviewRunner.js';
+import { activeChecklist } from './ticketRequirements.js';
 import { orderChains } from './ticketChains.js';
 import { groupHeads } from './ticketGroups.js';
 import {
@@ -62,14 +63,25 @@ const coverageBranchSchema = z.object({
   evidence: z.array(evidenceSchema).nullish().transform((v) => v ?? []),
 });
 
+const coverageRequirementSchema = z.object({
+  id: z.union([z.number(), z.string().regex(/^\s*R?\d+\s*$/i)]).nullish()
+    .transform((v) => (v === null || v === undefined ? null : Number(String(v).replace(/[^\d]/g, '')))),
+  text: z.string().nullish().transform((v) => v?.trim() ?? ''),
+  status: z.unknown().transform(coverageStatus),
+  note: z.string().nullish().transform((v) => v ?? ''),
+  branches: z.array(coverageBranchSchema).nullish().transform((v) => v ?? []),
+});
+
+/** The answer when the pass derives its own list: every requirement has a text. */
 export const coverageOutputSchema = z.object({
   summary: z.string().nullish().transform((v) => v ?? ''),
-  requirements: z.array(z.object({
-    text: z.string().min(1),
-    status: z.unknown().transform(coverageStatus),
-    note: z.string().nullish().transform((v) => v ?? ''),
-    branches: z.array(coverageBranchSchema).nullish().transform((v) => v ?? []),
-  })).min(1),
+  requirements: z.array(coverageRequirementSchema.refine((r) => r.text.length > 0, 'text is required')).min(1),
+});
+
+/** The answer for a stored checklist: every entry names its id. */
+export const checklistCoverageOutputSchema = z.object({
+  summary: z.string().nullish().transform((v) => v ?? ''),
+  requirements: z.array(coverageRequirementSchema.refine((r) => r.id !== null, 'id is required')),
 });
 
 export type CoverageOutput = z.infer<typeof coverageOutputSchema>;
@@ -92,6 +104,8 @@ export interface CoverageInputs {
   key: string;
   ticket: { key: string; title: string | null; url: string | null; text: string };
   branches: CoverageBranchInput[];
+  /** The ticket's stored checklist; empty when it has none, and the pass derives its own list. */
+  checklist: ChecklistItem[];
 }
 
 /** The group's branches in stack order, each with its latest finished review. */
@@ -128,7 +142,8 @@ export function collectCoverageInputs(key: string): CoverageInputs {
   if (group?.requirements_text?.trim()) {
     parts.push('', '## Added requirements and decisions', '', group.requirements_text.trim());
   }
-  return { key, ticket: { key, title, url, text: parts.join('\n') }, branches };
+  const checklist = activeChecklist(key).map((r) => ({ id: r.id, text: r.text }));
+  return { key, ticket: { key, title, url, text: parts.join('\n') }, branches, checklist };
 }
 
 const MAX_FILES_PER_BRANCH = 200;
@@ -154,7 +169,8 @@ export function renderCoverageBranches(branches: readonly CoverageBranchInput[])
       `- Review summary: ${(r.summary ?? '').replace(/\s+/g, ' ').trim() || '(none)'}`,
       '- Requirement checklist of this branch\'s own review:',
       ...(b.requirements.length
-        ? b.requirements.map((q) => `  - [${q.status}] ${q.text.replace(/\s+/g, ' ')}${q.evidence ? ` (evidence: ${q.evidence.replace(/\s+/g, ' ')})` : ''}`)
+        ? b.requirements.map((q) => `  - [${q.status}] ${q.requirement_id ? `\`${requirementLabel(q.requirement_id)}\` ` : ''}` +
+            `${q.text.replace(/\s+/g, ' ')}${q.evidence ? ` (evidence: ${q.evidence.replace(/\s+/g, ' ')})` : ''}`)
         : ['  - (none recorded)']),
       `- Changed files (${b.files.length}):`,
       ...b.files.slice(0, MAX_FILES_PER_BRANCH).map((f) => {
@@ -168,10 +184,37 @@ export function renderCoverageBranches(branches: readonly CoverageBranchInput[])
   }).join('\n\n');
 }
 
+const COVERAGE_DERIVE_STEP = [
+  '1. **Derive the ticket requirements.** Read the ticket, including its comments',
+  '   and any added requirements or decisions. Turn it into a numbered list of',
+  '   concrete, checkable requirements. Split compound sentences. Include',
+  '   acceptance criteria, explicit "must" statements, and clear implied work (a',
+  '   behaviour change usually needs tests). Leave out work no repository can show',
+  '   (manual QA, a deployment, a decision still to be made) and name it in the',
+  '   summary instead. Where a decision in the ticket or its comments replaced the',
+  '   original text, the decision wins. Set `id` to null on every entry.',
+].join('\n');
+
+/** Step 1 of the coverage prompt: derive the requirements, or take the stored checklist by id. */
+export function renderCoverageRequirementsStep(checklist: readonly ChecklistItem[]): string {
+  if (checklist.length === 0) return COVERAGE_DERIVE_STEP;
+  return [
+    '1. **Take the stored checklist.** The ticket\'s requirements are this agreed',
+    '   checklist; it already folds in the decisions from the ticket comments.',
+    '   Report on EXACTLY these items: one entry per id, every id once, with `id` set',
+    '   to it (for example `"R12"`). Do not add, drop, merge, split, or reword items;',
+    '   `text` may be left out. A branch checklist line that starts with the same id',
+    '   is that branch\'s own status for the item.',
+    '',
+    renderChecklist(checklist),
+  ].join('\n');
+}
+
 export async function buildCoveragePrompt(inputs: CoverageInputs): Promise<string> {
   return renderTemplate(await loadPromptFile('coverage.md'), {
     TICKET: inputs.ticket.text,
     BRANCHES: renderCoverageBranches(inputs.branches),
+    REQUIREMENTS_STEP: renderCoverageRequirementsStep(inputs.checklist),
   });
 }
 
@@ -226,6 +269,37 @@ export function normalizeCoverage(
   branches: readonly CoverageBranchInput[],
   checkerFor: (b: CoverageBranchInput) => EvidenceChecker,
   onLog: OnLog = () => {},
+  checklist: readonly ChecklistItem[] = [],
+): CoverageRequirement[] {
+  if (checklist.length > 0) {
+    // Statuses by id, in the checklist's order and wording; an item left out is missing.
+    const byId = new Map<number, CoverageOutput['requirements'][number]>();
+    const known = new Set(checklist.map((c) => c.id));
+    for (const r of output.requirements) {
+      if (r.id === null || !known.has(r.id)) {
+        onLog('warn', `coverage: dropped an entry for ${r.id === null ? 'no id' : `id ${r.id}`}, which is not on the checklist`);
+        continue;
+      }
+      if (!byId.has(r.id)) byId.set(r.id, r);
+    }
+    const ordered = checklist.map((c) => {
+      const r = byId.get(c.id);
+      if (!r) onLog('warn', `coverage: no entry for requirement id ${c.id}; marked missing`);
+      return r
+        ? { ...r, id: c.id, text: c.text }
+        : { id: c.id, text: c.text, status: 'missing' as const, note: 'The coverage pass did not report on this item.', branches: [] };
+    });
+    return normalizeRequirements(ordered, branches, checkerFor, onLog)
+      .map((r, i) => ({ requirement_id: checklist[i]!.id, ...r }));
+  }
+  return normalizeRequirements(output.requirements, branches, checkerFor, onLog);
+}
+
+function normalizeRequirements(
+  requirements: CoverageOutput['requirements'],
+  branches: readonly CoverageBranchInput[],
+  checkerFor: (b: CoverageBranchInput) => EvidenceChecker,
+  onLog: OnLog,
 ): CoverageRequirement[] {
   const checkers = new Map<CoverageBranchInput, EvidenceChecker>();
   const find = (repo: string | null, branch: string): CoverageBranchInput | undefined => {
@@ -241,7 +315,7 @@ export function normalizeCoverage(
     const matches = branches.filter((b) => b.member.branch === name && (!r || b.member.repo === r));
     return matches.length === 1 ? matches[0] : undefined;
   };
-  return output.requirements.map((req) => {
+  return requirements.map((req) => {
     const out: CoverageBranch[] = [];
     if (req.status !== 'missing') {
       for (const b of req.branches) {
@@ -341,18 +415,22 @@ export async function runCoverage(key: string, opts: CoverageRunOptions = {}): P
     fs.mkdirSync(workDir, { recursive: true });
     log('info', `started with ${reviewed.length} of ${inputs.branches.length} branch(es) reviewed, ${reviewer.label} (${model})`);
     const prompt = await buildCoveragePrompt(inputs);
-    const { data } = await runPass('coverage', prompt, coverageOutputSchema, log, {
+    const passOpts = {
       dir: workDir,
       reviewer,
       model,
       timeoutMs: opts.timeoutMs ?? config.REVIEW_TIMEOUT_MS,
       signal: undefined,
-    });
+    };
+    const { data } = inputs.checklist.length > 0
+      ? await runPass('coverage', prompt, checklistCoverageOutputSchema, log, passOpts)
+      : await runPass('coverage', prompt, coverageOutputSchema, log, passOpts);
     const requirements = normalizeCoverage(
       data,
       inputs.branches,
       (b) => evidenceChecker(b.review ? checkoutDir(b.member, b.review.id) : null, b.files),
       log,
+      inputs.checklist,
     );
     const verdict = coverageVerdict(requirements);
     const open = openRequirements(requirements);
