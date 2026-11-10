@@ -279,6 +279,10 @@ export interface ReviewerInfo {
   models?: ModelInfo[];
   /** Why no model can be chosen, when `models` is empty. */
   noModelsHint?: string | null;
+  /** Where `models` came from: the CLI's list command, its cache file, its help text, or the vendor API. */
+  source?: 'cli' | 'cli-cache' | 'cli-help' | 'api' | null;
+  /** When the server discovered the list (ISO 8601). */
+  fetchedAt?: string;
 }
 
 /** Response of GET /api/reviewers. */

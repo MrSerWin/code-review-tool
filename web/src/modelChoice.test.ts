@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { modelOffered, noModelsNotice, pickModel, rememberedModel } from './modelChoice';
+import { modelOffered, modelSourceText, noModelsNotice, pickModel, rememberedModel, runBlocked } from './modelChoice';
 import type { ReviewerInfo } from './types';
 
 const store = new Map<string, string>();
@@ -63,4 +63,23 @@ test('an empty list shows "no models available" with the hint', () => {
   );
   assert.equal(noModelsNotice(codex), null);
   assert.equal(noModelsNotice({ ...claude, models: [] }), null);
+});
+
+test('a reviewer that takes typed names: an empty list with no default shows the hint, but a typed name can run', () => {
+  const bare: ReviewerInfo = { ...claude, defaultModel: null, models: [], noModelsHint: 'Claude Code lists no models: x' };
+  assert.equal(noModelsNotice(bare), 'No models available. Claude Code lists no models: x');
+  assert.equal(runBlocked(bare, ''), true);
+  assert.equal(runBlocked(bare, 'typed-full-name'), false);
+  assert.equal(runBlocked(empty, 'gpt-6.1-sol'), true);
+  assert.equal(runBlocked(codex, ''), false);
+});
+
+test('the source hint names where the list came from', () => {
+  assert.equal(modelSourceText({ ...codex, source: 'cli-cache' }), 'OpenAI Codex models from the model catalog the CLI keeps on disk');
+  assert.match(
+    modelSourceText({ ...claude, source: 'cli-help', fetchedAt: '2026-11-10T19:29:33.874Z' }) ?? '',
+    /^Claude Code models from the CLI help text \(aliases for the latest models\) at .+; a full model name can be typed too$/,
+  );
+  assert.equal(modelSourceText({ ...codex, source: null }), null);
+  assert.equal(modelSourceText(empty), null);
 });

@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { api } from '../api';
 import History from '../components/History';
+import { ModelsRefresh } from '../components/ModelsRefresh';
 import { Button, Card, CloseButton, Field, Input, Segmented, Select, Toolbar } from '../components/ui';
 import { navigate } from '../router';
-import { noModelsNotice, rememberedModel } from '../modelChoice';
+import { modelSourceText, noModelsNotice, pickModel, rememberedModel } from '../modelChoice';
 import { readStored, writeStored } from '../storage';
 import { TRACKER_LABEL, ticketLinkRef } from '../tickets';
-import type { Health, LocalRepo, ResolvedTarget, ReviewerInfo, TicketInfo } from '../types';
+import type { Health, LocalRepo, ResolvedTarget, ReviewerInfo, ReviewersPayload, TicketInfo } from '../types';
 
 const TICKET_RE = /^(?:[a-z]+:)?[a-z][a-z0-9_]*-\d+$/i;
 /** A GitHub issue reference, the one ticket shape that is always available. */
@@ -236,8 +237,16 @@ export default function Home() {
     writeStored(modelKey(reviewer), value);
   };
 
+  const onModelsRefreshed = ({ reviewers: list }: ReviewersPayload): void => {
+    const all = list ?? [];
+    setReviewers(all);
+    // A typed model the fresh list no longer offers gives way to the default.
+    setModel((current) => pickModel(all.find((r) => r.name === reviewer), current));
+  };
+
   const selected = reviewers.find((r) => r.name === reviewer);
   const modelNotice = noModelsNotice(selected);
+  const modelSource = modelSourceText(selected);
   const reviewerLabel = useCallback(
     (name: string): string => reviewers.find((r) => r.name === name)?.label ?? name,
     [reviewers],
@@ -460,8 +469,10 @@ export default function Home() {
             ))}
           </datalist>
         </Field>
+        <ModelsRefresh onRefreshed={onModelsRefreshed} />
       </Toolbar>
       {modelNotice && <p className="muted manual-hint">{modelNotice}</p>}
+      {!modelNotice && modelSource && <p className="muted manual-hint">{modelSource}</p>}
 
       <div className="manual">
         <button

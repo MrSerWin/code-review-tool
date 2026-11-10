@@ -17,7 +17,8 @@ import {
   VerdictBadge,
   fmtTime,
 } from '../components/ui';
-import { noModelsNotice } from '../modelChoice';
+import { ModelsRefresh } from '../components/ModelsRefresh';
+import { modelSourceText, noModelsNotice, pickModel, runBlocked } from '../modelChoice';
 import { Link, navigate } from '../router';
 import { openTicketLabel, openTicketTitle } from '../tickets';
 import type {
@@ -30,6 +31,7 @@ import type {
   Recipe,
   Review,
   ReviewerInfo,
+  ReviewersPayload,
   TicketGroupPayload,
 } from '../types';
 
@@ -252,6 +254,13 @@ function TicketActions({
 
   const info = reviewers.find((r) => r.name === reviewer);
   const modelNotice = noModelsNotice(info);
+  const blocked = runBlocked(info, model);
+  const modelSource = modelSourceText(info);
+  const onModelsRefreshed = ({ reviewers: list }: ReviewersPayload): void => {
+    const all = list ?? [];
+    setReviewers(all);
+    setModel((current) => pickModel(all.find((r) => r.name === reviewer), current));
+  };
   return (
     <Card title="Review this ticket">
       <p className="muted ticket-hint">
@@ -292,7 +301,7 @@ function TicketActions({
                 value={model}
                 list={`ticket-models-${reviewer}`}
                 placeholder={modelNotice ? 'no models available' : info?.defaultModel ?? 'model'}
-                title={modelNotice ?? undefined}
+                title={modelNotice ?? modelSource ?? undefined}
                 onChange={(e) => setModel(e.target.value)}
               />
               <datalist id={`ticket-models-${reviewer}`}>
@@ -303,9 +312,10 @@ function TicketActions({
                 ))}
               </datalist>
             </Field>
+            <ModelsRefresh onRefreshed={onModelsRefreshed} />
           </>
         )}
-        <Button variant="primary" type="submit" disabled={busy || Boolean(modelNotice)} title={modelNotice ?? `Review every branch of ${ticketKey}`}>
+        <Button variant="primary" type="submit" disabled={busy || blocked} title={modelNotice ?? `Review every branch of ${ticketKey}`}>
           Review ticket
         </Button>
         {canPreview && (
@@ -329,6 +339,7 @@ function TicketActions({
           Re-detect order
         </Button>
       </form>
+      {reviewers.length > 0 && (modelNotice ?? modelSource) && <p className="muted manual-hint">{modelNotice ?? modelSource}</p>}
       <div className="manual">
         <button className="manual-toggle" type="button" onClick={() => setShowExtra((v) => !v)} aria-expanded={showExtra}>
           {showExtra ? '− Added requirements' : '+ Added requirements or decisions'}
