@@ -1,11 +1,13 @@
 import { config } from '../config.js';
+import { logger } from '../logger.js';
 import { claudeReviewer } from './claude.js';
 import { codexReviewer } from './codex.js';
 import { cursorReviewer } from './cursor.js';
+import { discoverModels, pickDefaultModel } from './discovery.js';
 import { grokReviewer } from './grok.js';
 import {
   isReviewerName, REVIEWER_NAMES,
-  type ModelInfo, type ReviewerDefinition, type ReviewerName,
+  type ModelDiscovery, type ModelInfo, type ModelSource, type ReviewerDefinition, type ReviewerName,
 } from './types.js';
 
 const REVIEWERS: Record<ReviewerName, ReviewerDefinition> = {
@@ -55,37 +57,62 @@ export class ModelChoiceError extends Error {
   }
 }
 
-function noModelsMessage(reviewer: ReviewerDefinition): string {
-  return reviewer.noModelsMessage?.() ?? `${reviewer.label} lists no models`;
+function noModelsMessage(reviewer: ReviewerDefinition, discovery: ModelDiscovery): string {
+  return discovery.hint ?? `${reviewer.label} lists no models`;
 }
 
-/** The reviewer's default model as of now; null when it has none. */
+const warned = new Set<string>();
+function warnOnce(message: string): void {
+  if (warned.has(message)) return;
+  warned.add(message);
+  logger.warn(message);
+}
+
+/** The reviewer's discovered models (cached for a while; `refresh` asks again now). */
+export function reviewerModels(
+  reviewer: ReviewerDefinition,
+  opts: { refresh?: boolean } = {},
+): Promise<ModelDiscovery> {
+  return discoverModels(reviewer, opts);
+}
+
+/**
+ * The reviewer's default model as of now, null when it has none: the
+ * configured one while it is listed (or while the CLI takes unlisted ids),
+ * else the first discovered model. An empty cached list is asked again once.
+ */
 export async function resolveDefaultModel(reviewer: ReviewerDefinition): Promise<string | null> {
-  if (reviewer.resolveDefaultModel) return reviewer.resolveDefaultModel();
-  return reviewer.defaultModel || null;
+  let discovery = await reviewerModels(reviewer);
+  if (discovery.models.length === 0) discovery = await reviewerModels(reviewer, { refresh: true });
+  return pickDefaultModel(discovery.models, reviewer.defaultModel, {
+    label: reviewer.label,
+    envName: reviewer.defaultModelEnv,
+    acceptsUnlisted: reviewer.acceptsUnlistedModels,
+  }, warnOnce);
 }
 
 /**
  * Whether `model` is one the reviewer offers now. A miss re-reads the list
  * once, skipping the in-process cache: the CLI may have refreshed its own
- * list since. Returns the list the decision was made on.
+ * list since. Returns the discovery the decision was made on.
  */
 async function lookUpModel(
   reviewer: ReviewerDefinition,
   model: string,
-): Promise<{ listed: boolean; models: ModelInfo[] }> {
-  let models = await reviewer.listModels();
-  if (models.some((m) => m.id === model)) return { listed: true, models };
-  models = await reviewer.listModels({ refresh: true });
-  return { listed: models.some((m) => m.id === model), models };
+): Promise<{ listed: boolean; discovery: ModelDiscovery }> {
+  let discovery = await reviewerModels(reviewer);
+  if (discovery.models.some((m) => m.id === model)) return { listed: true, discovery };
+  discovery = await reviewerModels(reviewer, { refresh: true });
+  return { listed: discovery.models.some((m) => m.id === model), discovery };
 }
 
 /** Throws a ModelChoiceError naming the available ids when `model` is not offered. */
 export async function assertModelAvailable(reviewer: ReviewerDefinition, model: string): Promise<void> {
   if (reviewer.acceptsUnlistedModels) return;
-  const { listed, models } = await lookUpModel(reviewer, model);
+  const { listed, discovery } = await lookUpModel(reviewer, model);
   if (listed) return;
-  if (models.length === 0) throw new ModelChoiceError(noModelsMessage(reviewer));
+  const { models } = discovery;
+  if (models.length === 0) throw new ModelChoiceError(noModelsMessage(reviewer, discovery));
   throw new ModelChoiceError(
     `Model ${JSON.stringify(model)} is not available for ${reviewer.label}. ` +
       `Available: ${models.map((m) => m.id).join(', ')}.`,
@@ -113,7 +140,7 @@ export async function chooseModel(
     if (reviewer.acceptsUnlistedModels || (await lookUpModel(reviewer, inherited)).listed) return inherited;
   }
   const fallback = await resolveDefaultModel(reviewer);
-  if (!fallback) throw new ModelChoiceError(noModelsMessage(reviewer));
+  if (!fallback) throw new ModelChoiceError(noModelsMessage(reviewer, await reviewerModels(reviewer)));
   if (inherited) {
     opts.onFallback?.(`model ${inherited} is no longer offered by ${reviewer.label}; using ${fallback}`);
   }
@@ -147,7 +174,7 @@ export async function resolveStartChoice(
  * the previous run's reviewer carries over. The previous model only carries
  * over while the reviewer stays the same and still offers it: a model id
  * belongs to one CLI, so switching reviewer without naming a model falls back
- * to that reviewer's default (e.g. "opus" must never be handed to codex).
+ * to that reviewer's default (a Claude alias must never be handed to codex).
  */
 export async function resolveRerunChoice(
   previous: { reviewer: string | null; model: string | null },
@@ -166,7 +193,7 @@ export async function resolveRerunChoice(
 export interface ReviewerSummary {
   name: ReviewerName;
   label: string;
-  /** The configured default; null when it comes from the CLI (see /api/reviewers). */
+  /** The configured default (`*_REVIEW_MODEL`); null when unset. /api/reviewers resolves it. */
   defaultModel: string | null;
   bin: string;
   available: boolean;
@@ -176,7 +203,11 @@ export interface ReviewerSummary {
 
 export interface ReviewerDetail extends ReviewerSummary {
   models: ModelInfo[];
-  /** Why no model can be chosen, when `models` is empty and nothing else is accepted. */
+  /** Where `models` came from; null when nothing was found. */
+  source: ModelSource | null;
+  /** When the list was discovered (ISO 8601). */
+  fetchedAt: string;
+  /** What to do so the list fills, when `models` is empty. */
   noModelsHint: string | null;
 }
 
@@ -196,26 +227,29 @@ export function listReviewers(): ReviewerSummary[] {
 }
 
 /**
- * The same list plus each reviewer's models, with the default model resolved
- * against them (null when there is none). Model lists are cached per process.
+ * The same list plus each reviewer's discovered models, where they came
+ * from, and the default resolved against them (null when there is none).
+ * Discoveries are cached per process; `refresh` discovers every list again.
  */
-export async function listReviewersWithModels(): Promise<ReviewerDetail[]> {
+export async function listReviewersWithModels(opts: { refresh?: boolean } = {}): Promise<ReviewerDetail[]> {
   return Promise.all(
     listReviewers().map(async (summary) => {
       const reviewer = lookup(summary.name);
-      // Default first: it may re-read an empty list, which the models below then reflect.
+      if (opts.refresh) await reviewerModels(reviewer, { refresh: true });
+      // Default first: it may re-read an empty list, which the discovery below then reflects.
       const defaultModel = await resolveDefaultModel(reviewer);
-      const models = await reviewer.listModels();
-      const empty = models.length === 0 && !reviewer.acceptsUnlistedModels;
+      const discovery = await reviewerModels(reviewer);
       return {
         ...summary,
         defaultModel,
-        models,
-        noModelsHint: empty ? noModelsMessage(reviewer) : null,
+        models: discovery.models,
+        source: discovery.source,
+        fetchedAt: new Date(discovery.fetchedAt).toISOString(),
+        noModelsHint: discovery.models.length === 0 ? noModelsMessage(reviewer, discovery) : null,
       };
     }),
   );
 }
 
 export { REVIEWER_NAMES, isReviewerName };
-export type { ModelInfo, ReviewerDefinition, ReviewerName };
+export type { ModelDiscovery, ModelInfo, ModelSource, ReviewerDefinition, ReviewerName };

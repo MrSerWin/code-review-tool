@@ -10,6 +10,23 @@ export interface ModelInfo {
   label: string;
 }
 
+/**
+ * Where a model list came from: a list command of the CLI, a catalog file the
+ * CLI keeps on disk, the CLI's own `--help` text, or the vendor's API.
+ */
+export type ModelSource = 'cli' | 'cli-cache' | 'cli-help' | 'api';
+
+/** One discovery of a reviewer's models. */
+export interface ModelDiscovery {
+  models: ModelInfo[];
+  /** Null when nothing was found. */
+  source: ModelSource | null;
+  /** Epoch milliseconds. */
+  fetchedAt: number;
+  /** When `models` is empty: what to do so the list fills (install, log in, set a key). */
+  hint: string | null;
+}
+
 /** What one line of a reviewer's JSON stream contributed. */
 export interface StreamLineResult {
   /** The final answer, once the stream reports it. */
@@ -22,15 +39,17 @@ export interface ReviewerDefinition {
   readonly name: ReviewerName;
   readonly label: string;
   /**
-   * The configured default model. Empty when the default is not static (Codex
-   * takes it from the CLI's model cache): ask `resolveDefaultModel` instead.
+   * The model the environment asks for (`defaultModelEnv`), or '' when unset.
+   * The default actually used is resolved against the discovered models.
    */
   readonly defaultModel: string;
+  /** The environment key that sets `defaultModel`, for warnings. */
+  readonly defaultModelEnv: string;
   readonly bin: string;
   /**
    * True when the CLI takes model ids it does not list (Claude Code resolves
    * full model ids typed by hand), so a requested model is not checked
-   * against `listModels`.
+   * against the discovered list.
    */
   readonly acceptsUnlistedModels?: boolean;
   /** argv before the prompt text */
@@ -39,19 +58,11 @@ export interface ReviewerDefinition {
   /** Parse one line of the CLI's stream, log progress, surface the answer. */
   parseStreamLine(line: string, onLog: OnLog): StreamLineResult;
   /**
-   * The models this CLI offers. Asked of the CLI where it can answer, static
-   * otherwise. Never throws and never blocks for long: a failure degrades to
-   * the static list (or to an empty list where none would be honest).
-   * `refresh` skips the in-process cache and asks the source again.
+   * Ask the CLI (or the vendor API) which models it offers right now. Never
+   * throws: a failure is an empty list with a hint. Uncached; callers go
+   * through `discovery.ts`, which keeps the result for a while.
    */
-  listModels(opts?: { refresh?: boolean }): Promise<ModelInfo[]>;
-  /**
-   * The default model as of now, or null when there is none. Absent, the
-   * default is `defaultModel`.
-   */
-  resolveDefaultModel?(): Promise<string | null>;
-  /** Why no model can be chosen when `listModels` comes back empty. */
-  noModelsMessage?(): string;
+  discoverModels(): Promise<ModelDiscovery>;
   /** Whether the binary exists on this machine. Cached after the first call. */
   isAvailable(): boolean;
   /** A human hint for a known failure, or null when the failure is unknown. */

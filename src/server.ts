@@ -6,7 +6,7 @@ import fastifyStatic from '@fastify/static';
 import Fastify from 'fastify';
 import { ALLOWED_REPOS, config } from './config.js';
 import { activeTrackerNames } from './trackers/index.js';
-import { listReviewers, listReviewersWithModels } from './reviewers/index.js';
+import { listReviewers } from './reviewers/index.js';
 import { ensureImage } from './gitSandbox.js';
 import { logger } from './logger.js';
 import { recoverInterrupted, stopAllReviews } from './queue.js';
@@ -14,6 +14,7 @@ import { killAllReviewersNow } from './reviewRunner.js';
 import { previewsSummary, recoverOrphanPreviews, startReaper } from './preview/engine.js';
 import { previewRoutes } from './routes/previews.js';
 import { repoRoutes } from './routes/repos.js';
+import { reviewerRoutes } from './routes/reviewers.js';
 import { reviewRoutes } from './routes/reviews.js';
 import { ticketRoutes } from './routes/tickets.js';
 import { ticketGroupRoutes } from './routes/ticketGroups.js';
@@ -46,13 +47,7 @@ export async function buildServer() {
     previews: previewsSummary(),
   }));
 
-  // The full reviewer list, models included. Model lists are cached per
-  // process, so only the first call may start a short CLI helper.
-  app.get('/api/reviewers', async () => ({
-    reviewers: await listReviewersWithModels(),
-    defaultReviewer: config.defaultReviewer,
-  }));
-
+  await app.register(reviewerRoutes);
   await app.register(repoRoutes);
   await app.register(ticketRoutes);
   await app.register(ticketGroupRoutes);

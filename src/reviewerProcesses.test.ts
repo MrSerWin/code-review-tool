@@ -20,12 +20,12 @@ function fakeReviewer(script: string): ReviewerDefinition {
   return {
     name: 'claude',
     label: 'Fake reviewer',
-    defaultModel: 'fake',
+    defaultModel: 'fake', defaultModelEnv: 'REVIEW_MODEL',
     bin: '/bin/sh',
     buildArgs: () => ['-c', script],
     buildChildEnv: () => ({ PATH: process.env.PATH }),
     parseStreamLine: (line) => { printed.push(line); return {}; },
-    listModels: async () => [],
+    discoverModels: async () => ({ models: [], source: null, fetchedAt: Date.now(), hint: null }),
     isAvailable: () => true,
     describeFailure: () => null,
   };

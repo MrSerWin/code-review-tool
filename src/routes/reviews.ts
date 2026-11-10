@@ -89,7 +89,7 @@ const groupsQuery = z.object({
 
 /**
  * Queue one review. `model` must already be checked against the reviewer's
- * list (resolveStartChoice / resolveRerunChoice); absent, the static default.
+ * list (resolveStartChoice / resolveRerunChoice); absent, the configured one.
  */
 export function startRun(
   target: ResolvedTarget,

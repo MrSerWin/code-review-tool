@@ -31,9 +31,38 @@ export function rememberedModel(info: ReviewerInfo | undefined, key: string): st
   return picked;
 }
 
+/** Where the reviewer's model list came from, for a hint under the picker. */
+const SOURCE_TEXT: Record<string, string> = {
+  cli: 'its list command',
+  'cli-cache': 'the model catalog the CLI keeps on disk',
+  'cli-help': 'the CLI help text (aliases for the latest models)',
+  api: 'the vendor API',
+};
+
+/** "Models from ... at 14:05", or null when the server sent no source. */
+export function modelSourceText(info: ReviewerInfo | undefined): string | null {
+  if (!info?.source || !info.models?.length) return null;
+  const from = SOURCE_TEXT[info.source] ?? info.source;
+  const at = info.fetchedAt ? new Date(info.fetchedAt) : null;
+  const when = at && !Number.isNaN(at.getTime())
+    ? ` at ${at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+    : '';
+  const typed = info.acceptsUnlistedModels ? '; a full model name can be typed too' : '';
+  return `${info.label} models from ${from}${when}${typed}`;
+}
+
+/**
+ * True when the run cannot start: no model to fall back on, and none typed
+ * that the reviewer would take.
+ */
+export function runBlocked(info: ReviewerInfo | undefined, model: string): boolean {
+  if (!noModelsNotice(info)) return false;
+  return !(info?.acceptsUnlistedModels && model.trim());
+}
+
 /** Why nothing can be picked, or null when the reviewer has a model to run. */
 export function noModelsNotice(info: ReviewerInfo | undefined): string | null {
-  if (!info?.models || info.acceptsUnlistedModels) return null;
+  if (!info?.models) return null;
   if (info.models.length > 0 || info.defaultModel) return null;
   return info.noModelsHint ? `${NO_MODELS}. ${info.noModelsHint}` : NO_MODELS;
 }

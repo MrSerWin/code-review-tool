@@ -15,7 +15,8 @@ import {
   fmtDuration,
   fmtTime,
 } from '../components/ui';
-import { noModelsNotice, pickModel } from '../modelChoice';
+import { ModelsRefresh } from '../components/ModelsRefresh';
+import { modelSourceText, noModelsNotice, pickModel, runBlocked } from '../modelChoice';
 import { Link, navigate } from '../router';
 import { openTicketLabel, openTicketTitle } from '../tickets';
 import type {
@@ -26,6 +27,7 @@ import type {
   Observation,
   ReviewDetailPayload,
   ReviewerInfo,
+  ReviewersPayload,
   RunComparison,
   ReviewTicketGroup,
   Severity,
@@ -194,6 +196,14 @@ export default function ReviewDetail({ id }: { id: number }) {
   const reviewerLabel = (name: string): string => reviewers.find((r) => r.name === name)?.label ?? name;
   const rerunInfo = reviewers.find((r) => r.name === rerunReviewer);
   const rerunNotice = noModelsNotice(rerunInfo);
+  const rerunBlocked = runBlocked(rerunInfo, rerunModel);
+  const rerunSource = modelSourceText(rerunInfo);
+
+  const onModelsRefreshed = ({ reviewers: list }: ReviewersPayload): void => {
+    const all = list ?? [];
+    setReviewers(all);
+    setRerunModel((current) => pickModel(all.find((r) => r.name === rerunReviewer), current));
+  };
 
   const onRerunReviewerChange = (name: string): void => {
     setRerunReviewer(name);
@@ -360,18 +370,19 @@ export default function ReviewDetail({ id }: { id: number }) {
                       spellCheck={false}
                       list={modelsListId}
                       placeholder={rerunNotice ? 'no models available' : rerunInfo?.defaultModel ?? 'model'}
-                      title={rerunNotice ?? undefined}
+                      title={rerunNotice ?? rerunSource ?? undefined}
                       onChange={(e) => setRerunModel(e.target.value)}
                     />
                   </>
                 )}
-                <button className="ig-btn" type="button" disabled={Boolean(rerunNotice)} title={rerunNotice ?? undefined} onClick={() => void rerun()}>
+                <button className="ig-btn" type="button" disabled={rerunBlocked} title={rerunNotice ?? undefined} onClick={() => void rerun()}>
                   <Icon name="rerun" />
                   Re-run
                 </button>
               </div>
             )}
             {/* Outside the group so it never counts as one of its joined segments. */}
+            {!running && reviewers.length > 0 && <ModelsRefresh onRefreshed={onModelsRefreshed} />}
             {!running && reviewers.length > 0 && (
               <datalist id={modelsListId}>
                 {(rerunInfo?.models ?? []).map((m) => (
