@@ -17,6 +17,13 @@ import {
   parseIds, syncMembersFromReviews,
 } from '../ticketStore.js';
 import type { ResolvedTarget, ReviewRow, TicketCoverageRow, TicketInfo, TicketRunRow } from '../types.js';
+import { parseContractIssues } from '../contract.js';
+import { logger } from '../logger.js';
+import { deriveOnce, derivationError, derivationRunning, storedTicket, type DeriveOptions, type DeriveResult } from '../requirements.js';
+import {
+  addUserRequirements, checklistPayload, ChecklistError, replaceUserRequirements, setTicketRequirements, splitRequirementsText,
+  MAX_REQUIREMENT_TEXT, MAX_REQUIREMENTS,
+} from '../ticketRequirements.js';
 import { startRun } from './reviews.js';
 
 export interface TicketRouteDeps {
@@ -28,6 +35,7 @@ export interface TicketRouteDeps {
   ) => ReviewRow;
   recompute: typeof recomputeCoverage;
   pending: (key: string) => boolean;
+  derive: (key: string, opts: DeriveOptions) => { started: boolean; done: Promise<DeriveResult> };
 }
 
 const defaultDeps: TicketRouteDeps = {
@@ -36,6 +44,7 @@ const defaultDeps: TicketRouteDeps = {
   startRun,
   recompute: recomputeCoverage,
   pending: coveragePending,
+  derive: deriveOnce,
 };
 
 const keyParams = z.object({ key: z.string().trim().min(1).max(200) });
@@ -73,6 +82,27 @@ const orderBody = z.object({
 
 const detectBody = z.object({ reset: z.boolean().optional() });
 
+const requirementText = z.string().trim().min(1).max(MAX_REQUIREMENT_TEXT);
+
+/**
+ * One of: `items`, the whole active checklist in order (an entry with an id
+ * keeps that item, one without is a new user item, an item left out is
+ * removed); `user`, the texts that replace every user item; `add`, user items
+ * to append.
+ */
+const checklistBody = z.union([
+  z.object({ items: z.array(z.object({ id: z.number().int().positive().nullish(), text: requirementText })).max(MAX_REQUIREMENTS) }),
+  z.object({ user: z.array(requirementText).max(MAX_REQUIREMENTS) }),
+  z.object({ add: z.array(requirementText).min(1).max(MAX_REQUIREMENTS) }),
+]);
+
+const deriveBody = z.object({
+  reviewer: z.enum(REVIEWER_NAMES).optional(),
+  model: z.string().min(1).max(64).optional(),
+  // Wait for the derivation and return the new checklist (default false: 202 at once).
+  wait: z.boolean().optional(),
+});
+
 const reportQuery = z.object({ id: z.coerce.number().int().positive().optional() });
 const groupQuery = z.object({ run: z.coerce.number().int().positive().optional() });
 
@@ -86,6 +116,8 @@ export function coveragePayload(row: TicketCoverageRow | undefined | null) {
     verdict: row.verdict,
     summary: row.summary,
     requirements: parseCoverageRequirements(row),
+    // null: the pass predates the contract check; [] means it found no mismatch.
+    contract_issues: parseContractIssues(row.contract_json),
     review_ids: parseIds(row.review_ids),
     reviewer: row.reviewer,
     model: row.model,
@@ -145,26 +177,14 @@ function ownRun(key: string, id: number): TicketRunRow | undefined {
   return run?.ticket_key === key ? run : undefined;
 }
 
-/** The ticket as the reviews of its group stored it, for a group the tracker cannot answer for. */
-function storedTicket(key: string): TicketInfo | null {
+/** The reviewer and model of the group's latest review, for a derivation started by hand. */
+function lastReviewChoice(key: string): { reviewer: string | null; model: string | null } {
   const row = db
-    .prepare<[string], Pick<ReviewRow, 'ticket_title' | 'ticket_url' | 'ticket_body'>>(
-      `SELECT ticket_title, ticket_url, ticket_body FROM reviews
-        WHERE group_key = ? AND TRIM(COALESCE(ticket_body, '')) <> '' ORDER BY created_at DESC, id DESC LIMIT 1`,
+    .prepare<[string], Pick<ReviewRow, 'reviewer' | 'model'>>(
+      `SELECT reviewer, model FROM reviews WHERE group_key = ? ORDER BY id DESC LIMIT 1`,
     )
     .get(key);
-  const group = getTicketGroup(key);
-  if (!row && !group) return null;
-  return {
-    provider: 'stored', key, title: row?.ticket_title ?? group?.title ?? '', url: row?.ticket_url ?? group?.ticket_url ?? '',
-    body: row?.ticket_body ?? '', state: '', branchName: null, comments: [], attachmentUrls: [],
-  };
-}
-
-function withAddedRequirements(ticket: TicketInfo, text: string | undefined): TicketInfo {
-  if (!text?.trim()) return ticket;
-  const body = [ticket.body?.trim() || '(the ticket has no description)', '', '## Added requirements and decisions', '', text.trim()].join('\n');
-  return { ...ticket, body };
+  return { reviewer: row?.reviewer ?? null, model: row?.model ?? null };
 }
 
 function sendGroupError(reply: { code: (n: number) => { send: (b: unknown) => unknown } }, err: unknown) {
@@ -248,7 +268,9 @@ export async function ticketGroupRoutes(app: FastifyInstance, opts: { deps?: Par
     }
     if (members.length === 0) return reply.code(400).send({ error: `${key} has no branches to review` });
 
-    const runTicket = withAddedRequirements(ticket, requirementsText);
+    // Added requirements join the stored checklist as user items; the ticket text stays as the tracker has it.
+    if (requirementsText) addUserRequirements(key, splitRequirementsText(requirementsText));
+    const runTicket = ticket;
     const queuedNames = new Set(members.map((m) => `${m.repo}#${m.branch}`));
     const allMembers = orderedMembers(key);
     const planned = members.map((m) => {
@@ -292,6 +314,56 @@ export async function ticketGroupRoutes(app: FastifyInstance, opts: { deps?: Par
       ...(resolveError ? { resolve_warning: `The tracker lookup failed, so the stored branches were used: ${resolveError}` } : {}),
       ...ticketPayload(key, deps.pending),
     });
+  });
+
+  app.get('/api/ticket-groups/:key/requirements', async (req, reply) => {
+    const parsed = keyParams.safeParse(req.params);
+    if (!parsed.success) return reply.code(400).send({ error: 'Invalid ticket key' });
+    syncMembersFromReviews(parsed.data.key);
+    if (!getTicketGroup(parsed.data.key)) return reply.code(404).send({ error: `No ticket group ${parsed.data.key}` });
+    return { ...checklistPayload(parsed.data.key), deriving: derivationRunning(parsed.data.key), derive_error: derivationError(parsed.data.key) };
+  });
+
+  app.put('/api/ticket-groups/:key/requirements', async (req, reply) => {
+    const parsed = keyParams.safeParse(req.params);
+    const body = checklistBody.safeParse(req.body ?? {});
+    if (!parsed.success || !body.success) return reply.code(400).send({ error: 'Invalid request body' });
+    const key = parsed.data.key;
+    syncMembersFromReviews(key);
+    if (!getTicketGroup(key)) return reply.code(404).send({ error: `No ticket group ${key}` });
+    try {
+      if ('items' in body.data) setTicketRequirements(key, body.data.items);
+      else if ('user' in body.data) replaceUserRequirements(key, body.data.user);
+      else addUserRequirements(key, body.data.add);
+    } catch (err) {
+      if (err instanceof ChecklistError) return reply.code(err.status).send({ error: err.message });
+      throw err;
+    }
+    return { ...checklistPayload(key), deriving: derivationRunning(key), derive_error: derivationError(key) };
+  });
+
+  app.post('/api/tickets/:key/requirements/derive', async (req, reply) => {
+    const parsed = keyParams.safeParse(req.params);
+    const body = deriveBody.safeParse(req.body ?? {});
+    if (!parsed.success || !body.success) return reply.code(400).send({ error: 'Invalid request body' });
+    const key = parsed.data.key;
+    syncMembersFromReviews(key);
+    if (!getTicketGroup(key)) return reply.code(404).send({ error: `No ticket group ${key}` });
+    const last = lastReviewChoice(key);
+    const { started, done } = deps.derive(key, {
+      reviewer: body.data.reviewer ?? last.reviewer,
+      model: body.data.model ?? (body.data.reviewer && body.data.reviewer !== last.reviewer ? null : last.model),
+    });
+    if (body.data.wait) {
+      try {
+        await done;
+      } catch (err) {
+        return reply.code(502).send({ error: `The derivation failed: ${(err as Error).message.split('\n')[0]}` });
+      }
+      return { started, ...checklistPayload(key), deriving: derivationRunning(key), derive_error: derivationError(key) };
+    }
+    done.catch((err: unknown) => logger.warn(`requirements ${key}: derivation failed: ${(err as Error).message.split('\n')[0]}`));
+    return reply.code(202).send({ started, ...checklistPayload(key), deriving: true, derive_error: null });
   });
 
   app.post('/api/tickets/:key/coverage', async (req, reply) => {

@@ -216,7 +216,9 @@ and before synthesis:
 ```
 
 A check runs when its key is present and not `false`; `true` or `{}` takes the
-defaults; unknown keys are rejected and an invalid file runs no checks.
+defaults; unknown keys are rejected and an invalid file runs no checks. The
+same file may set `contractGlobs` (top level, next to `checks`): the contract
+files of the ticket coverage's [cross-repository contract](#tickets-split-into-several-branches) check.
 
 | check | result | config keys (default) |
 |---|---|---|
@@ -363,10 +365,28 @@ them as a **ticket group**: per repository, a chain of branches, each with the
   finish releases it, with a note in its log); `POST /api/reviews` with several
   branches of one ticket orders and chains them the same way and records a
   ticket run. A branch whose parent is outside the batch and has no finished
-  review yet still runs; the answer says so. `requirementsText` is added to the ticket text of every run and of
-  the coverage (approved decisions, scope notes). `start_review` of one branch
+  review yet still runs; the answer says so. `requirementsText` (approved decisions, scope notes; one item per
+  line or list entry) joins the ticket's requirement checklist as items added by hand. `start_review` of one branch
   works as before; when the branch belongs to a group, its base defaults to
   the group's parent (an explicit `baseBranch` wins), and so does a re-run.
+- **Requirement checklist.** A ticket has one stored checklist, so every run
+  of every branch and the coverage evaluate the same items with the same ids
+  (`R12`). The first review of the ticket derives it before its lenses start:
+  one reviewer pass (`src/prompts/requirements.md`, same reviewer and model as
+  the review, no code access) reads the ticket text and its comments from the
+  tracker (the stored text when the tracker does not answer) and returns
+  concrete, checkable items; a decision in the comments, or an item added by
+  hand, replaces the original text, and work no repository can show is listed
+  apart as "not checked in code". Branch reviews running at the same time share
+  that one pass. Synthesis then reports a status and evidence per id; it may
+  not add or reword items, only propose additions, which the review page shows
+  with **Add to ticket** (nothing is added on its own). Edit the list on the
+  ticket page (edit, add, remove, reorder, **Re-derive**: derived items are
+  replaced, an unchanged text keeps its id, items added or edited by hand
+  stay), with `PUT /api/ticket-groups/<key>/requirements`, or with the MCP
+  tools below; edits apply to the next run. Removed items keep their id, so
+  older statuses stay readable. A branch without a ticket group, or a ticket
+  whose derivation failed, derives its requirements in synthesis as before.
 - **Code verdict per branch.** A branch of a group is told which other slices
   exist. A requirement it does not implement is not a finding: its checklist
   marks it `missing` for this branch, and its verdict (`code_verdict`, also
@@ -385,6 +405,24 @@ them as a **ticket group**: per repository, a chain of branches, each with the
   planned slice that has no branch yet shows as "not covered anywhere".
   **Recompute coverage**, `POST /api/tickets/<key>/coverage`, or
   `get_ticket_coverage` with `recompute: true` runs a pass at once.
+- **Cross-repository contract.** The coverage pass also gets, per branch,
+  the diff of its contract files (`git diff <base>..<head>` in the sandbox,
+  from the branch's checkout, at most 400 lines per branch with a note naming
+  the files cut), and compares what the backend returns, renames, or removes
+  with what the frontend reads or sends. It reports `contract_issues`
+  (`problem`, `severity` `major`/`minor`, and `sites`: repo, branch, file,
+  line), only for a mismatch it can show at both ends; each site is checked
+  like a finding anchor in that branch, and an issue with fewer than two sites
+  that exist is dropped. Contract files are `contractGlobs` from
+  `RULES_DIR/<repo>.json` when that file sets them, else
+  `**/*serializers*.py`, `**/*views*.py`, `**/*urls*.py`, `**/*schemas*.py`,
+  `src/Services/**`, `src/Models/**`, `src/**/*Models.ts`,
+  `src/**/*Service.ts`, without tests (a glob starting with `!` excludes). The
+  issues show under the coverage table on the ticket page ("No contract
+  mismatch found" when there are none), in the coverage report, and in
+  `get_ticket_coverage` and `wait_for_ticket_review` (`contract.checked` is
+  false for a pass that predates the check). They do not change the coverage
+  verdict.
 - **Where it shows.** The ticket page lists the chains (parent, why it was
   picked, the latest run and code verdict per branch; drag or ↑ ↓ to make a
   repository one chain in that order, or pick a parent per branch), the
@@ -580,6 +618,9 @@ authentication. Errors come back as `{ "error": "…" }` with a 4xx or 5xx statu
 | GET | `/api/ticket-groups/:key/preview-plan` | `?recipe=` (optional with one recipe) | `{ ticket, recipe, roles, request, live_preview, other_live, notes }`: per role the chain tip of its repo (`branch`, `base`, `usedBase`, `source`, `chain`), the `POST /api/previews` body that runs it, a queued/starting/ready preview that runs exactly these branches, the ticket's other live previews; `404` without a group, `400` for an unknown recipe or several recipes and none named, `409` when previews are disabled |
 | POST | `/api/tickets/:key/review` | `{ reviewer?, model?, requirementsText?, branches?, refresh? }` | `201 { run, reviews, notes, group, coverage, ... }`: one queued run per branch, parents first, each against its parent; `branches` (`["repo#branch"]`) narrows it; `refresh: false` skips the tracker; this can take minutes (ticket lookup, branch listing, compare) |
 | POST | `/api/tickets/:key/coverage` | `{ reviewer?, model? }` | `202 { started, coverage }`: a coverage pass now; joins a running one |
+| GET | `/api/ticket-groups/:key/requirements` | | `{ key, derived_at, not_verifiable_notes, items, removed, deriving, derive_error }`: the stored checklist; each item has `id`, `position`, `text`, `source` (`derived`, `user`), `state` |
+| PUT | `/api/ticket-groups/:key/requirements` | one of `{ items: [{ id?, text }] }` (the whole active list in order; left out = removed), `{ user: [text] }` (replaces user items), `{ add: [text] }` | the checklist; a reworded derived item becomes a user item; `404` for an id of another ticket |
+| POST | `/api/tickets/:key/requirements/derive` | `{ reviewer?, model?, wait? }` | `202` with the checklist and `deriving: true` (or, with `wait`, the new checklist): derive again; joins a running derivation; reviewer and model default to the ticket's latest review |
 | PUT | `/api/tickets/:key/parent` | `{ repo, branch, parent }` | the ticket payload; `parent: null` = the default branch; `400` for a loop |
 | PUT | `/api/tickets/:key/order` | `{ repo, branches, root? }` | the ticket payload: the branches become one chain in that order |
 | POST | `/api/tickets/:key/detect` | `{ reset? }` | `{ detected, ...ticket payload }`: detect parents again; `reset` also replaces parents set by hand |
@@ -612,7 +653,7 @@ every tool returns an error saying so.
 | `list_local_repos` | `repo?`, `maxBranches?` (default 30) | local clones: repo name, path, checked-out branch, default base, dirty state, branches with unpushed / ahead / behind |
 | `detect_base` | `repo`, `branch` | the base a local branch would be diffed against (detected parent or default branch) |
 | `start_review` | `input`, `reviewer?`, `model?`, `baseBranch?`, `includeWorkingTree?`, `requirementsText?`, `targets?` | start a review of any [input](#inputs); a ticket with several branches starts one review per branch, unless `targets` (`["repo#branch", …]`) narrows it; returns the review ids at once |
-| `get_review` | `id`, `maxFindings?` (default 50) | status and, once done, verdict, `code_verdict`, `ticket_group` (the coverage seen from this branch), `can_merge`, requirements met/total, severity counts, findings (most severe first, capped; each with `kind`, `cause`, `anchor_status`, and `lens`, which is `tool` for a tool check) |
+| `get_review` | `id`, `maxFindings?` (default 50) | status and, once done, verdict, `code_verdict`, `ticket_group` (the coverage seen from this branch), `can_merge`, requirements met/total (unmet ones with their checklist id), `proposed_requirements`, severity counts, findings (most severe first, capped; each with `kind`, `cause`, `anchor_status`, and `lens`, which is `tool` for a tool check) |
 | `wait_for_review` | `id`, `timeoutSec?` (default 50, max 600), `pollSec?` (default 5), `maxFindings?` | poll until the review finishes or `timeoutSec` passes; returns `finished`, call again while it is `false` |
 | `get_report` | `id`, `maxChars?` (default 40000) | the Markdown report of a finished review, truncated past `maxChars` |
 | `list_reviews` | `q?`, `repo?`, `ticket?`, `group?`, `status?`, `limit?` (default 20) | recent runs, newest first; `status` is one status or `active` |
@@ -621,7 +662,10 @@ every tool returns an error saying so.
 | `start_ticket_review` | `ticket`, `reviewer?`, `model?`, `requirementsText?`, `branches?`, `refresh?` | review every branch of a ticket, parents first, each against its parent; returns the run id, the review ids, and notes |
 | `wait_for_ticket_review` | `ticket`, `runId?`, `timeoutSec?` (default 50, max 600), `pollSec?`, `maxRequirements?` | poll until every run of the batch ended and its coverage was computed; returns `finished`, the chains with each branch's latest run and `code_verdict`, and the coverage |
 | `get_ticket` | `ticket`, `maxRequirements?` | the chains, the latest run per branch, the coverage, `coverage_pending`, and the latest run |
-| `get_ticket_coverage` | `ticket`, `recompute?`, `reviewer?`, `model?`, `maxRequirements?` | the coverage: verdict, and per requirement its status and covering branches with evidence; `recompute: true` starts a pass |
+| `get_ticket_coverage` | `ticket`, `recompute?`, `reviewer?`, `model?`, `maxRequirements?` | the coverage: verdict, and per requirement (by checklist id) its status and covering branches with evidence; `recompute: true` starts a pass |
+| `get_ticket_requirements` | `ticket` | the stored checklist: items with ids (`R12`) and source, not verifiable notes, removed items |
+| `set_ticket_requirements` | `ticket` + one of `add`, `user`, `items` (`[{id?, text}]`) | edit the checklist (append, replace user items, or set the whole list) |
+| `derive_ticket_requirements` | `ticket`, `reviewer?`, `model?`, `timeoutSec?` | derive the checklist again and wait for it up to `timeoutSec` |
 | `set_branch_parent` | `ticket`, `repo`, `branch` + `parent`, or `order` (+ `root?`) | set one branch's parent (null = default branch), or make the repository one chain in the given order |
 | `rerun_review` | `id`, `reviewer?`, `model?` | run a review again, optionally with another reviewer or model |
 | `list_recipes` | | preview recipes: name, roles (role -> repo), database, ready timeout; `enabled` is false when previews are off |

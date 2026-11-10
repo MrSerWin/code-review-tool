@@ -164,6 +164,38 @@ export interface Requirement {
   status: RequirementStatus;
   evidence: string | null;
   ord: number;
+  /** The ticket checklist item this status is for; null on rows written without a stored checklist. */
+  requirement_id?: number | null;
+}
+
+/** A requirement a review suggests adding to the ticket's checklist. */
+export interface ProposedRequirement {
+  text: string;
+  reason: string;
+}
+
+/** One item of a ticket's stored requirement checklist. */
+export interface TicketRequirement {
+  id: number;
+  ticket_key: string;
+  position: number;
+  text: string;
+  source: 'derived' | 'user';
+  state: 'active' | 'removed';
+  created_at: string;
+  updated_at: string;
+}
+
+/** GET /api/ticket-groups/:key/requirements */
+export interface TicketChecklist {
+  key: string;
+  derived_at: string | null;
+  not_verifiable_notes: string[];
+  items: TicketRequirement[];
+  removed: TicketRequirement[];
+  deriving: boolean;
+  derive_error: { error: string; at: string } | null;
+  started?: boolean;
 }
 
 export interface LogLine {
@@ -183,6 +215,8 @@ export interface ReviewDetailPayload {
   observations: Observation[];
   logs: LogLine[];
   comparison: RunComparison | null;
+  /** Additions to the ticket checklist the review suggests; never stored on the ticket by itself. */
+  proposed_requirements?: ProposedRequirement[];
   /** GitHub pages of the reviewed branch; absent from servers older than this field. */
   links?: GithubLinks;
 }
@@ -465,10 +499,26 @@ export interface CoverageBranch {
 }
 
 export interface CoverageRequirement {
+  requirement_id?: number | null;
   text: string;
   status: CoverageStatus;
   note: string;
   branches: CoverageBranch[];
+}
+
+/** One end of a contract mismatch between branches. */
+export interface ContractSite {
+  repo: string;
+  branch: string;
+  file: string;
+  line: number | null;
+  anchor_status: AnchorStatus;
+}
+
+export interface ContractIssue {
+  problem: string;
+  severity: 'major' | 'minor';
+  sites: ContractSite[];
 }
 
 export interface Coverage {
@@ -478,6 +528,8 @@ export interface Coverage {
   verdict: CoverageVerdict | null;
   summary: string | null;
   requirements: CoverageRequirement[];
+  /** The cross-repository contract check; null or absent for a pass that predates it. */
+  contract_issues?: ContractIssue[] | null;
   review_ids: number[];
   reviewer: string | null;
   model: string | null;
@@ -549,6 +601,7 @@ export interface TicketGroupPayload {
 
 /** A coverage requirement seen from one branch. */
 export interface BranchCoverageLine {
+  requirement_id?: number | null;
   text: string;
   status: CoverageStatus;
   where: 'here' | 'elsewhere' | 'nowhere';
@@ -572,4 +625,6 @@ export interface ReviewTicketGroup {
     requirements: BranchCoverageLine[];
   } | null;
   coverage_pending: boolean;
+  /** The ticket's checklist now; absent from servers older than this field. */
+  checklist?: { id: number; text: string; source: 'derived' | 'user' }[];
 }

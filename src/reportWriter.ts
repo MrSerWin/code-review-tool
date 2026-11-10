@@ -4,7 +4,7 @@ import { config } from './config.js';
 import { branchCoverage, openRequirements, whereLabel } from './coverageView.js';
 import { listReviewers } from './reviewers/index.js';
 import type {
-  AnchorStatus, CheckoutResult, CoverageRequirement, CoverageVerdict, Finding, FindingKind, ReviewOutput, ReviewRow,
+  AnchorStatus, CheckoutResult, ContractIssue, CoverageRequirement, CoverageVerdict, Finding, FindingKind, ReviewOutput, ReviewRow,
   Severity, TicketInfo,
 } from './types.js';
 
@@ -182,10 +182,16 @@ export function renderReport(
   } else {
     lines.push('| # | Requirement | Status | Evidence |', '|---|---|---|---|');
     output.requirements.forEach((req, index) => {
+      const label = req.requirement_id ? `R${req.requirement_id}` : String(index + 1);
       lines.push(
-        `| ${index + 1} | ${cell(req.text)} | ${REQ_ICON[req.status] ?? req.status} | ${cell(req.evidence) || '—'} |`,
+        `| ${label} | ${cell(req.text)} | ${REQ_ICON[req.status] ?? req.status} | ${cell(req.evidence) || '—'} |`,
       );
     });
+    lines.push('');
+  }
+  if (output.proposed_requirements?.length) {
+    lines.push('Proposed additions to the ticket checklist (suggestions, not part of this verdict):', '');
+    for (const p of output.proposed_requirements) lines.push(`- ${inline(p.text)}${p.reason ? ` (${inline(p.reason)})` : ''}`);
     lines.push('');
   }
 
@@ -351,6 +357,8 @@ export interface CoverageForReport {
   summary: string;
   requirements: CoverageRequirement[];
   createdAt: string;
+  /** Absent: the pass did not run the contract check. */
+  contractIssues?: ContractIssue[];
 }
 
 const COVERAGE_VERDICT_TEXT: Record<CoverageVerdict, string> = {
@@ -369,7 +377,8 @@ export function renderBranchCoverageSection(
   lines.push(`**${ticketKey}: ${COVERAGE_VERDICT_TEXT[coverage.verdict]}** (coverage #${coverage.id}, ${coverage.createdAt.slice(0, 16).replace('T', ' ')} UTC)`, '');
   lines.push('| # | Requirement | Ticket status | Where |', '|---|---|---|---|');
   branchCoverage(coverage.requirements, repo, branch).forEach((line, index) => {
-    lines.push(`| ${index + 1} | ${cell(line.text)} | ${COVERAGE_ICON[line.status] ?? line.status} | ${cell(whereLabel(line))} |`);
+    const label = line.requirement_id ? `R${line.requirement_id}` : String(index + 1);
+    lines.push(`| ${label} | ${cell(line.text)} | ${COVERAGE_ICON[line.status] ?? line.status} | ${cell(whereLabel(line))} |`);
   });
   lines.push('');
   return lines.join('\n');
@@ -456,9 +465,26 @@ export function renderCoverageReport(
           }).join(', ');
           return `${b.repo}#${b.branch}${b.status === 'partial' ? ' (partial)' : ''}${where ? `: ${where}` : ''}`;
         }).join('; ');
-    lines.push(`| ${index + 1} | ${cell(r.text)} | ${COVERAGE_ICON[r.status] ?? r.status} | ${cell(by)} | ${cell(r.note) || '-'} |`);
+    const label = r.requirement_id ? `R${r.requirement_id}` : String(index + 1);
+    lines.push(`| ${label} | ${cell(r.text)} | ${COVERAGE_ICON[r.status] ?? r.status} | ${cell(by)} | ${cell(r.note) || '-'} |`);
   });
   lines.push('');
+
+  if (coverage.contractIssues) {
+    lines.push('## Cross-repository contract', '');
+    if (coverage.contractIssues.length === 0) lines.push('No contract mismatch found between the branches.', '');
+    else {
+      for (const issue of coverage.contractIssues) {
+        const sites = issue.sites.map((s) => {
+          const loc = s.line ? `${s.file}:${s.line}` : s.file;
+          const warn = anchorWarning(s.anchor_status);
+          return `${s.repo}#${s.branch} \`${loc}\`${warn ? ` [${warn}]` : ''}`;
+        }).join('; ');
+        lines.push(`- **${issue.severity}**: ${inline(issue.problem)} (${sites})`);
+      }
+      lines.push('');
+    }
+  }
 
   const open = openRequirements(coverage.requirements);
   lines.push('## Still required', '');

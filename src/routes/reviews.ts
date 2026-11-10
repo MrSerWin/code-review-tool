@@ -35,7 +35,8 @@ import { applyGroupBases, joinGroup, orderBatch } from '../ticketGroups.js';
 import {
   createTicketRun, getTicketBranch, latestDoneCoverage, parseCoverageRequirements, syncMembersFromReviews,
 } from '../ticketStore.js';
-import type { ResolvedTarget, ReviewRow, TicketInfo } from '../types.js';
+import { activeChecklist, addUserRequirements, splitRequirementsText } from '../ticketRequirements.js';
+import type { ProposedRequirement, ResolvedTarget, ReviewRow, TicketInfo } from '../types.js';
 
 const ACTIVE = new Set(['queued', 'fetching', 'reviewing']);
 
@@ -156,6 +157,11 @@ export async function reviewRoutes(app: FastifyInstance): Promise<void> {
     // A branch of a ticket joins the ticket's group and is diffed against its parent there.
     try {
       chosen = await withGroupBases(chosen, ticket, Boolean(baseBranch?.trim()));
+      // Pasted requirements of a branch that belongs to a ticket join that ticket's checklist as user items.
+      if (requirementsText) {
+        const keys = new Set(chosen.map((t) => ticketGroupOf(t, ticket)).filter((k): k is string => k !== null));
+        for (const key of keys) addUserRequirements(key, splitRequirementsText(requirementsText));
+      }
     } catch (err) {
       req.log?.warn?.(`ticket group: ${(err as Error).message}`);
     }
@@ -235,6 +241,7 @@ export async function reviewRoutes(app: FastifyInstance): Promise<void> {
       comparison,
       links: githubLinks(config.GITHUB_ORG, review),
       ticket_group: ticketGroupContext(review),
+      proposed_requirements: parseProposed(review.proposed_requirements),
     };
   });
 
@@ -421,5 +428,18 @@ function ticketGroupContext(review: ReviewRow) {
     parent_reason: member?.parent_reason ?? null,
     coverage: coverage ? coverageForReview(review, coverage, parseCoverageRequirements(coverage)) : null,
     coverage_pending: coveragePending(key),
+    // The ticket's checklist now, to show which statuses still match an item and which proposals are already on it.
+    checklist: activeChecklist(key).map((r) => ({ id: r.id, text: r.text, source: r.source })),
   };
+}
+
+export function parseProposed(json: string | null | undefined): ProposedRequirement[] {
+  try {
+    const value = JSON.parse(json ?? '[]') as unknown;
+    return Array.isArray(value)
+      ? value.filter((p): p is ProposedRequirement => typeof p?.text === 'string').map((p) => ({ text: p.text, reason: p.reason ?? '' }))
+      : [];
+  } catch {
+    return [];
+  }
 }

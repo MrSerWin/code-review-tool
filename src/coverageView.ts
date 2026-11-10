@@ -13,6 +13,8 @@ export function coverageVerdict(requirements: readonly Pick<CoverageRequirement,
 export type CoverageWhere = 'here' | 'elsewhere' | 'nowhere';
 
 export interface BranchCoverageLine {
+  /** The stored checklist item; null when the coverage derived its own list. */
+  requirement_id: number | null;
   text: string;
   /** The requirement's status across the whole group. */
   status: CoverageStatus;
@@ -37,7 +39,7 @@ export function branchCoverage(
     const where: CoverageWhere = r.status === 'missing' || r.branches.length === 0
       ? 'nowhere'
       : mine ? 'here' : 'elsewhere';
-    return { text: r.text, status: r.status, where, here: mine?.status ?? null, others, note: r.note };
+    return { requirement_id: r.requirement_id ?? null, text: r.text, status: r.status, where, here: mine?.status ?? null, others, note: r.note };
   });
 }
 

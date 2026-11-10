@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api';
 import PreviewPanel from '../components/PreviewPanel';
+import { requirementRef } from '../components/TicketChecklistCard';
 import {
   Button,
   ButtonLink,
@@ -19,6 +20,7 @@ import { openTicketLabel, openTicketTitle } from '../tickets';
 import type {
   BranchCoverageLine,
   Finding,
+  ProposedRequirement,
   LogLine,
   Observation,
   ReviewDetailPayload,
@@ -184,6 +186,9 @@ export default function ReviewDetail({ id }: { id: number }) {
   const running = ACTIVE.has(review.status);
   const finished = review.status === 'done';
   const unmet = requirements.filter((r) => r.status === 'missing' || r.status === 'partial');
+  const byId = requirements.some((r) => r.requirement_id);
+  const checklistIds = group?.checklist ? new Set(group.checklist.map((c) => c.id)) : null;
+  const proposed = data.proposed_requirements ?? [];
   const reviewerLabel = (name: string): string => reviewers.find((r) => r.name === name)?.label ?? name;
   const rerunInfo = reviewers.find((r) => r.name === rerunReviewer);
 
@@ -500,6 +505,7 @@ export default function ReviewDetail({ id }: { id: number }) {
           <p className="muted ticket-hint">
             What this branch implements, as its own review saw it. A requirement missing here may be covered by another
             branch of {group.key}; see Ticket coverage.
+            {byId && ' The ids are the items of the ticket’s stored checklist, the same for every branch and run.'}
           </p>
         )}
         {requirements.length === 0 ? (
@@ -518,8 +524,15 @@ export default function ReviewDetail({ id }: { id: number }) {
               <tbody>
                 {requirements.map((r, i) => (
                   <tr key={r.id}>
-                    <td className="num mono">{i + 1}</td>
-                    <td>{r.text}</td>
+                    <td className="num mono">{r.requirement_id ? requirementRef(r.requirement_id) : i + 1}</td>
+                    <td>
+                      {r.text}
+                      {r.requirement_id && checklistIds && !checklistIds.has(r.requirement_id) && (
+                        <span className="tag cat" title="Removed from the ticket checklist since this run">
+                          no longer on the checklist
+                        </span>
+                      )}
+                    </td>
                     <td>
                       <RequirementStatusTag status={r.status} />
                     </td>
@@ -531,6 +544,15 @@ export default function ReviewDetail({ id }: { id: number }) {
           </div>
         )}
       </Card>
+
+      {group && proposed.length > 0 && (
+        <ProposedCard
+          ticketKey={group.key}
+          proposed={proposed}
+          onTheList={(text) => (group.checklist ?? []).some((c) => sameText(c.text, text))}
+          onAdded={() => void load()}
+        />
+      )}
 
       <Card title={`Findings (${findings.length})`}>
         {findings.length === 0 ? (
@@ -585,6 +607,68 @@ export default function ReviewDetail({ id }: { id: number }) {
 }
 
 const COVERAGE_TAG: Record<string, string> = { covered: 'req-met', partial: 'req-partial', missing: 'req-missing' };
+
+function sameText(a: string, b: string): boolean {
+  const key = (t: string) => t.toLowerCase().replace(/\s+/g, ' ').replace(/[\s.;:,!]+$/, '').trim();
+  return key(a) === key(b);
+}
+
+/** Additions to the ticket checklist this review suggests; nothing is stored until one is added. */
+function ProposedCard({
+  ticketKey,
+  proposed,
+  onTheList,
+  onAdded,
+}: {
+  ticketKey: string;
+  proposed: ProposedRequirement[];
+  onTheList: (text: string) => boolean;
+  onAdded: () => void;
+}) {
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const add = async (text: string): Promise<void> => {
+    setBusy(text);
+    try {
+      await api.setTicketRequirements(ticketKey, { add: [text] });
+      setError(null);
+      onAdded();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  };
+  return (
+    <Card title={`Proposed requirements · ${proposed.length}`}>
+      <p className="muted ticket-hint">
+        The review thinks the ticket asks for these, but the checklist of {ticketKey} does not hold them. They are
+        suggestions: not part of this verdict until added.
+      </p>
+      {error && <p className="error-line">{error}</p>}
+      <ul className="proposed-list">
+        {proposed.map((p) => {
+          const listed = onTheList(p.text);
+          return (
+            <li key={p.text}>
+              <div className="proposed-text">
+                {p.text}
+                {p.reason && <div className="muted coverage-note">{p.reason}</div>}
+              </div>
+              {listed ? (
+                <span className="tag req-met">on the checklist</span>
+              ) : (
+                <Button size="sm" disabled={busy !== null} onClick={() => void add(p.text)}>
+                  {busy === p.text ? 'Adding…' : 'Add to ticket'}
+                </Button>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </Card>
+  );
+}
 
 function whereLabel(line: BranchCoverageLine): string {
   if (line.where === 'nowhere') return 'not covered anywhere';
@@ -649,7 +733,7 @@ function TicketCoverageCard({ group, finished }: { group: ReviewTicketGroup; fin
               <tbody>
                 {c.requirements.map((r, i) => (
                   <tr key={`${i}-${r.text}`}>
-                    <td className="num mono">{i + 1}</td>
+                    <td className="num mono">{r.requirement_id ? requirementRef(r.requirement_id) : i + 1}</td>
                     <td>
                       {r.text}
                       {r.note && <div className="muted coverage-note">{r.note}</div>}

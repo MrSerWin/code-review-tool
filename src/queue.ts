@@ -18,12 +18,15 @@ import {
   commandMatchesBin, inspectProcess, isOrphanReviewer, isPidAlive, killProcessGroups, parseRecordedGroups,
   SELF, shouldRecover, type ProcessInfo, type RecordedGroup, type RecoveryCaller, type RunnerIdentity,
 } from './processOwnership.js';
-import { checkoutChangedFiles, runReview, stopAllReviewers, type PreviousFinding, type SliceInfo } from './reviewRunner.js';
+import {
+  checkoutChangedFiles, runReview, stopAllReviewers, type ChecklistItem, type PreviousFinding, type SliceInfo,
+} from './reviewRunner.js';
+import { ensureTicketRequirements } from './requirements.js';
 import { writeReport } from './reportWriter.js';
 import { buildCheckContext } from './checks/sources.js';
 import { coverageSchedulingEnabled, onGroupReviewSettled } from './coverage.js';
 import { sliceContext } from './ticketGroups.js';
-import { isTicketGroupKey } from './ticketStore.js';
+import { getTicketGroup, isTicketGroupKey } from './ticketStore.js';
 import type {
   LogLevel,
   ResolvedTarget,
@@ -356,6 +359,10 @@ async function processReview(reviewId: number, signal: AbortSignal): Promise<voi
       log(reviewId, 'info', `Note: the parent ${parentInGroup.branch} has no finished review yet.`);
     }
   }
+  const checklist = slice ? await loadChecklist(review, slice.ticketKey) : undefined;
+  throwIfCancelled(signal);
+  // Without a stored checklist, synthesis derives the requirements itself and needs the added text in the ticket.
+  const promptTicket = slice && !checklist ? withAddedRequirements(ticket, getTicketGroup(slice.ticketKey)?.requirements_text) : ticket;
   const previousFindings = loadPreviousFindings(review.repo, review.branch, review.run_index);
   if (previousFindings.length) {
     log(reviewId, 'info', `Carrying ${previousFindings.length} open finding(s) from the previous run.`);
@@ -370,7 +377,7 @@ async function processReview(reviewId: number, signal: AbortSignal): Promise<voi
   const output = await runReview(
     review,
     checkout,
-    ticket,
+    promptTicket,
     (level: LogLevel, message: string) => log(reviewId, level, message),
     {
       previousFindings,
@@ -381,6 +388,7 @@ async function processReview(reviewId: number, signal: AbortSignal): Promise<voi
       onProcessGroups: (groups) => finishRow(reviewId, { reviewer_pgids: JSON.stringify(groups) }),
       ...(slice ? { slice } : {}),
       checkContext,
+      ...(checklist ? { checklist } : {}),
     },
   );
   throwIfCancelled(signal);
@@ -413,6 +421,7 @@ async function processReview(reviewId: number, signal: AbortSignal): Promise<voi
       (f) => f.severity === 'blocker' || f.severity === 'major',
     ).length,
     report_path: reportPath,
+    proposed_requirements: output.proposed_requirements?.length ? JSON.stringify(output.proposed_requirements) : null,
     finished_at: nowIso(),
     error: null,
   });
@@ -487,6 +496,28 @@ function loadSlice(review: ReviewRow): SliceInfo | undefined {
     log(review.id, 'warn', `Could not read the ticket group: ${(err as Error).message}`);
     return { ticketKey: review.group_key!, members: [{ repo: review.repo, branch: review.branch, parent: review.base_branch, self: true }] };
   }
+}
+
+/**
+ * The ticket's stored checklist, derived first by the first review of the
+ * ticket; undefined when there is none to evaluate (synthesis then derives).
+ */
+async function loadChecklist(review: ReviewRow, key: string): Promise<ChecklistItem[] | undefined> {
+  const items = await ensureTicketRequirements(key, {
+    reviewer: review.reviewer,
+    model: review.model,
+    onLog: (level, message) => log(review.id, level, `[requirements] ${message}`),
+  });
+  if (!items) return undefined;
+  log(review.id, 'info', `Evaluating the stored checklist of ${key}: ${items.length} requirement(s), by id.`);
+  return items.map((r) => ({ id: r.id, text: r.text }));
+}
+
+/** The ticket with the group's added requirements appended, for a synthesis that derives its own list. */
+export function withAddedRequirements(ticket: TicketInfo | null, text: string | null | undefined): TicketInfo | null {
+  if (!ticket || !text?.trim()) return ticket;
+  const body = [ticket.body?.trim() || '(the ticket has no description)', '', '## Added requirements and decisions', '', text.trim()].join('\n');
+  return { ...ticket, body };
 }
 
 function hasFinishedRun(repo: string, branch: string): boolean {

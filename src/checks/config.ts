@@ -50,6 +50,8 @@ export const checksConfigSchema = z.object({
       maxFiles: z.number().int().positive().default(DEFAULT_MAX_FILES),
     }),
   }).strict(),
+  // Read by the coverage pass (contract.ts), not by a check; allowed here so the file stays valid.
+  contractGlobs: globs.optional(),
 }).strict();
 
 export type ChecksConfig = z.infer<typeof checksConfigSchema>;
