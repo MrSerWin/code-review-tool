@@ -3,6 +3,7 @@ import { api } from '../api';
 import History from '../components/History';
 import { Button, Card, CloseButton, Field, Input, Segmented, Select, Toolbar } from '../components/ui';
 import { navigate } from '../router';
+import { noModelsNotice, rememberedModel } from '../modelChoice';
 import { readStored, writeStored } from '../storage';
 import { TRACKER_LABEL, ticketLinkRef } from '../tickets';
 import type { Health, LocalRepo, ResolvedTarget, ReviewerInfo, TicketInfo } from '../types';
@@ -217,7 +218,8 @@ export default function Home() {
 
         const name = chosen?.name ?? defaultReviewer ?? 'claude';
         setReviewer(name);
-        setModel(readStored(modelKey(name)) ?? chosen?.defaultModel ?? '');
+        // A remembered model the reviewer no longer offers is dropped for the resolved default.
+        setModel(rememberedModel(all.find((r) => r.name === name), modelKey(name)));
       })
       .catch(() => setReviewers([]));
   }, []);
@@ -226,7 +228,7 @@ export default function Home() {
     setReviewer(name);
     writeStored(REVIEWER_KEY, name);
     const info = reviewers.find((r) => r.name === name);
-    setModel(readStored(modelKey(name)) ?? info?.defaultModel ?? '');
+    setModel(rememberedModel(info, modelKey(name)));
   };
 
   const onModelChange = (value: string): void => {
@@ -235,6 +237,7 @@ export default function Home() {
   };
 
   const selected = reviewers.find((r) => r.name === reviewer);
+  const modelNotice = noModelsNotice(selected);
   const reviewerLabel = useCallback(
     (name: string): string => reviewers.find((r) => r.name === name)?.label ?? name,
     [reviewers],
@@ -446,7 +449,7 @@ export default function Home() {
             value={model}
             spellCheck={false}
             list={`models-${reviewer}`}
-            placeholder={selected?.defaultModel ?? ''}
+            placeholder={modelNotice ? 'no models available' : selected?.defaultModel ?? ''}
             onChange={(e) => onModelChange(e.target.value)}
           />
           <datalist id={`models-${reviewer}`}>
@@ -458,6 +461,7 @@ export default function Home() {
           </datalist>
         </Field>
       </Toolbar>
+      {modelNotice && <p className="muted manual-hint">{modelNotice}</p>}
 
       <div className="manual">
         <button

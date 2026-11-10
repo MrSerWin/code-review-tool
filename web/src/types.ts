@@ -268,12 +268,17 @@ export interface ModelInfo {
 export interface ReviewerInfo {
   name: string;
   label: string;
-  defaultModel: string;
+  /** Resolved by /api/reviewers; null when the reviewer has no model to offer. */
+  defaultModel: string | null;
   bin: string;
   /** Whether the reviewer's CLI was found on the server. */
   available: boolean;
+  /** True when a model id the list lacks is still accepted (typed by hand). */
+  acceptsUnlistedModels?: boolean;
   /** Only served by /api/reviewers; /api/health omits it to stay cheap. */
   models?: ModelInfo[];
+  /** Why no model can be chosen, when `models` is empty. */
+  noModelsHint?: string | null;
 }
 
 /** Response of GET /api/reviewers. */
