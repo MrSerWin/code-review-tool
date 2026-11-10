@@ -22,6 +22,15 @@ Look for:
   concurrent callers, unicode, timezone and date boundaries.
 - resource handling: a file, connection, or process that is not closed on the
   error path.
+- performance, backend: N+1 queries and queries inside loops; a list endpoint
+  without `select_related` / `prefetch_related` or without pagination;
+  unbounded serialization of a large set; a new filter or lookup column
+  without an index.
+- performance, frontend: an effect without a dependency array, heavy work in
+  render, a re-render loop (state set during render or in an effect that
+  depends on that state), an unbounded list rendered without virtualization.
+  A performance defect is `major` on a hot path (a list endpoint, a page
+  load, a loop over every row), else `minor`.
 
 Trace the real call path before you call something a defect. Read the callers
 and the callees, not only the diff.

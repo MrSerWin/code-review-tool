@@ -38,6 +38,9 @@ src/
   reviewRunner.ts  reportWriter.ts  findingCompare.ts  groupKey.ts  githubLinks.ts
   ticketChains.ts  ticketStore.ts  ticketGroups.ts  coverage.ts  coverageView.ts
   queue.ts  processOwnership.ts  cli.ts  server.ts
+  repoRules.ts
+  checks/index.ts  checks/types.ts  checks/config.ts  checks/glob.ts  checks/git.ts  checks/sources.ts
+  checks/migrations.ts  checks/emDash.ts  checks/paths.ts  checks/commitIdentity.ts
   reviewers/types.ts  reviewers/index.ts  reviewers/shared.ts
   reviewers/claude.ts  reviewers/cursor.ts  reviewers/codex.ts  reviewers/grok.ts
   reviewers/anthropicStream.ts  reviewers/codexStream.ts
@@ -55,6 +58,8 @@ src/
   *.test.ts  testEnv.ts   # node:test suites (npm test)
 recipes.example/   # one documented, product-neutral preview recipe
 recipes/           # gitignored: the real preview recipes
+rules.example/     # a documented, product-neutral rules file and checks config
+rules/             # gitignored: the real repository rules and checks configs
 web/     # vite + react + ts, builds to web/dist
 data/    # gitignored: review.db, checkouts/, reports/, previews/
 ```
@@ -477,6 +482,57 @@ no `partial` or `missing` requirement — `not_verifiable` does not block) and
 downgrades an `approve` verdict that contradicts it to `changes_requested`.
 Observations are deliberately absent from that computation.
 
+### Repository rules and tool checks (`repoRules.ts`, `checks/`)
+
+`loadRepoRules(repo)` reads `<RULES_DIR>/_all.md` and `<RULES_DIR>/<repo>.md`
+on every review (no cache, so an edit needs no restart; 64 KB cap per file; a
+repo name that is not a plain file name is never joined into a path).
+`renderRepoRules()` wraps the text as "# Repository rules (binding)" and fills
+`{{REPO_RULES}}`, which sits in `common-preamble.md` right after the ticket
+scope, so both the lenses and synthesis get it and the re-anchor pass
+(`reanchor.md` alone) does not. The section says it takes precedence over the
+repository's own `CLAUDE.md` / `AGENTS.md` where they differ, and that a
+finding resting on a rule cites it in `why`. The documentation severity
+(stale customer doc `major`, other internal docs `minor`) sits in
+`lens-common.md` and synthesis step 2; the rules file names which docs are
+customer-facing.
+
+Tool checks are deterministic code, not prompts. `<RULES_DIR>/<repo>.json` is
+validated by `checks/config.ts` (zod, strict: an unknown key is an error; a key
+set to `true` or `{}` takes the defaults); a missing file runs nothing and an
+invalid one logs a warning and runs nothing. Each check is a
+`ToolCheck { id, run(ctx, config) }` returning `{ findings, observations,
+notes }` in the lens shape. `CheckContext` carries the host-side checkout,
+`baseSha` / `headSha`, the changed files, and the trees a check may compare
+against, each a `TreeRef { label, dir, ref }` read with `git ls-tree` only:
+
+- the base tip as fetched (`CheckoutResult.baseTipSha`, recorded in
+  `finishCheckout` before the remote is removed; its objects stay in the
+  checkout);
+- the default branch as last fetched in the local clone, when one is
+  configured (`refs/remotes/origin/<default>`, else `refs/heads/<default>`);
+- same-repo siblings of the ticket group: the sibling's latest review
+  checkout when it is still on disk, else its ref in the local clone.
+
+`checks/sources.ts` builds that context in the queue (it needs the database
+and the local clones); `runReview()` falls back to a checkout-only context.
+All git runs through `gitRead()` (read-only, no optional locks, no fsmonitor,
+sanitised env); nothing is fetched or checked out, and `assertPristine()`
+still guards the checkout afterwards. A synthetic working-tree snapshot commit
+is excluded from `commit-identity`. A check that throws is logged and skipped.
+
+`runReview()` runs the checks after the lenses and before synthesis.
+`renderToolChecks()` fills `{{TOOL_CHECKS}}` in `synthesis.md` ("Tool checks
+(deterministic, already verified)": the results, and the instruction not to
+repeat them). After synthesis and the anchor pass, the tool findings get
+`anchor_status` from `checkAnchor()` (no re-anchor pass: a tool location is
+exact) and are appended to the findings, the tool observations to the
+observations, all with `lens: 'tool'` and the check id as a title or note
+prefix. `normalize()` runs on the merged list, so a tool `major` or
+`blocker` turns an `approve` into `changes_requested`; synthesis cannot drop a
+tool result because it never owned one. `ReviewRunOutput.toolChecks` keeps the
+run (which checks ran, which failed).
+
 ## Database (`src/db.ts`, better-sqlite3, `data/review.db`)
 
 Migrations run at startup from an in-code array plus `ensureColumn()` calls for
@@ -546,7 +602,7 @@ CREATE TABLE findings (
   hunk TEXT,                      -- '@@ -a,b +c,d @@', diff findings        (added)
   anchor_status TEXT NOT NULL DEFAULT 'unverified',
                                   -- ok|off_diff|missing_path|line_out_of_range|unverified (added)
-  lens TEXT                       -- source lens, when known                 (added)
+  lens TEXT                       -- source lens when known; 'tool' for a tool check (added)
 );
 CREATE INDEX idx_findings_review ON findings(review_id);
 
@@ -581,7 +637,8 @@ CREATE TABLE observations (
   line INTEGER,
   note TEXT NOT NULL,
   rationale TEXT,
-  ord INTEGER NOT NULL
+  ord INTEGER NOT NULL,
+  lens TEXT                       -- 'tool' for a tool check, else NULL       (added)
 );
 CREATE INDEX idx_observations_review ON observations(review_id);
 
@@ -852,8 +909,10 @@ size, and the run: number, timestamp, reviewer, model), `## Summary`,
 missing ❌, not_verifiable ❓), `## Issues to fix` ordered by severity with
 `file:line` (with the kind label and an anchor warning when there is one),
 `Caused by` for non-diff kinds, the hunk when given, problem, why, suggested
-fix, and snippet, `## Suggestions
-(non-blocking)` listing the observations as `` - `file:line` — note `` with an
+fix, and snippet (model findings only), `## Tool checks` with the tool
+findings in the same format and the tool observations (only when there are
+any), `## Suggestions
+(non-blocking)` listing the model's observations, one `file:line` and note each, with an
 indented rationale line (or `None.`), and `## Conclusion` naming exactly what is
 still required before merge.
 
@@ -887,7 +946,8 @@ Dark-first, compact. What each page offers is described in
   ticket in its tracker ("Open in Linear", labelled from the `ticket_url` host),
   meta table, requirements, findings by severity (a non-diff finding shows a
   kind badge and "caused by `file:line`", a bad anchor a warning tag; the hunk
-  header is the location's tooltip), observations, the comparison
+  header is the location's tooltip; a tool-check finding or observation a
+  `tool` badge), observations, the comparison
   with the previous run, a live log fed by SSE, and the Preview card. Actions: cancel, re-run with an optional reviewer and model,
   download report, copy report, delete.
 - **Ticket view** (`/ticket/:key`) — the ticket group (`GET

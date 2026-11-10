@@ -94,6 +94,8 @@ const schema = z.object({
   LOCAL_REPOS_DIR: optionalSecret,
   // Per-repo overrides: "name=/abs/path,other=/abs/path".
   LOCAL_REPOS: optionalSecret,
+  // Per-repository review rules (`<repo>.md`, `_all.md`) and tool checks (`<repo>.json`).
+  RULES_DIR: z.string().min(1).default(path.join(projectRoot, 'rules')),
   // --- preview environments; off unless PREVIEW_ENABLED is set ---
   PREVIEW_ENABLED: envFlag,
   PREVIEW_RECIPES_DIR: z.string().min(1).default(path.join(projectRoot, 'recipes')),
@@ -135,6 +137,8 @@ export const config = Object.freeze({
   reviewConcurrency: parsed.data.REVIEW_CONCURRENCY,
   dockerBin: parsed.data.DOCKER_BIN,
   gitImage: parsed.data.GIT_IMAGE,
+  RULES_DIR: path.resolve(parsed.data.RULES_DIR),
+  rulesDir: path.resolve(parsed.data.RULES_DIR),
   PREVIEW_RECIPES_DIR: path.resolve(parsed.data.PREVIEW_RECIPES_DIR),
   previewEnabled: parsed.data.PREVIEW_ENABLED,
   previewRecipesDir: path.resolve(parsed.data.PREVIEW_RECIPES_DIR),

@@ -36,7 +36,10 @@ How it is built inside is described in [docs/design.md](docs/design.md).
    synthesis pass that verifies their candidate findings against the code.
    The reviewer restates the ticket as a requirement list, reads the diff and
    the surrounding code, honours the reviewed repository's own `CLAUDE.md` /
-   `AGENTS.md` conventions, and returns a structured JSON verdict.
+   `AGENTS.md` conventions and the binding [repository rules](#repository-rules-and-tool-checks)
+   when you configured them, and returns a structured JSON verdict.
+   Between the lenses and synthesis, the configured deterministic
+   [tool checks](#repository-rules-and-tool-checks) run on the checkout.
 4. **Anchor check.** Every finding's `file` and `line` are checked against the
    checkout at HEAD and the changed-file list; wrong anchors get one corrective
    pass (see [Findings and their anchors](#findings-and-their-anchors)).
@@ -58,7 +61,7 @@ branch never touched. Each finding therefore says what its location is:
 | `kind` | `diff` (a changed line), `regression` (untouched code that now breaks), `stale_doc` (untouched docs that describe the old behaviour), `consumer` (an untouched parser or client of a changed shape) |
 | `cause_file`, `cause_line` | for a non-diff kind: the changed line that causes it; must be in the changed set |
 | `hunk` | for a diff finding, when the reviewer gave it: the hunk header `@@ -a,b +c,d @@` |
-| `lens` | the lens whose candidate synthesis kept, when known |
+| `lens` | the lens whose candidate synthesis kept, when known; `tool` for a [tool check](#repository-rules-and-tool-checks) |
 | `anchor_status` | the check below: `ok`, `off_diff`, `missing_path`, `line_out_of_range`, or `unverified` |
 
 After synthesis the tool checks every finding at HEAD, in the sandbox
@@ -131,6 +134,7 @@ truth for every default; `.env.example` lists each variable with its default.
 | `GIT_IMAGE` | no | `code-review-tool-git:latest` | Sandbox image tag |
 | `LOCAL_REPOS_DIR` | no | — | Directory holding local clones named like the `ALLOWED_REPOS` entries; enables [local reviews](#reviewing-a-local-unpushed-branch) |
 | `LOCAL_REPOS` | no | — | Per-repo clone paths overriding `LOCAL_REPOS_DIR`: `name=/abs/path,other=/abs/path` |
+| `RULES_DIR` | no | `<repo>/rules` | [Repository rules and tool checks](#repository-rules-and-tool-checks): `<repo>.md`, `_all.md`, `<repo>.json`; read on every review |
 
 The tracker variables (`LINEAR_API_KEY`, `JIRA_*`, `AZURE_*`, `YOUTRACK_*`,
 `DEFAULT_TRACKER`) are listed under [Ticket trackers](#ticket-trackers), the
@@ -186,6 +190,56 @@ npm run review -- --list-models codex   # just one of them
 
 `GET /api/reviewers` returns the same thing to the UI. `GET /api/health` reports
 the reviewers without their model lists, so it stays cheap.
+
+### Repository rules and tool checks
+
+Both are optional and configured per repository in `RULES_DIR` (default
+`<repo>/rules`, gitignored; a documented sample is in
+[rules.example/](rules.example/README.md)). Files are read on every review, so
+an edit applies to the next run without a restart; a missing file means no
+rules or no checks.
+
+**Rules.** `<repo>.md` (and `_all.md`, for every repository) is added to the
+lens and synthesis prompts as a "Repository rules (binding)" section right
+after the ticket. It is the binding summary of the repository's own
+`CLAUDE.md` / `AGENTS.md` and wins where they differ; a finding that rests on
+a rule cites it in `why`. Name the customer-facing docs in it: a behaviour
+change that leaves a customer doc stale is `major`, a stale internal doc
+`minor`.
+
+**Tool checks.** `<repo>.json` enables deterministic checks, run on the host
+checkout (read-only git, nothing is fetched or checked out) after the lenses
+and before synthesis:
+
+```json
+{ "checks": { "migration-collision": true, "diff-size": { "maxFiles": 40 } } }
+```
+
+A check runs when its key is present and not `false`; `true` or `{}` takes the
+defaults; unknown keys are rejected and an invalid file runs no checks.
+
+| check | result | config keys (default) |
+|---|---|---|
+| `migration-collision` | `major` finding: a migration the branch adds whose number already exists in the same app directory on the base commit, the base tip, the default branch as last fetched in the local clone, or a sibling branch of the ticket group (its review checkout, else the local clone) | `globs` (`apps/*/migrations/[0-9][0-9][0-9][0-9]_*.py`) |
+| `data-migration-idempotence` | observation: a new migration with `RunPython` that creates rows without `get_or_create`, `update_or_create` or an existence check | `globs` (as above) |
+| `forbidden-paths` | `blocker` for env/venv paths, `major` for other patterns and for files above the size limit, among added or modified paths | `blockerPatterns` (`.venv/`, `venv/`, `.env`), `patterns` (`node_modules/`, `__pycache__/`, `*.pyc`, `.DS_Store`), `maxFileBytes` (5 MB) |
+| `em-dash` | `minor` finding per file: an em dash in an added line of a user-facing file | `globs` (required), `excludeGlobs` (test files: `**/*.test.*`, `**/*.spec.*`, `**/__tests__/**`, `**/tests/**`, `**/test_*.py`; an explicit list replaces it, `[]` checks tests too) |
+| `commit-identity` | `minor` finding, no location: commits in base..HEAD whose author matches neither an allowed address nor an allowed domain (case-insensitive), or with a Claude/Anthropic co-author trailer or "Generated with Claude" | `allowedEmails`, `allowedDomains` (at least one entry in either) |
+| `doc-update-heuristic` | observation: behaviour files changed and no customer doc did | `behaviourGlobs`, `docGlobs` (both required) |
+| `diff-size` | observation: more changed files than the limit; consider a stack of smaller branches | `maxFiles` (40) |
+
+Globs are gitignore-like: a pattern without `/` matches a file name at any
+depth, a trailing `/` matches a path segment at any depth (a `.venv` symlink
+included), `**` spans directories, and `[0-9]` and `{a,b}` work.
+
+Tool results carry `lens: "tool"` and their check id in the title. Synthesis
+sees them as a "Tool checks (deterministic, already verified)" section and is
+told not to repeat them; the tool appends them to the final findings and
+observations itself, so synthesis cannot drop them, and they count toward the
+verdict and `can_merge` like any other finding. The web UI shows a `tool`
+badge, the report lists them under "Tool checks", and `get_review` returns
+`lens` on every finding. A check that fails is logged and skipped; it never
+fails the review.
 
 ### Ticket trackers
 
@@ -558,7 +612,7 @@ every tool returns an error saying so.
 | `list_local_repos` | `repo?`, `maxBranches?` (default 30) | local clones: repo name, path, checked-out branch, default base, dirty state, branches with unpushed / ahead / behind |
 | `detect_base` | `repo`, `branch` | the base a local branch would be diffed against (detected parent or default branch) |
 | `start_review` | `input`, `reviewer?`, `model?`, `baseBranch?`, `includeWorkingTree?`, `requirementsText?`, `targets?` | start a review of any [input](#inputs); a ticket with several branches starts one review per branch, unless `targets` (`["repo#branch", …]`) narrows it; returns the review ids at once |
-| `get_review` | `id`, `maxFindings?` (default 50) | status and, once done, verdict, `code_verdict`, `ticket_group` (the coverage seen from this branch), `can_merge`, requirements met/total, severity counts, findings (most severe first, capped; each with `kind`, `cause`, and `anchor_status`) |
+| `get_review` | `id`, `maxFindings?` (default 50) | status and, once done, verdict, `code_verdict`, `ticket_group` (the coverage seen from this branch), `can_merge`, requirements met/total, severity counts, findings (most severe first, capped; each with `kind`, `cause`, `anchor_status`, and `lens`, which is `tool` for a tool check) |
 | `wait_for_review` | `id`, `timeoutSec?` (default 50, max 600), `pollSec?` (default 5), `maxFindings?` | poll until the review finishes or `timeoutSec` passes; returns `finished`, call again while it is `false` |
 | `get_report` | `id`, `maxChars?` (default 40000) | the Markdown report of a finished review, truncated past `maxChars` |
 | `list_reviews` | `q?`, `repo?`, `ticket?`, `group?`, `status?`, `limit?` (default 20) | recent runs, newest first; `status` is one status or `active` |
@@ -803,6 +857,8 @@ Restart when nothing is running.
   lens (`<lens>.json`, or `{ "error": ... }` for a failed lens), of the
   synthesis (`synthesis.json`), and of the re-anchor pass when it ran
   (`reanchor.json`), for debugging a finding back to its source.
+- `rules/` (or `RULES_DIR`): repository rules and tool-check configs,
+  gitignored; see [rules.example/](rules.example/README.md).
 - `data/checkouts/` — temporary checkouts, removed after a successful review
   (kept after a failure, for inspection).
 - `data/previews/<id>/` — scratch directory of one preview environment.

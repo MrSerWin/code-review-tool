@@ -7,7 +7,7 @@
  * pulls in nothing that reads configuration or secrets.
  */
 import type {
-  AnchorStatus, CoverageRequirement, CoverageStatus, CoverageVerdict, FindingKind, FindingRow, LogRow, ParentReason,
+  AnchorStatus, CoverageRequirement, CoverageStatus, CoverageVerdict, FindingKind, FindingRow, FindingSource, LogRow, ParentReason,
   PreviewRole, PreviewStatus, RequirementRow, ReviewGroup, ReviewRow, ReviewSource, ReviewStatus, Severity, Verdict,
 } from '../types.js';
 
@@ -55,6 +55,8 @@ export interface CompactFinding {
   cause: string | null;
   /** How the location checked out at HEAD; `unverified` on rows older than the check. */
   anchor_status: AnchorStatus;
+  /** The lens the finding came from; `tool` for a deterministic tool check; null when unknown. */
+  lens: FindingSource | null;
   problem: string | null;
 }
 
@@ -81,6 +83,7 @@ export function compactFindings(
       kind: f.kind ?? 'diff',
       cause: f.cause_file ? findingLocation({ file: f.cause_file, line: f.cause_line, end_line: null }) : null,
       anchor_status: f.anchor_status ?? 'unverified',
+      lens: f.lens ?? null,
       problem: truncate(f.problem, textMax),
     })),
     omitted: sorted.length - kept.length,

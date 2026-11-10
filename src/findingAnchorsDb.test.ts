@@ -171,3 +171,19 @@ test('MCP findings carry kind, cause, and anchor_status', () => {
   assert.equal(old!.kind, 'diff');
   assert.equal(old!.anchor_status, 'unverified');
 });
+
+test('tool findings and tool observations keep lens "tool" in the database', () => {
+  store.replaceFindings(1, [{
+    severity: 'major', category: 'correctness', file: 'apps/x/migrations/0002_a.py', line: 1, end_line: null,
+    title: 'migration-collision: clash', problem: 'p', why: '', suggestion: '', snippet: null,
+    kind: 'diff', cause_file: null, cause_line: null, hunk: null, lens: 'tool', anchor_status: 'ok',
+  }]);
+  store.replaceObservations(1, [
+    { file: null, line: null, note: 'diff-size: big', rationale: '', lens: 'tool' },
+    { file: 'a.py', line: 2, note: 'model remark', rationale: '' },
+  ]);
+  assert.equal(store.getFindings(1)[0]!.lens, 'tool');
+  assert.deepEqual(store.getObservations(1).map((o) => o.lens), ['tool', null]);
+  const cols = (store.db.pragma('table_info(observations)') as { name: string }[]).map((c) => c.name);
+  assert.ok(cols.includes('lens'));
+});
