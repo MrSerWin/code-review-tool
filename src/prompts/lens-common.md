@@ -7,6 +7,11 @@
 - `minor` — small correctness or clarity problem with limited impact.
 - `nit` — cosmetic.
 
+Documentation that the repository's rules require to be updated together with a
+behaviour change (customer docs; the rules name which docs those are) is `major`
+when the branch changes the behaviour and leaves the doc stale. Other internal
+docs (agent instructions, design notes) are `minor` when stale.
+
 Category is one of: `correctness`, `security`, `tenancy`, `tests`,
 `performance`, `style`, `docs`.
 

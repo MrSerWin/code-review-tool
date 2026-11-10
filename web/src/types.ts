@@ -152,6 +152,8 @@ export interface Observation {
   line: number | null;
   note: string;
   rationale: string | null;
+  /** `tool` for a deterministic tool check; absent from older servers. */
+  lens?: string | null;
   ord: number;
 }
 

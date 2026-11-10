@@ -211,8 +211,10 @@ export function createMcpServer({ api, env = process.env }: CreateServerOptions)
       'can_merge, summary, requirements met/total with the unmet ones, blocking_count, counts per severity, and ' +
       `findings (most severe first, capped at maxFindings, default ${DEFAULT_MAX_FINDINGS}; findings_omitted says ` +
       'how many were cut). Each finding has kind (diff | regression | stale_doc | consumer: a non-diff location is an ' +
-      'untouched site, and cause names the changed line behind it) and anchor_status (ok | off_diff | missing_path | ' +
-      'line_out_of_range | unverified). status is queued | fetching | reviewing | done | failed | cancelled; "error" explains ' +
+      'untouched site, and cause names the changed line behind it), anchor_status (ok | off_diff | missing_path | ' +
+      'line_out_of_range | unverified), and lens (the lens it came from; "tool" for a deterministic tool check, ' +
+      'such as a migration number collision, that the model cannot drop). status is queued | fetching | reviewing | ' +
+      'done | failed | cancelled; "error" explains ' +
       'a failure, "progress" is the latest log line while it runs. get_report returns the full Markdown report.',
     inputSchema: {
       id: idSchema,

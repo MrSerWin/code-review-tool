@@ -473,6 +473,10 @@ async function finishCheckout(
   const baseSha = (
     await inRepo(['git', 'merge-base', `refs/remotes/origin/${target.baseBranch}`, 'HEAD'])
   ).stdout.trim();
+  // The base tip as fetched; its objects stay in the checkout after the remote goes (tool checks read it).
+  const baseTipSha = (
+    await inRepo(['git', 'rev-parse', `refs/remotes/origin/${target.baseBranch}^{commit}`])
+  ).stdout.trim();
 
   // -z keeps paths verbatim (no quoting, no `{a => b}` rename form); -M
   // resolves a rename to its new path and keeps the old one beside it.
@@ -510,6 +514,7 @@ async function finishCheckout(
     dir: hostDir,
     headSha,
     baseSha,
+    baseTipSha,
     filesChanged: changedFiles.length,
     additions,
     deletions,

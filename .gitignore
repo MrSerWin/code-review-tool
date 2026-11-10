@@ -6,3 +6,6 @@ web/dist
 .DS_Store
 # Real preview recipes are product-specific and stay out of this repo.
 recipes/
+
+# Real repository rules and tool-check configs are product-specific.
+rules/
