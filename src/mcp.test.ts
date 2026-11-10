@@ -1111,3 +1111,53 @@ test('stdio MCP server: guard inside a reviewer, and an unreachable API', { time
     await client.close();
   }
 });
+
+test('stdio MCP server: a model the reviewer does not list is a tool error naming the available ids', { timeout: 60_000 }, async () => {
+  const refusal = 'Model "gpt-5.5" is not available for OpenAI Codex. Available: gpt-6.1-sol, gpt-5.6-sol.';
+  const hint = 'Codex has no model list yet: run `codex login` or `codex` once, then retry';
+  const seen: string[] = [];
+  const server = http.createServer((req, res) => {
+    let raw = '';
+    req.on('data', (chunk) => { raw += chunk; });
+    req.on('end', () => {
+      const body = JSON.parse(raw || '{}') as { model?: string };
+      seen.push(`${req.method} ${req.url} ${body.model ?? ''}`.trim());
+      res.writeHead(req.method === 'GET' ? 200 : 400, { 'Content-Type': 'application/json' });
+      if (req.method === 'GET' && req.url === '/api/reviewers') {
+        res.end(JSON.stringify({
+          defaultReviewer: 'codex',
+          reviewers: [{ name: 'codex', label: 'OpenAI Codex', defaultModel: null, bin: 'codex', available: true, models: [], noModelsHint: hint }],
+        }));
+        return;
+      }
+      res.end(JSON.stringify({ error: body.model ? refusal : hint }));
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  const client = await connect({ CODE_REVIEW_API_URL: url });
+  try {
+    const reviewers = json(await client.callTool({ name: 'list_reviewers', arguments: {} }));
+    assert.equal(reviewers.reviewers[0].default_model, null);
+    assert.equal(reviewers.reviewers[0].no_models, hint);
+
+    for (const [name, args] of [
+      ['start_review', { input: 'ABC-123', reviewer: 'codex', model: 'gpt-5.5' }],
+      ['start_ticket_review', { ticket: 'ABC-123', reviewer: 'codex', model: 'gpt-5.5' }],
+      ['rerun_review', { id: 4, reviewer: 'codex', model: 'gpt-5.5' }],
+    ] as const) {
+      const result = await client.callTool({ name, arguments: args });
+      assert.equal(result.isError, true, name);
+      assert.equal(text(result), `code-review-tool API error (HTTP 400): ${refusal}`, name);
+    }
+    const noList = await client.callTool({ name: 'start_review', arguments: { input: 'ABC-123', reviewer: 'codex' } });
+    assert.equal(noList.isError, true);
+    assert.match(text(noList), /Codex has no model list yet/);
+    assert.deepEqual(seen.filter((s) => s.startsWith('POST')), [
+      'POST /api/reviews gpt-5.5', 'POST /api/tickets/ABC-123/review gpt-5.5', 'POST /api/reviews/4/rerun gpt-5.5', 'POST /api/reviews',
+    ]);
+  } finally {
+    await client.close();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});

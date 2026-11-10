@@ -54,13 +54,13 @@ export const cursorReviewer: ReviewerDefinition = {
     ];
   },
   parseStreamLine: parseAnthropicStreamLine,
-  listModels: () =>
+  listModels: (opts) =>
     cachedModels('cursor', async () => {
       if (!isBinOnPath(config.cursorBin)) return CURSOR_FALLBACK_MODELS;
       const out = await runCli(config.cursorBin, ['--list-models'], cursorReviewer.buildChildEnv());
       const models = parseCursorModels(out.stdout);
       return models.length > 0 ? models : CURSOR_FALLBACK_MODELS;
-    }),
+    }, opts?.refresh),
   isAvailable: () => isBinOnPath(config.cursorBin),
   describeFailure(stderrTail: string): string | null {
     const refusal = /ActionRequiredError:\s*(.*)/.exec(stderrTail);

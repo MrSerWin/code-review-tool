@@ -17,6 +17,7 @@ import {
   VerdictBadge,
   fmtTime,
 } from '../components/ui';
+import { noModelsNotice } from '../modelChoice';
 import { Link, navigate } from '../router';
 import { openTicketLabel, openTicketTitle } from '../tickets';
 import type {
@@ -250,6 +251,7 @@ function TicketActions({
   }, []);
 
   const info = reviewers.find((r) => r.name === reviewer);
+  const modelNotice = noModelsNotice(info);
   return (
     <Card title="Review this ticket">
       <p className="muted ticket-hint">
@@ -289,7 +291,8 @@ function TicketActions({
                 mono
                 value={model}
                 list={`ticket-models-${reviewer}`}
-                placeholder={info?.defaultModel ?? 'model'}
+                placeholder={modelNotice ? 'no models available' : info?.defaultModel ?? 'model'}
+                title={modelNotice ?? undefined}
                 onChange={(e) => setModel(e.target.value)}
               />
               <datalist id={`ticket-models-${reviewer}`}>
@@ -302,7 +305,7 @@ function TicketActions({
             </Field>
           </>
         )}
-        <Button variant="primary" type="submit" disabled={busy} title={`Review every branch of ${ticketKey}`}>
+        <Button variant="primary" type="submit" disabled={busy || Boolean(modelNotice)} title={modelNotice ?? `Review every branch of ${ticketKey}`}>
           Review ticket
         </Button>
         {canPreview && (

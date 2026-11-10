@@ -54,18 +54,18 @@ test('cursor reviewer runs in plan mode with sandbox', () => {
 });
 
 test('codex reviewer runs read-only, with the prompt last', () => {
-  const args = codexReviewer.buildArgs('review this', 'gpt-5.5', '/tmp/checkout');
+  const args = codexReviewer.buildArgs('review this', 'gpt-6.1-sol', '/tmp/checkout');
   assert.equal(args[0], 'exec');
   assert.ok(args.includes('--json'));
   assert.equal(args[args.indexOf('-s') + 1], 'read-only');
   assert.ok(args.includes('--skip-git-repo-check'));
   assert.equal(args[args.indexOf('-C') + 1], '/tmp/checkout');
-  assert.equal(args[args.indexOf('-m') + 1], 'gpt-5.5');
+  assert.equal(args[args.indexOf('-m') + 1], 'gpt-6.1-sol');
   assert.equal(args.at(-1), 'review this');
 });
 
 test('codex reviewer skips the user config and with it every MCP server', () => {
-  const args = codexReviewer.buildArgs('review this', 'gpt-5.5', '/tmp/checkout');
+  const args = codexReviewer.buildArgs('review this', 'gpt-6.1-sol', '/tmp/checkout');
   assert.ok(args.includes('--ignore-user-config'));
   // An option after the prompt would be read as part of it.
   assert.ok(args.indexOf('--ignore-user-config') < args.length - 1);
@@ -308,31 +308,15 @@ test('config and routes derive their reviewer enum from REVIEWER_NAMES', () => {
 
 // --- re-run choice -------------------------------------------------------
 
-test('re-run with no override keeps the previous reviewer and model', () => {
-  const choice = resolveRerunChoice({ reviewer: 'claude', model: 'haiku' });
+test('re-run with no override keeps the previous reviewer and model', async () => {
+  const choice = await resolveRerunChoice({ reviewer: 'claude', model: 'haiku' });
   assert.equal(choice.reviewer.name, 'claude');
   assert.equal(choice.model, 'haiku');
 });
 
-test('re-run on another reviewer drops the previous model for its default', () => {
-  const choice = resolveRerunChoice({ reviewer: 'claude', model: 'opus' }, { reviewer: 'codex' });
-  assert.equal(choice.reviewer.name, 'codex');
-  assert.equal(choice.model, codexReviewer.defaultModel);
-});
-
-test('re-run with an explicit model uses it, with or without a reviewer switch', () => {
-  assert.equal(resolveRerunChoice({ reviewer: 'claude', model: 'opus' }, { model: 'sonnet' }).model, 'sonnet');
-  const switched = resolveRerunChoice({ reviewer: 'claude', model: 'opus' }, { reviewer: 'grok', model: 'grok-x' });
-  assert.equal(switched.reviewer.name, 'grok');
-  assert.equal(switched.model, 'grok-x');
-});
-
-test('re-run naming the same reviewer keeps the previous model', () => {
-  const choice = resolveRerunChoice({ reviewer: 'cursor', model: 'gpt-5' }, { reviewer: 'cursor' });
-  assert.equal(choice.model, 'gpt-5');
-});
-
-test('re-run of a row without a stored model falls back to the default model', () => {
-  const choice = resolveRerunChoice({ reviewer: 'codex', model: null });
-  assert.equal(choice.model, codexReviewer.defaultModel);
+test('re-run with an explicit model uses it, with or without a reviewer switch', async () => {
+  assert.equal((await resolveRerunChoice({ reviewer: 'claude', model: 'opus' }, { model: 'sonnet' })).model, 'sonnet');
+  const switched = await resolveRerunChoice({ reviewer: 'cursor', model: 'auto' }, { reviewer: 'claude', model: 'claude-opus-x' });
+  assert.equal(switched.reviewer.name, 'claude');
+  assert.equal(switched.model, 'claude-opus-x');
 });

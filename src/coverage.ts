@@ -23,7 +23,7 @@ import {
   renderBranchCoverageSection, sanitizeSegment, updateReportCoverage, writeCoverageReport,
   type CoverageForReport, type CoverageReportBranch,
 } from './reportWriter.js';
-import { getReviewer } from './reviewers/index.js';
+import { chooseModel, getReviewer } from './reviewers/index.js';
 import type { ReviewerDefinition } from './reviewers/types.js';
 import { loadPromptFile, renderChecklist, renderTemplate, requirementLabel, runPass, type ChecklistItem } from './reviewRunner.js';
 import { activeChecklist } from './ticketRequirements.js';
@@ -31,7 +31,7 @@ import { orderChains } from './ticketChains.js';
 import { groupHeads } from './ticketGroups.js';
 import {
   closeTicketRuns, createCoverage, finishCoverage, getCoverage, getTicketGroup, listTicketBranches, parseIds,
-  syncMembersFromReviews,
+  setCoverageModel, syncMembersFromReviews,
 } from './ticketStore.js';
 import type {
   AnchorStatus, ContractIssue, CoverageBranch, CoverageEvidence, CoverageRequirement, CoverageStatus, OnLog, RequirementRow,
@@ -432,8 +432,9 @@ export async function runCoverage(key: string, opts: CoverageRunOptions = {}): P
   } catch {
     reviewer = getReviewer(undefined);
   }
-  const model = opts.model
-    ?? (lastReview?.reviewer === reviewer.name && lastReview.model ? lastReview.model : reviewer.defaultModel);
+  const inheritedModel = lastReview?.reviewer === reviewer.name ? lastReview.model : null;
+  // Provisional, so the row exists before the first await; checked against the reviewer's list below.
+  let model = opts.model ?? inheritedModel ?? reviewer.defaultModel;
   const row = createCoverage(key, {
     reviewIds: reviewed.map((b) => b.review!.id),
     reviewer: reviewer.name,
@@ -460,6 +461,15 @@ export async function runCoverage(key: string, opts: CoverageRunOptions = {}): P
 
   const workDir = path.join(config.DATA_DIR, 'coverage', sanitizeSegment(key), String(row.id));
   try {
+    if (!opts.reviewerDefinition) {
+      const chosen = await chooseModel(reviewer, {
+        requested: opts.model, inherited: inheritedModel, onFallback: (message) => log('warn', message),
+      });
+      if (chosen !== model) {
+        model = chosen;
+        setCoverageModel(row.id, model);
+      }
+    }
     fs.mkdirSync(workDir, { recursive: true });
     log('info', `started with ${reviewed.length} of ${inputs.branches.length} branch(es) reviewed, ${reviewer.label} (${model})`);
     await attachContractHunks(inputs.branches, opts.contractDiff ? { run: opts.contractDiff } : {});
