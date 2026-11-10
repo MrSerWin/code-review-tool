@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { parseAnthropicStreamLine } from './reviewers/anthropicStream.js';
-import { claudeReviewer, CLAUDE_MODELS } from './reviewers/claude.js';
+import { claudeReviewer } from './reviewers/claude.js';
 import { codexReviewer, parseCodexModelsCache } from './reviewers/codex.js';
 import { parseCodexStreamLine } from './reviewers/codexStream.js';
 import { cursorReviewer, parseCursorModels } from './reviewers/cursor.js';
@@ -256,10 +256,6 @@ test('codex model cache parser keeps listed models, ordered by priority', () => 
     { id: 'gpt-5.5', label: 'GPT-5.5' },
   ]);
   assert.deepEqual(parseCodexModelsCache('not json'), []);
-});
-
-test('claude offers a static model list', async () => {
-  assert.deepEqual(await claudeReviewer.listModels(), CLAUDE_MODELS);
 });
 
 // --- failures -----------------------------------------------------------

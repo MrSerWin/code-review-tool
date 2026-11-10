@@ -34,14 +34,14 @@ test.after(() => {
 function reviewer(answer: unknown): ReviewerDefinition {
   const script = `printf '%s' "$1" > "$PROMPT_DIR/$$.txt"; printf '%s\\n' "$ANSWER"`;
   return {
-    name: 'claude', label: 'Fake reviewer', defaultModel: 'fake', bin: '/bin/sh',
+    name: 'claude', label: 'Fake reviewer', defaultModel: 'fake', defaultModelEnv: 'REVIEW_MODEL', bin: '/bin/sh',
     buildArgs: (prompt) => ['-c', script, 'sh', prompt],
     buildChildEnv: () => ({
       PATH: process.env.PATH, PROMPT_DIR: prompts,
       ANSWER: typeof answer === 'string' ? answer : JSON.stringify(answer),
     }),
     parseStreamLine: (line) => ({ result: line }),
-    listModels: async () => [],
+    discoverModels: async () => ({ models: [], source: null, fetchedAt: Date.now(), hint: null }),
     isAvailable: () => true,
     describeFailure: () => null,
   };

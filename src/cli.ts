@@ -42,7 +42,8 @@ Options:
   --model <name>   model for the chosen reviewer (default depends on reviewer)
   --list-models [reviewer]
                    list the reviewers, whether their CLI is installed, and the
-                   models each one offers, then exit
+                   models discovered from each CLI (or vendor API), with where
+                   each list came from, then exit
   --requirements <text>
                    review against these requirements instead of a ticket
   --working-tree   local inputs only: also review the clone's uncommitted and
@@ -283,8 +284,13 @@ async function printModels(only: string | null): Promise<number> {
     const isDefault = r.name === config.defaultReviewer ? ' (default reviewer)' : '';
     console.log(`${r.name} — ${r.label} [${r.bin}]${state}${isDefault}`);
     console.log(`  default model: ${r.defaultModel ?? '(none)'}`);
-    if (r.models.length === 0) console.log(`  models: (none reported)${r.noModelsHint ? `. ${r.noModelsHint}` : ''}`);
-    else for (const m of r.models) console.log(`    ${m.id}${m.label && m.label !== m.id ? ` — ${m.label}` : ''}`);
+    if (r.models.length === 0) {
+      console.log(`  models: (none found)${r.noModelsHint ? `. ${r.noModelsHint}` : ''}`);
+    } else {
+      console.log(`  models (from ${r.source ?? 'unknown'}, ${r.fetchedAt}):`);
+      for (const m of r.models) console.log(`    ${m.id}${m.label && m.label !== m.id ? ` - ${m.label}` : ''}`);
+    }
+    if (r.acceptsUnlistedModels) console.log('  a full model name that is not listed is accepted too');
     console.log('');
   }
   return 0;

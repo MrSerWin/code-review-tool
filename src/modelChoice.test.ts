@@ -7,13 +7,13 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { config } from './config.js';
 import {
-  codexModelsCachePath, codexNoModelsMessage, codexReviewer, parseCodexModelsCache, pickCodexDefault,
+  codexModelsCachePath, codexNoModelsMessage, codexReviewer, discoverCodexModels, parseCodexModelsCache,
 } from './reviewers/codex.js';
+import { clearDiscoveryCache, pickDefaultModel } from './reviewers/discovery.js';
 import {
   assertModelAvailable, chooseModel, listReviewersWithModels, ModelChoiceError, resolveDefaultModel,
-  resolveRerunChoice, resolveStartChoice, setReviewerForTests,
+  resolveRerunChoice, resolveStartChoice, reviewerModels, setReviewerForTests,
 } from './reviewers/index.js';
-import { clearModelCache } from './reviewers/shared.js';
 import type { ModelInfo, ReviewerDefinition } from './reviewers/types.js';
 
 const FIXTURE = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'codex-models-cache.json');
@@ -29,7 +29,7 @@ test.after(() => {
   if (savedHome === undefined) delete process.env.CODEX_HOME;
   else process.env.CODEX_HOME = savedHome;
   fs.rmSync(home, { recursive: true, force: true });
-  clearModelCache();
+  clearDiscoveryCache();
 });
 
 function writeCache(text: string | null): void {
@@ -37,23 +37,22 @@ function writeCache(text: string | null): void {
   else fs.writeFileSync(codexModelsCachePath(), text);
 }
 
-/** A reviewer whose model list the test controls; `calls` counts list reads, refreshes apart. */
+/** A reviewer whose model list the test controls; `calls.discovered` counts discoveries. */
 function stubReviewer(models: () => ModelInfo[], extra: Partial<ReviewerDefinition> = {}) {
-  const calls = { cached: 0, refresh: 0 };
-  let cached: ModelInfo[] | null = null;
+  const calls = { discovered: 0 };
   const reviewer: ReviewerDefinition = {
-    name: 'codex', label: 'OpenAI Codex', defaultModel: '', bin: '/bin/true',
+    name: 'codex', label: 'OpenAI Codex', defaultModel: '', defaultModelEnv: 'CODEX_REVIEW_MODEL', bin: '/bin/true',
     buildArgs: () => [], buildChildEnv: () => ({}), parseStreamLine: () => ({}),
-    listModels: async (opts) => {
-      if (opts?.refresh || cached === null) {
-        if (opts?.refresh) calls.refresh += 1;
-        cached = models();
-      }
-      calls.cached += 1;
-      return cached;
+    discoverModels: async () => {
+      calls.discovered += 1;
+      const list = models();
+      return {
+        models: list,
+        source: list.length ? 'cli-cache' : null,
+        fetchedAt: Date.now(),
+        hint: list.length ? null : codexNoModelsMessage('codex'),
+      };
     },
-    resolveDefaultModel: async () => (await reviewer.listModels())[0]?.id ?? null,
-    noModelsMessage: () => codexNoModelsMessage('codex'),
     isAvailable: () => true,
     describeFailure: () => null,
     ...extra,
@@ -75,49 +74,70 @@ test('the real cache shape: listed models only, by priority, hidden ones dropped
 
 test('codex lists nothing without a cache file, and no invented fallback model', async () => {
   writeCache(null);
-  clearModelCache();
-  assert.deepEqual(await codexReviewer.listModels(), []);
+  const discovery = await discoverCodexModels(() => true);
+  assert.deepEqual(discovery.models, []);
+  assert.equal(discovery.source, null);
+  assert.equal(discovery.hint, codexNoModelsMessage());
   assert.equal(codexReviewer.defaultModel, config.codexReviewModel ?? '');
 });
 
-test('codex reads the cache file and re-reads it on refresh', async () => {
+test('codex without its CLI says it is not installed', async () => {
   writeCache(null);
-  clearModelCache();
-  assert.deepEqual(await codexReviewer.listModels(), []);
+  const discovery = await discoverCodexModels(() => false);
+  assert.match(discovery.hint ?? '', /^OpenAI Codex is not installed: codex not found on PATH/);
+});
+
+test('codex reads the cache file as cli-cache and re-reads it on refresh', async () => {
+  writeCache(null);
+  clearDiscoveryCache();
+  assert.deepEqual((await reviewerModels(codexReviewer)).models, []);
   writeCache(fs.readFileSync(FIXTURE, 'utf8'));
   // The in-process cache still answers with the old (empty) list.
-  assert.deepEqual(await codexReviewer.listModels(), []);
-  assert.deepEqual((await codexReviewer.listModels({ refresh: true })).map((m) => m.id), LISTED);
+  assert.deepEqual((await reviewerModels(codexReviewer)).models, []);
+  const fresh = await reviewerModels(codexReviewer, { refresh: true });
+  assert.deepEqual(fresh.models.map((m) => m.id), LISTED);
+  assert.equal(fresh.source, 'cli-cache');
+  assert.equal(fresh.hint, null);
 });
 
 // --- default resolution --------------------------------------------------
 
-test('default: CODEX_REVIEW_MODEL wins when it is listed', () => {
+const CODEX = { label: 'OpenAI Codex', envName: 'CODEX_REVIEW_MODEL' };
+
+test('default: the configured model wins when it is listed', () => {
   const warnings: string[] = [];
-  assert.equal(pickCodexDefault(ids(LISTED), 'gpt-5.6-sol', (m) => warnings.push(m)), 'gpt-5.6-sol');
+  assert.equal(pickDefaultModel(ids(LISTED), 'gpt-5.6-sol', CODEX, (m) => warnings.push(m)), 'gpt-5.6-sol');
   assert.deepEqual(warnings, []);
 });
 
-test('default: CODEX_REVIEW_MODEL that is not listed is ignored with a warning', () => {
+test('default: a configured model that is not listed is ignored with a warning', () => {
   const warnings: string[] = [];
-  assert.equal(pickCodexDefault(ids(LISTED), 'gpt-5.5', (m) => warnings.push(m)), 'gpt-6.1-sol');
+  assert.equal(pickDefaultModel(ids(LISTED), 'gpt-5.5', CODEX, (m) => warnings.push(m)), 'gpt-6.1-sol');
   assert.equal(warnings.length, 1);
-  assert.match(warnings[0]!, /CODEX_REVIEW_MODEL=gpt-5\.5 is not in the Codex model list/);
+  assert.match(warnings[0]!, /CODEX_REVIEW_MODEL=gpt-5\.5 is not in the OpenAI Codex model list/);
 });
 
-test('default: without CODEX_REVIEW_MODEL the first listed model', () => {
-  assert.equal(pickCodexDefault(ids(LISTED), undefined), 'gpt-6.1-sol');
-  assert.equal(pickCodexDefault(ids(LISTED), '  '), 'gpt-6.1-sol');
+test('default: without a configured model the first listed model', () => {
+  assert.equal(pickDefaultModel(ids(LISTED), undefined, CODEX), 'gpt-6.1-sol');
+  assert.equal(pickDefaultModel(ids(LISTED), '  ', CODEX), 'gpt-6.1-sol');
 });
 
-test('default: an empty cache has no default, whatever is configured', () => {
-  assert.equal(pickCodexDefault([], undefined), null);
-  assert.equal(pickCodexDefault([], 'gpt-6.1-sol'), null);
+test('default: an empty list has no default, whatever is configured', () => {
+  assert.equal(pickDefaultModel([], undefined, CODEX), null);
+  assert.equal(pickDefaultModel([], 'gpt-6.1-sol', CODEX), null);
+});
+
+test('default: a reviewer that takes unlisted ids keeps the configured one', () => {
+  const claude = { label: 'Claude Code', envName: 'REVIEW_MODEL', acceptsUnlisted: true };
+  assert.equal(pickDefaultModel(ids(['latest']), 'some-full-name', claude), 'some-full-name');
+  assert.equal(pickDefaultModel([], 'some-full-name', claude), 'some-full-name');
+  assert.equal(pickDefaultModel(ids(['latest']), undefined, claude), 'latest');
+  assert.equal(pickDefaultModel([], undefined, claude), null);
 });
 
 test('codex resolves its default from the cache file, re-reading an empty list once', { skip: Boolean(config.codexReviewModel) }, async () => {
   writeCache(null);
-  clearModelCache();
+  clearDiscoveryCache();
   assert.equal(await resolveDefaultModel(codexReviewer), null);
   writeCache(fs.readFileSync(FIXTURE, 'utf8'));
   // The cached empty list is not trusted: the file is read again.
@@ -134,7 +154,7 @@ test('a requested model the list lacks is refused, naming the available ids', as
     return true;
   });
   // The miss re-read the list once before deciding.
-  assert.equal(calls.refresh, 1);
+  assert.equal(calls.discovered, 2);
   assert.equal(await chooseModel(reviewer, { requested: 'gpt-5.6-sol' }), 'gpt-5.6-sol');
 });
 
@@ -144,7 +164,7 @@ test('a miss that the refreshed list knows is accepted', async () => {
   assert.equal(await chooseModel(reviewer, {}), 'gpt-6.1-sol');
   list = ['gpt-6.1-sol', 'gpt-7-sol'];
   assert.equal(await chooseModel(reviewer, { requested: 'gpt-7-sol' }), 'gpt-7-sol');
-  assert.equal(calls.refresh, 1);
+  assert.equal(calls.discovered, 2);
 });
 
 test('no model list: no default, and every choice fails with the login hint', async () => {
@@ -195,11 +215,21 @@ test('/api/reviewers payload: resolved default, or null with a hint when nothing
     assert.equal(codex.defaultModel, null);
     assert.deepEqual(codex.models, []);
     assert.equal(codex.noModelsHint, 'Codex has no model list yet: run `codex login` or `codex` once, then retry');
-    const claude = (await listReviewersWithModels()).find((r) => r.name === 'claude')!;
-    assert.equal(claude.acceptsUnlistedModels, true);
-    assert.equal(claude.noModelsHint, null);
+    assert.equal(codex.source, null);
+    assert.ok(!Number.isNaN(Date.parse(codex.fetchedAt)));
   } finally {
     setReviewerForTests('codex', null);
+  }
+  const claude = stubReviewer(() => [], { name: 'claude', label: 'Claude Code', acceptsUnlistedModels: true });
+  setReviewerForTests('claude', claude.reviewer);
+  try {
+    // Nothing discovered: free-form names are still accepted, but the hint says how to get a list.
+    const detail = (await listReviewersWithModels()).find((r) => r.name === 'claude')!;
+    assert.equal(detail.acceptsUnlistedModels, true);
+    assert.equal(detail.defaultModel, null);
+    assert.match(detail.noModelsHint ?? '', /no model list yet/);
+  } finally {
+    setReviewerForTests('claude', null);
   }
   const listed = stubReviewer(() => ids(['gpt-6.1-sol']));
   setReviewerForTests('codex', listed.reviewer);
@@ -207,6 +237,11 @@ test('/api/reviewers payload: resolved default, or null with a hint when nothing
     const codex = (await listReviewersWithModels()).find((r) => r.name === 'codex')!;
     assert.equal(codex.defaultModel, 'gpt-6.1-sol');
     assert.equal(codex.noModelsHint, null);
+    assert.equal(codex.source, 'cli-cache');
+    // `refresh` discovers again even inside the cache window.
+    const before = listed.calls.discovered;
+    await listReviewersWithModels({ refresh: true });
+    assert.equal(listed.calls.discovered, before + 1);
   } finally {
     setReviewerForTests('codex', null);
   }

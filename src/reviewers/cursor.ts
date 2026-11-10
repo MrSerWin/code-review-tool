@@ -1,15 +1,10 @@
 import { config } from '../config.js';
 import { parseAnthropicStreamLine } from './anthropicStream.js';
 import {
-  buildBaseChildEnv, cachedModels, dedupeModels, describeAuthFailure, firstLine,
-  isBinOnPath, runCli,
+  buildBaseChildEnv, dedupeModels, describeAuthFailure, discoverFromCliCommand, firstLine,
+  isBinOnPath, type CliRunner,
 } from './shared.js';
-import type { ModelInfo, ReviewerDefinition } from './types.js';
-
-/** Used when `cursor-agent --list-models` cannot be reached. */
-export const CURSOR_FALLBACK_MODELS: ModelInfo[] = [
-  { id: 'auto', label: 'Auto (default)' },
-];
+import type { ModelDiscovery, ModelInfo, ReviewerDefinition } from './types.js';
 
 /**
  * Parse `cursor-agent --list-models`: a header, then one `id - Label` line per
@@ -22,15 +17,33 @@ export function parseCursorModels(text: string): ModelInfo[] {
     if (!line) continue;
     const match = /^([A-Za-z0-9][A-Za-z0-9._-]*)\s+-\s+(.+)$/.exec(line);
     if (!match) continue;
-    models.push({ id: match[1]!, label: match[2]!.trim() });
+    const model = { id: match[1]!, label: match[2]!.trim() };
+    // The CLI marks its own default in the label; it goes first, so it is ours too.
+    if (/\bdefault\b/i.test(model.label)) models.unshift(model);
+    else models.push(model);
   }
   return dedupeModels(models);
+}
+
+/** `cursor-agent --list-models`; nothing listed is an empty list with a hint, never a guess. */
+export function discoverCursorModels(run?: CliRunner, installed?: (bin: string) => boolean): Promise<ModelDiscovery> {
+  return discoverFromCliCommand({
+    label: 'Cursor Agent',
+    bin: config.cursorBin,
+    args: ['--list-models'],
+    env: cursorReviewer.buildChildEnv(),
+    parse: parseCursorModels,
+    login: `run \`${config.cursorBin} login\` or set CURSOR_API_KEY`,
+    run,
+    installed,
+  });
 }
 
 export const cursorReviewer: ReviewerDefinition = {
   name: 'cursor',
   label: 'Cursor Agent',
-  defaultModel: config.cursorReviewModel,
+  defaultModel: config.cursorReviewModel ?? '',
+  defaultModelEnv: 'CURSOR_REVIEW_MODEL',
   bin: config.cursorBin,
   buildChildEnv: () => {
     const extra: Record<string, string> = {};
@@ -54,13 +67,7 @@ export const cursorReviewer: ReviewerDefinition = {
     ];
   },
   parseStreamLine: parseAnthropicStreamLine,
-  listModels: (opts) =>
-    cachedModels('cursor', async () => {
-      if (!isBinOnPath(config.cursorBin)) return CURSOR_FALLBACK_MODELS;
-      const out = await runCli(config.cursorBin, ['--list-models'], cursorReviewer.buildChildEnv());
-      const models = parseCursorModels(out.stdout);
-      return models.length > 0 ? models : CURSOR_FALLBACK_MODELS;
-    }, opts?.refresh),
+  discoverModels: () => discoverCursorModels(),
   isAvailable: () => isBinOnPath(config.cursorBin),
   describeFailure(stderrTail: string): string | null {
     const refusal = /ActionRequiredError:\s*(.*)/.exec(stderrTail);

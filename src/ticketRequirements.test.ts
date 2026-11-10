@@ -51,7 +51,7 @@ case "$1" in
 esac
 `;
   return {
-    name: 'claude', label: 'Fake reviewer', defaultModel: 'fake', bin: '/bin/sh',
+    name: 'claude', label: 'Fake reviewer', defaultModel: 'fake', defaultModelEnv: 'REVIEW_MODEL', bin: '/bin/sh',
     buildArgs: (prompt) => ['-c', script, 'sh', prompt],
     buildChildEnv: () => ({
       PATH: process.env.PATH, PROMPT_DIR: prompts,
@@ -60,7 +60,7 @@ esac
       COVERAGE_JSON: JSON.stringify(answers.coverage ?? {}),
     }),
     parseStreamLine: (line) => ({ result: line }),
-    listModels: async () => [],
+    discoverModels: async () => ({ models: [], source: null, fetchedAt: Date.now(), hint: null }),
     isAvailable: () => true,
     describeFailure: () => null,
   };
