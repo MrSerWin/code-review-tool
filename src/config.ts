@@ -78,7 +78,8 @@ const schema = z.object({
   CURSOR_REVIEW_MODEL: z.string().min(1).default('auto'),
   CURSOR_API_KEY: optionalSecret,
   CODEX_BIN: z.string().min(1).default('codex'),
-  CODEX_REVIEW_MODEL: z.string().min(1).default('gpt-5.5'),
+  // Picks one model of the Codex CLI's model cache; unset, the cache's first listed model is the default.
+  CODEX_REVIEW_MODEL: optionalSecret,
   GROK_BIN: z.string().min(1).default('grok'),
   GROK_REVIEW_MODEL: z.string().min(1).default('grok-4.7'),
   REVIEW_TIMEOUT_MS: z.coerce.number().int().positive().default(1_800_000),

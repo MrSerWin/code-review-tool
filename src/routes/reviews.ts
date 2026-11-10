@@ -7,6 +7,7 @@ import {
   getReviewer,
   notInstalledMessage,
   resolveRerunChoice,
+  resolveStartChoice,
   REVIEWER_NAMES,
 } from '../reviewers/index.js';
 import {
@@ -86,6 +87,10 @@ const groupsQuery = z.object({
   offset: z.coerce.number().int().min(0).optional(),
 });
 
+/**
+ * Queue one review. `model` must already be checked against the reviewer's
+ * list (resolveStartChoice / resolveRerunChoice); absent, the static default.
+ */
 export function startRun(
   target: ResolvedTarget,
   ticket: TicketInfo | null,
@@ -131,7 +136,18 @@ export async function reviewRoutes(app: FastifyInstance): Promise<void> {
   app.post('/api/reviews', async (req, reply) => {
     const parsed = createBody.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Invalid request body' });
-    const { input, targets, reviewer, model, requirementsText, includeWorkingTree, baseBranch } = parsed.data;
+    const { input, targets, requirementsText, includeWorkingTree, baseBranch } = parsed.data;
+
+    // The model is checked before anything is resolved or queued.
+    let reviewer: string;
+    let model: string;
+    try {
+      const choice = await resolveStartChoice(parsed.data.reviewer, parsed.data.model);
+      reviewer = choice.reviewer.name;
+      model = choice.model;
+    } catch (err) {
+      return reply.code(400).send({ error: (err as Error).message });
+    }
 
     let ticket: TicketInfo | null = null;
     let chosen: ResolvedTarget[];
@@ -286,7 +302,7 @@ export async function reviewRoutes(app: FastifyInstance): Promise<void> {
 
     let review: ReviewRow;
     try {
-      const choice = resolveRerunChoice(prev, body.data);
+      const choice = await resolveRerunChoice(prev, body.data);
       let target: ResolvedTarget = {
         repo: prev.repo,
         branch: prev.branch,

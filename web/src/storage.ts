@@ -14,3 +14,11 @@ export function writeStored(key: string, value: string): void {
     /* storage unavailable — remembering is a convenience, not a requirement */
   }
 }
+
+export function removeStored(key: string): void {
+  try {
+    window.localStorage.removeItem(key);
+  } catch {
+    /* storage unavailable */
+  }
+}

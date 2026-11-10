@@ -146,13 +146,14 @@ export function runCli(
 const MODEL_CACHE_TTL_MS = 10 * 60_000;
 const modelCache = new Map<string, { at: number; models: ModelInfo[] }>();
 
-/** Remember one reviewer's model list for ten minutes. */
+/** Remember one reviewer's model list for ten minutes; `refresh` loads it again now. */
 export async function cachedModels(
   key: string,
   load: () => Promise<ModelInfo[]>,
+  refresh = false,
 ): Promise<ModelInfo[]> {
   const hit = modelCache.get(key);
-  if (hit && Date.now() - hit.at < MODEL_CACHE_TTL_MS) return hit.models;
+  if (!refresh && hit && Date.now() - hit.at < MODEL_CACHE_TTL_MS) return hit.models;
   let models: ModelInfo[];
   try {
     models = await load();

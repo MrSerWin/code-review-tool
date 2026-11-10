@@ -4,7 +4,7 @@ import * as db from './db.js';
 import { enqueueReview, recoverInterrupted, stopAllReviews } from './queue.js';
 import { killAllReviewersNow } from './reviewRunner.js';
 import {
-  getReviewer, listReviewersWithModels, notInstalledMessage, REVIEWER_NAMES,
+  chooseModel, getReviewer, listReviewersWithModels, notInstalledMessage, REVIEWER_NAMES,
 } from './reviewers/index.js';
 import { resolveTargets } from './resolver.js';
 import type { ResolvedTarget, TicketInfo } from './types.js';
@@ -144,6 +144,14 @@ async function main(): Promise<number> {
     return 2;
   }
 
+  let model: string;
+  try {
+    model = await chooseModel(reviewer, { requested: args.model });
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    return 2;
+  }
+
   stopOnSignals();
 
   // The server may be running reviews in the same database right now. Only
@@ -196,7 +204,7 @@ async function main(): Promise<number> {
       working_tree: target.source === 'local' && target.includeWorkingTree ? 1 : 0,
       base_reason: target.source === 'local' ? target.baseReason ?? null : null,
       reviewer: reviewer.name,
-      model: args.model ?? reviewer.defaultModel,
+      model,
     });
     ids.push(review.id);
     enqueueReview(review.id);
@@ -274,8 +282,8 @@ async function printModels(only: string | null): Promise<number> {
     const state = r.available ? '' : ' — not installed';
     const isDefault = r.name === config.defaultReviewer ? ' (default reviewer)' : '';
     console.log(`${r.name} — ${r.label} [${r.bin}]${state}${isDefault}`);
-    console.log(`  default model: ${r.defaultModel}`);
-    if (r.models.length === 0) console.log('  models: (none reported)');
+    console.log(`  default model: ${r.defaultModel ?? '(none)'}`);
+    if (r.models.length === 0) console.log(`  models: (none reported)${r.noModelsHint ? `. ${r.noModelsHint}` : ''}`);
     else for (const m of r.models) console.log(`    ${m.id}${m.label && m.label !== m.id ? ` — ${m.label}` : ''}`);
     console.log('');
   }

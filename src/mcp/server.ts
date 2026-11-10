@@ -158,7 +158,7 @@ export function createMcpServer({ api, env = process.env }: CreateServerOptions)
       reviewer: z.enum(REVIEWER_NAMES).optional()
         .describe('Reviewer CLI (see list_reviewers). Default: the server default.'),
       model: z.string().min(1).max(64).optional()
-        .describe("Model id for that reviewer (see list_reviewers). Default: the reviewer's default model."),
+        .describe("Model id for that reviewer, one of its list_reviewers models (an unlisted id is refused). Default: the reviewer's default model."),
       baseBranch: z.string().min(1).max(255).optional()
         .describe('local: inputs only. Branch to diff against. Default: the detected parent (see detect_base).'),
       includeWorkingTree: z.boolean().optional()

@@ -124,7 +124,7 @@ truth for every default; `.env.example` lists each variable with its default.
 | `CURSOR_REVIEW_MODEL` | no | `auto` | Default model when the reviewer is Cursor |
 | `CURSOR_API_KEY` | no | — | Cursor API key handed to the Cursor CLI only (otherwise it uses its own login) |
 | `CODEX_BIN` | no | `codex` | Path to the OpenAI Codex CLI |
-| `CODEX_REVIEW_MODEL` | no | `gpt-5.5` | Default model when the reviewer is Codex |
+| `CODEX_REVIEW_MODEL` | no | first model in the Codex model cache | Picks the Codex default among the models in `$CODEX_HOME/models_cache.json`; an id the cache does not list is ignored with a warning |
 | `GROK_BIN` | no | `grok` | Path to the Grok CLI |
 | `GROK_REVIEW_MODEL` | no | `grok-4.7` | Default model when the reviewer is Grok |
 | `REVIEW_TIMEOUT_MS` | no | `1800000` | Hard timeout for one review process (each lens and the synthesis pass) |
@@ -176,10 +176,18 @@ reachable from a run (see [Use from other agents](#use-from-other-agents-mcp)).
 `GROK_REVIEW_MODEL`). The list is asked of the CLI where it can answer —
 `cursor-agent --list-models`, `grok models`, and Codex's own
 `$CODEX_HOME/models_cache.json` — and is a short static list for Claude Code
-(`opus`, `sonnet`, `haiku`), which has no such command. When a CLI cannot
-answer, a short built-in fallback list is shown. The lists are cached for ten
-minutes per process, and the model field always stays free text: any id the
-CLI accepts works, listed or not.
+(`opus`, `sonnet`, `haiku`), which has no such command. When Cursor or Grok
+cannot answer, a short built-in fallback list is shown. Codex has no fallback:
+its default model is the first one in the CLI's model cache, and
+`CODEX_REVIEW_MODEL` only picks another one of them. Until the CLI has written
+that cache (`codex login`, or one `codex` run), Codex has no models and a
+review with it is refused with that hint. The lists are cached for ten minutes
+per process. Every start (web, API, MCP, CLI, re-run, coverage and
+requirement passes started by hand) checks the model against the reviewer's
+list before anything is queued, re-reading the list once on a miss; an
+unlisted model is refused with the available ids. Claude Code is the
+exception: it also takes full model ids typed by hand. A model carried over
+from an earlier run that is no longer listed gives way to the default.
 
 From the terminal:
 
@@ -493,7 +501,9 @@ the requirements inferred from the change.
 ### The web UI
 
 - **Reviews** (`/`) — the launcher and the history. Pick **GitHub** or
-  **Local**, a reviewer, and a model (all three remembered per browser). A ticket key
+  **Local**, a reviewer, and a model (all three remembered per browser; a
+  remembered model the reviewer no longer lists is dropped for its current
+  default, and a reviewer with no models says so). A ticket key
   or issue link is resolved first (a link is named under the field as you
   paste it, e.g. "Linear ticket ABC-123"): the ticket, the tracker that
   answered, and every branch it found are shown with checkboxes, and **Start
@@ -547,7 +557,8 @@ reviewed as its own ticket groups under `my-org/my-service#12`.
 ticket (or pasted requirements), with the next run number. The reviewer and
 model default to the previous run's; pick another reviewer or model to override
 them. A model id belongs to one CLI, so switching the reviewer without naming a
-model uses that reviewer's default model. Every run of a branch hands the
+model uses that reviewer's default model, and so does a previous model the
+reviewer no longer lists. Every run of a branch hands the
 blocker and major findings of the branch's previous finished run to the
 reviewer, which reports whether each one is fixed.
 

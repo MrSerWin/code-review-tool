@@ -18,6 +18,7 @@ export const claudeReviewer: ReviewerDefinition = {
   name: 'claude',
   label: 'Claude Code',
   defaultModel: config.reviewModel,
+  acceptsUnlistedModels: true,
   bin: config.claudeBin,
   buildChildEnv: () => buildBaseChildEnv(),
   buildArgs(prompt: string, model: string, dir: string): string[] {

@@ -540,7 +540,8 @@ export function truncateReport(markdown: string, max: number, fullUrl: string): 
 interface ReviewerPayload {
   name: string;
   label: string;
-  defaultModel: string;
+  defaultModel: string | null;
+  noModelsHint?: string | null;
   available: boolean;
   models?: { id: string; label?: string }[];
 }
@@ -554,6 +555,7 @@ export function compactReviewers(payload: { reviewers: ReviewerPayload[]; defaul
       available: r.available,
       default_model: r.defaultModel,
       models: (r.models ?? []).slice(0, maxModels).map((m) => m.id),
+      ...(r.noModelsHint ? { no_models: r.noModelsHint } : {}),
     })),
   };
 }

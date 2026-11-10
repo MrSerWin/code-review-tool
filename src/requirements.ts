@@ -12,7 +12,7 @@ import { config } from './config.js';
 import { db } from './db.js';
 import { logger } from './logger.js';
 import { sanitizeSegment } from './reportWriter.js';
-import { getReviewer } from './reviewers/index.js';
+import { chooseModel, getReviewer } from './reviewers/index.js';
 import type { ReviewerDefinition } from './reviewers/types.js';
 import { loadPromptFile, renderTemplate, renderTicket, runPass } from './reviewRunner.js';
 import { activeChecklist, replaceDerivedRequirements } from './ticketRequirements.js';
@@ -96,21 +96,28 @@ export interface DeriveResult {
   model: string;
 }
 
-function pickReviewer(opts: DeriveOptions): { reviewer: ReviewerDefinition; model: string } {
+/**
+ * The reviewer and model of a derivation. The model is the caller's (a branch
+ * review's, carried over): used while the reviewer still offers it, else the
+ * reviewer's default. Throws when the reviewer has no model at all.
+ */
+async function pickReviewer(opts: DeriveOptions, onLog: OnLog): Promise<{ reviewer: ReviewerDefinition; model: string }> {
   let reviewer: ReviewerDefinition;
   try {
     reviewer = opts.reviewerDefinition ?? getReviewer(opts.reviewer ?? undefined);
   } catch {
     reviewer = getReviewer(undefined);
   }
-  const model = opts.model && (!opts.reviewer || opts.reviewer === reviewer.name) ? opts.model : reviewer.defaultModel;
+  const inherited = opts.model && (!opts.reviewer || opts.reviewer === reviewer.name) ? opts.model : null;
+  if (opts.reviewerDefinition) return { reviewer, model: inherited ?? reviewer.defaultModel };
+  const model = await chooseModel(reviewer, { inherited, onFallback: (message) => onLog('warn', message) });
   return { reviewer, model };
 }
 
 /** Derives the checklist now: derived items are replaced, user items stay. Throws when the pass fails. */
 export async function deriveTicketRequirements(key: string, opts: DeriveOptions = {}): Promise<DeriveResult> {
   const onLog = opts.onLog ?? (() => {});
-  const { reviewer, model } = pickReviewer(opts);
+  const { reviewer, model } = await pickReviewer(opts, onLog);
   const ticket = opts.ticket !== undefined && opts.ticket !== null
     ? opts.ticket
     : await (opts.fetchTicket ?? ticketForDerivation)(key, onLog);

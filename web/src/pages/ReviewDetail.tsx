@@ -15,6 +15,7 @@ import {
   fmtDuration,
   fmtTime,
 } from '../components/ui';
+import { noModelsNotice, pickModel } from '../modelChoice';
 import { Link, navigate } from '../router';
 import { openTicketLabel, openTicketTitle } from '../tickets';
 import type {
@@ -129,10 +130,11 @@ export default function ReviewDetail({ id }: { id: number }) {
   const loadedReviewer = data?.review.reviewer ?? '';
   const loadedModel = data?.review.model ?? '';
   useEffect(() => {
-    // Prefill (and re-prefill on navigating to another review) with this run's choice.
+    // Prefill (and re-prefill on navigating to another review) with this run's choice;
+    // a model its reviewer no longer offers gives way to the resolved default.
     setRerunReviewer(loadedReviewer);
-    setRerunModel(loadedModel);
-  }, [id, loadedReviewer, loadedModel]);
+    setRerunModel(pickModel(reviewers.find((r) => r.name === loadedReviewer), loadedModel));
+  }, [id, loadedReviewer, loadedModel, reviewers]);
 
   useEffect(() => {
     const source = new EventSource(api.eventsUrl(id));
@@ -191,6 +193,7 @@ export default function ReviewDetail({ id }: { id: number }) {
   const proposed = data.proposed_requirements ?? [];
   const reviewerLabel = (name: string): string => reviewers.find((r) => r.name === name)?.label ?? name;
   const rerunInfo = reviewers.find((r) => r.name === rerunReviewer);
+  const rerunNotice = noModelsNotice(rerunInfo);
 
   const onRerunReviewerChange = (name: string): void => {
     setRerunReviewer(name);
@@ -356,12 +359,13 @@ export default function ReviewDetail({ id }: { id: number }) {
                       value={rerunModel}
                       spellCheck={false}
                       list={modelsListId}
-                      placeholder={rerunInfo?.defaultModel ?? 'model'}
+                      placeholder={rerunNotice ? 'no models available' : rerunInfo?.defaultModel ?? 'model'}
+                      title={rerunNotice ?? undefined}
                       onChange={(e) => setRerunModel(e.target.value)}
                     />
                   </>
                 )}
-                <button className="ig-btn" type="button" onClick={() => void rerun()}>
+                <button className="ig-btn" type="button" disabled={Boolean(rerunNotice)} title={rerunNotice ?? undefined} onClick={() => void rerun()}>
                   <Icon name="rerun" />
                   Re-run
                 </button>
