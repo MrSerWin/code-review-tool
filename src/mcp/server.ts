@@ -96,9 +96,15 @@ export function createMcpServer({ api, env = process.env }: CreateServerOptions)
     description:
       'List the reviewer CLIs this code-review-tool can run (claude, codex, cursor, grok): whether each is ' +
       'installed ("available"), its default model, and the model ids it offers. Use a name and a model id from ' +
-      'here for start_review / rerun_review. Omitting both uses the server default reviewer and its default model.',
+      'here for start_review / rerun_review. Omitting both uses the server default reviewer and its default model. ' +
+      'Model lists are discovered from each CLI (or the vendor API) and cached for ten minutes: "source" says where ' +
+      'a list came from (cli, cli-cache, cli-help, api), "fetched_at" when, and "no_models" what to do when a list ' +
+      'is empty. refresh=true discovers every list again now.',
+    inputSchema: {
+      refresh: z.boolean().optional().describe('Discover the model lists again instead of using the cached ones.'),
+    },
     annotations: { readOnlyHint: true, openWorldHint: false },
-  }, () => guarded(async () => ok(compactReviewers(await api.reviewers()))));
+  }, ({ refresh }) => guarded(async () => ok(compactReviewers(await api.reviewers({ refresh })))));
 
   server.registerTool('list_local_repos', {
     title: 'List local repositories',

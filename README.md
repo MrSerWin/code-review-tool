@@ -119,14 +119,15 @@ truth for every default; `.env.example` lists each variable with its default.
 | `DATA_DIR` | no | `<repo>/data` | Where the database, checkouts, reports, and preview scratch directories live |
 | `DEFAULT_REVIEWER` | no | `claude` | Default reviewer: `claude`, `cursor`, `codex`, or `grok` |
 | `CLAUDE_BIN` | no | `claude` | Path to the Claude Code CLI |
-| `REVIEW_MODEL` | no | `opus` | Default model when the reviewer is Claude |
+| `REVIEW_MODEL` | no | first discovered Claude model | Default Claude model: a listed alias or any full model name |
+| `ANTHROPIC_API_KEY` | no | unset | Only lists Claude models from the Anthropic Models API; never passed to a review |
 | `CURSOR_BIN` | no | `cursor-agent` | Path to the Cursor Agent CLI |
-| `CURSOR_REVIEW_MODEL` | no | `auto` | Default model when the reviewer is Cursor |
+| `CURSOR_REVIEW_MODEL` | no | first model of `cursor-agent --list-models` | Picks the Cursor default among the listed models; an unlisted id is ignored with a warning |
 | `CURSOR_API_KEY` | no | — | Cursor API key handed to the Cursor CLI only (otherwise it uses its own login) |
 | `CODEX_BIN` | no | `codex` | Path to the OpenAI Codex CLI |
-| `CODEX_REVIEW_MODEL` | no | first model in the Codex model cache | Picks the Codex default among the models in `$CODEX_HOME/models_cache.json`; an id the cache does not list is ignored with a warning |
+| `CODEX_REVIEW_MODEL` | no | first model in the Codex model cache | Picks the Codex default among the models in `$CODEX_HOME/models_cache.json`; an unlisted id is ignored with a warning |
 | `GROK_BIN` | no | `grok` | Path to the Grok CLI |
-| `GROK_REVIEW_MODEL` | no | `grok-4.7` | Default model when the reviewer is Grok |
+| `GROK_REVIEW_MODEL` | no | first model of `grok models` | Picks the Grok default among the listed models; an unlisted id is ignored with a warning |
 | `REVIEW_TIMEOUT_MS` | no | `1800000` | Hard timeout for one review process (each lens and the synthesis pass) |
 | `REVIEW_CONCURRENCY` | no | `2` | How many reviews run at once. Each review fans out to 5 lens processes plus a synthesis pass, so the process ceiling is this value * 6 |
 | `COVERAGE_DEBOUNCE_MS` | no | `15000` | How long ticket coverage waits after a branch review of the group settles, so a batch is covered once |
@@ -171,23 +172,27 @@ On top of that, all four get a scrubbed environment and a checkout with no
 remote, the checkout is verified unchanged after every run, and no MCP server is
 reachable from a run (see [Use from other agents](#use-from-other-agents-mcp)).
 
-**Models.** Each reviewer has its own model list and its own default
-(`REVIEW_MODEL`, `CURSOR_REVIEW_MODEL`, `CODEX_REVIEW_MODEL`,
-`GROK_REVIEW_MODEL`). The list is asked of the CLI where it can answer —
-`cursor-agent --list-models`, `grok models`, and Codex's own
-`$CODEX_HOME/models_cache.json` — and is a short static list for Claude Code
-(`opus`, `sonnet`, `haiku`), which has no such command. When Cursor or Grok
-cannot answer, a short built-in fallback list is shown. Codex has no fallback:
-its default model is the first one in the CLI's model cache, and
-`CODEX_REVIEW_MODEL` only picks another one of them. Until the CLI has written
-that cache (`codex login`, or one `codex` run), Codex has no models and a
-review with it is refused with that hint. The lists are cached for ten minutes
-per process. Every start (web, API, MCP, CLI, re-run, coverage and
-requirement passes started by hand) checks the model against the reviewer's
-list before anything is queued, re-reading the list once on a miss; an
-unlisted model is refused with the available ids. Claude Code is the
-exception: it also takes full model ids typed by hand. A model carried over
-from an earlier run that is no longer listed gives way to the default.
+**Models.** No model id is built into the tool: every list is discovered at
+runtime, and each reviewer's default is the first discovered model unless its
+`*_REVIEW_MODEL` picks another listed one.
+
+| reviewer | where the list comes from (`source`) | when it is empty |
+|---|---|---|
+| `claude` | the Anthropic Models API (`api`, paginated) when `ANTHROPIC_API_KEY` is set; else the model catalog Claude Code caches per account in `~/.claude/cache/model-catalog/` (`cli-cache`: aliases first, then the full ids, without models disabled for the plan or newer than the installed CLI); else the alias examples of `claude --help` (`cli-help`) | run `claude` once, or set `ANTHROPIC_API_KEY`; a full model name can still be typed, since `--model` documents it |
+| `cursor` | `cursor-agent --list-models` (`cli`) | install it, `cursor-agent login` or `CURSOR_API_KEY` |
+| `codex` | `$CODEX_HOME/models_cache.json` (`cli-cache`) | `codex login` or one `codex` run |
+| `grok` | `grok models` (`cli`) | install it, `grok login` |
+
+A reviewer with nothing discoverable reports an empty list with that hint,
+never an invented id. Lists are cached for ten minutes per process; "Refresh
+models" next to the model pickers (Home, the re-run control, the ticket page),
+`GET /api/reviewers?refresh=1`, and the MCP tool `list_reviewers` with
+`refresh: true` discover them again now. Every start (web, API, MCP, CLI,
+re-run, coverage and requirement passes started by hand) checks the model
+against the reviewer's list before anything is queued, re-reading the list once
+on a miss; an unlisted model is refused with the available ids. Claude Code is
+the exception: it also takes a full model name typed by hand. A model carried
+over from an earlier run that is no longer listed gives way to the default.
 
 From the terminal:
 
@@ -196,8 +201,10 @@ npm run review -- --list-models         # every reviewer, availability, models
 npm run review -- --list-models codex   # just one of them
 ```
 
-`GET /api/reviewers` returns the same thing to the UI. `GET /api/health` reports
-the reviewers without their model lists, so it stays cheap.
+`GET /api/reviewers` returns the same thing to the UI: per reviewer `models`,
+the resolved `defaultModel`, `source`, `fetchedAt`, and `noModelsHint`.
+`GET /api/health` reports the reviewers without their model lists, so it stays
+cheap.
 
 ### Repository rules and tool checks
 

@@ -215,8 +215,8 @@ export class ApiClient {
     return (text ? JSON.parse(text) : {}) as T;
   }
 
-  reviewers<T>(): Promise<T> {
-    return this.requestJson<T>('/api/reviewers');
+  reviewers<T>(opts: { refresh?: boolean } = {}): Promise<T> {
+    return this.requestJson<T>(opts.refresh ? '/api/reviewers?refresh=1' : '/api/reviewers');
   }
 
   localRepos<T>(): Promise<T> {

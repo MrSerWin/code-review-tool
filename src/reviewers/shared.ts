@@ -1,12 +1,16 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import type { ModelInfo } from './types.js';
+import { found, nothingFound } from './discovery.js';
+import type { ModelDiscovery, ModelInfo } from './types.js';
 
 /** Env vars that must never reach any review process. */
 export const FORBIDDEN_ENV = [
   'GH_TOKEN', 'GITHUB_TOKEN', 'REVIEW_GH_TOKEN',
   'LINEAR_API_KEY', 'JIRA_API_TOKEN', 'AZURE_PAT', 'YOUTRACK_TOKEN',
+  // Only used to list models; a Claude Code run that saw it would bill the API
+  // key instead of the CLI's own login.
+  'ANTHROPIC_API_KEY',
 ] as const;
 
 // `USER` is required on macOS: the CLIs read credentials from the Keychain
@@ -92,6 +96,8 @@ export interface CliOutput {
   stdout: string;
   stderr: string;
   code: number | null;
+  /** True when the command was killed for running past the timeout. */
+  timedOut?: boolean;
 }
 
 /** Timeout for the short helper calls that ask a CLI which models it has. */
@@ -99,8 +105,8 @@ export const MODEL_LIST_TIMEOUT_MS = 20_000;
 
 /**
  * Run a short helper command and capture its output. Never rejects: a missing
- * binary, a crash, or a timeout all come back as an empty stdout, because the
- * only caller falls back to a static model list.
+ * binary, a crash, or a timeout come back as an empty stdout (`timedOut` set
+ * for the timeout), and the caller turns that into a hint.
  */
 export function runCli(
   bin: string,
@@ -129,7 +135,7 @@ export function runCli(
 
     const timer = setTimeout(() => {
       try { child.kill('SIGKILL'); } catch { /* already gone */ }
-      done({ stdout, stderr, code: null });
+      done({ stdout, stderr, code: null, timedOut: true });
     }, timeoutMs);
 
     child.stdout?.setEncoding('utf8');
@@ -141,32 +147,46 @@ export function runCli(
   });
 }
 
-// --- model list cache ----------------------------------------------------
+// --- model lists ---------------------------------------------------------
 
-const MODEL_CACHE_TTL_MS = 10 * 60_000;
-const modelCache = new Map<string, { at: number; models: ModelInfo[] }>();
+/** A runner with the shape of `runCli`, so discovery can be tested without a CLI. */
+export type CliRunner = (bin: string, args: string[], env: NodeJS.ProcessEnv) => Promise<CliOutput>;
 
-/** Remember one reviewer's model list for ten minutes; `refresh` loads it again now. */
-export async function cachedModels(
-  key: string,
-  load: () => Promise<ModelInfo[]>,
-  refresh = false,
-): Promise<ModelInfo[]> {
-  const hit = modelCache.get(key);
-  if (!refresh && hit && Date.now() - hit.at < MODEL_CACHE_TTL_MS) return hit.models;
-  let models: ModelInfo[];
-  try {
-    models = await load();
-  } catch {
-    models = [];
+/**
+ * Ask a CLI's list command for its models. An empty list says why: the CLI is
+ * missing, timed out, is not logged in, or answered nothing usable.
+ */
+export async function discoverFromCliCommand(opts: {
+  label: string;
+  bin: string;
+  args: string[];
+  env: NodeJS.ProcessEnv;
+  parse: (stdout: string) => ModelInfo[];
+  /** e.g. "run `grok login`" */
+  login: string;
+  run?: CliRunner;
+  installed?: (bin: string) => boolean;
+}): Promise<ModelDiscovery> {
+  const command = `\`${[opts.bin, ...opts.args].join(' ')}\``;
+  if (!(opts.installed ?? isBinOnPath)(opts.bin)) {
+    return nothingFound(`${opts.label} is not installed: ${opts.bin} not found on PATH. Install it, then refresh models.`);
   }
-  modelCache.set(key, { at: Date.now(), models });
-  return models;
-}
-
-/** Only for tests: drop every remembered model list. */
-export function clearModelCache(): void {
-  modelCache.clear();
+  const out = await (opts.run ?? runCli)(opts.bin, opts.args, opts.env);
+  const models = opts.parse(out.stdout);
+  if (models.length > 0) return found(models, 'cli');
+  if (out.timedOut) {
+    return nothingFound(
+      `${command} did not answer within ${Math.round(MODEL_LIST_TIMEOUT_MS / 1000)} s. ` +
+        'Run it by hand to see what it waits for, then refresh models.',
+    );
+  }
+  if (describeAuthFailure(`${out.stderr}\n${out.stdout}`, opts.bin)) {
+    return nothingFound(`${opts.label} is not logged in: ${opts.login}, then refresh models.`);
+  }
+  return nothingFound(
+    `${opts.label} listed no models (${command} exited with ${out.code ?? 'no code'}). ` +
+      `If it is not logged in, ${opts.login}; then refresh models.`,
+  );
 }
 
 /** Drop `id` duplicates, keeping the first (the CLIs list the default first). */

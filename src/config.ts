@@ -51,6 +51,9 @@ const optionalSecret = z
   .optional()
   .transform((v) => (v ? v : undefined));
 
+/** An optional plain value, same rule: absent and empty are both "not set". */
+const optionalValue = optionalSecret;
+
 const schema = z.object({
   // --- ticket trackers: all optional, all validated only when actually used ---
   LINEAR_API_KEY: optionalSecret,
@@ -72,16 +75,19 @@ const schema = z.object({
   PORT: z.coerce.number().int().positive().default(5178),
   DATA_DIR: z.string().min(1).default(path.join(projectRoot, 'data')),
   CLAUDE_BIN: z.string().min(1).default('claude'),
-  REVIEW_MODEL: z.string().min(1).default('opus'),
+  // Each *_REVIEW_MODEL picks one of the models discovered from that reviewer's
+  // CLI (or API); unset, the first discovered model is the default.
+  REVIEW_MODEL: optionalValue,
+  // Optional: lists Claude models from the Anthropic Models API. Never passed to a review.
+  ANTHROPIC_API_KEY: optionalSecret,
   DEFAULT_REVIEWER: z.enum(REVIEWER_NAMES).default('claude'),
   CURSOR_BIN: z.string().min(1).default('cursor-agent'),
-  CURSOR_REVIEW_MODEL: z.string().min(1).default('auto'),
+  CURSOR_REVIEW_MODEL: optionalValue,
   CURSOR_API_KEY: optionalSecret,
   CODEX_BIN: z.string().min(1).default('codex'),
-  // Picks one model of the Codex CLI's model cache; unset, the cache's first listed model is the default.
-  CODEX_REVIEW_MODEL: optionalSecret,
+  CODEX_REVIEW_MODEL: optionalValue,
   GROK_BIN: z.string().min(1).default('grok'),
-  GROK_REVIEW_MODEL: z.string().min(1).default('grok-4.7'),
+  GROK_REVIEW_MODEL: optionalValue,
   REVIEW_TIMEOUT_MS: z.coerce.number().int().positive().default(1_800_000),
   // How many reviews (branches) run at once. The lens fan-out inside one
   // review is five lenses plus synthesis, so the process ceiling is this * 6.
@@ -126,6 +132,7 @@ export const config = Object.freeze({
   dataDir,
   claudeBin: parsed.data.CLAUDE_BIN,
   reviewModel: parsed.data.REVIEW_MODEL,
+  anthropicApiKey: parsed.data.ANTHROPIC_API_KEY,
   defaultReviewer: parsed.data.DEFAULT_REVIEWER,
   cursorBin: parsed.data.CURSOR_BIN,
   cursorReviewModel: parsed.data.CURSOR_REVIEW_MODEL,

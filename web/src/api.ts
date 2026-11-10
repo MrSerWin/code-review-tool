@@ -49,7 +49,8 @@ async function req<T>(url: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   health: () => req<Health>('/api/health'),
-  reviewers: () => req<ReviewersPayload>('/api/reviewers'),
+  /** `refresh` makes the server discover every model list again instead of answering from its cache. */
+  reviewers: (refresh = false) => req<ReviewersPayload>(refresh ? '/api/reviewers?refresh=1' : '/api/reviewers'),
   repos: () => req<{ repos: string[] }>('/api/repos'),
   localRepos: () => req<LocalReposPayload>('/api/local-repos'),
   localParent: (repo: string, branch: string) =>

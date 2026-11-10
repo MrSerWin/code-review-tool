@@ -543,7 +543,10 @@ interface ReviewerPayload {
   defaultModel: string | null;
   noModelsHint?: string | null;
   available: boolean;
+  acceptsUnlistedModels?: boolean;
   models?: { id: string; label?: string }[];
+  source?: string | null;
+  fetchedAt?: string | null;
 }
 
 export function compactReviewers(payload: { reviewers: ReviewerPayload[]; defaultReviewer: string }, maxModels = 40) {
@@ -555,6 +558,9 @@ export function compactReviewers(payload: { reviewers: ReviewerPayload[]; defaul
       available: r.available,
       default_model: r.defaultModel,
       models: (r.models ?? []).slice(0, maxModels).map((m) => m.id),
+      source: r.source ?? null,
+      fetched_at: r.fetchedAt ?? null,
+      ...(r.acceptsUnlistedModels ? { accepts_unlisted_models: true } : {}),
       ...(r.noModelsHint ? { no_models: r.noModelsHint } : {}),
     })),
   };

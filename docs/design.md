@@ -316,25 +316,42 @@ Anything else throws.
 ## Reviewers (`src/reviewers/`)
 
 A reviewer is a `ReviewerDefinition`: a name (`claude`, `cursor`, `codex`,
-`grok`), a label, a binary, a default model, `buildArgs(prompt, model, dir)`,
-`buildChildEnv()`, `parseStreamLine()`, `listModels()`, `isAvailable()`, and
+`grok`), a label, a binary, the configured default model and its env key,
+`buildArgs(prompt, model, dir)`, `buildChildEnv()`, `parseStreamLine()`,
+`discoverModels()`, `isAvailable()`, and
 `describeFailure()` for a human hint on known failures (mostly "not logged
 in"). `reviewers/index.ts` is the registry; `DEFAULT_REVIEWER` picks the
 default.
 
 - **Availability** is a walk of `PATH` (no shell), cached per process. An
   unavailable reviewer is refused before a review row is created.
-- **Models** come from `cursor-agent --list-models`, `grok models`, Codex's
-  `$CODEX_HOME/models_cache.json` (entries with `visibility: "list"`, ordered by
-  `priority`), or a static alias list for Claude. Helper calls time out after
-  20 s, never throw, and fall back to a short built-in list; results are
-  cached for ten minutes.
+- **Models** are discovered at runtime; no model id is written in `src/` (a
+  test scans for model ids and family names outside tests and fixtures).
+  `discoverModels()` returns `{models, source, fetchedAt, hint}` and never
+  throws; `discovery.ts` caches one result per reviewer for ten minutes, shares
+  a running discovery between concurrent callers, and `refresh` asks again.
+  Sources: `cursor-agent --list-models` and `grok models` (`cli`; the CLI's
+  marked default is moved first), Codex's `$CODEX_HOME/models_cache.json`
+  (`cli-cache`, entries with `visibility: "list"` ordered by `priority`), and
+  for Claude, in order, `GET /v1/models` with `after_id` pagination when
+  `ANTHROPIC_API_KEY` is set (`api`), the newest version-2 catalog in
+  `~/.claude/cache/model-catalog/*.json` (`cli-cache`: the CLI's selected
+  model first, then each alias of `provider_alias_targets` labelled with the
+  model it resolves to, then the full ids, minus `disabled` ones and ones whose
+  `min_claude_code_version` is above `claude --version`), and the quoted alias
+  examples of the `--model` option in `claude --help` (`cli-help`). Helper
+  calls time out after 20 s. An empty result carries a specific hint (not
+  installed, timed out, not logged in, nothing listed, API status). The
+  default is `pickDefaultModel()`: the configured `*_REVIEW_MODEL` while it is
+  listed (any value for Claude, which takes unlisted full names), else the
+  first discovered model; an empty cached list is asked again once first.
+  `ANTHROPIC_API_KEY` is in `FORBIDDEN_ENV`, so a review never bills it.
 - **Streams.** Claude Code, Cursor Agent, and the Grok CLI share the
   Anthropic-style `stream-json` events (`anthropicStream.ts`); Codex speaks its
   own JSONL (`codexStream.ts`), where the answer is the last `agent_message`.
 - **Re-runs.** `resolveRerunChoice()` keeps the previous reviewer unless one is
   named, and keeps the previous model only while the reviewer stays the same: a
-  model id belongs to one CLI, so `opus` is never handed to Codex.
+  model id belongs to one CLI, so a Claude alias is never handed to Codex.
 
 ## Review runner (`src/reviewRunner.ts`)
 

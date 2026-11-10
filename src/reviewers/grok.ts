@@ -1,9 +1,10 @@
 import { config } from '../config.js';
 import { parseAnthropicStreamLine } from './anthropicStream.js';
 import {
-  buildBaseChildEnv, cachedModels, dedupeModels, describeAuthFailure, isBinOnPath, runCli,
+  buildBaseChildEnv, dedupeModels, describeAuthFailure, discoverFromCliCommand, isBinOnPath,
+  type CliRunner,
 } from './shared.js';
-import type { ModelInfo, ReviewerDefinition } from './types.js';
+import type { ModelDiscovery, ModelInfo, ReviewerDefinition } from './types.js';
 
 /**
  * Every Grok tool that could change the checkout, reach the network on its own,
@@ -41,20 +42,15 @@ export const GROK_DENY_RULES = ['mcp__*'] as const;
 /**
  * Stop Grok from importing the MCP servers configured for Claude Code, Cursor,
  * and the organization. `grok inspect` honours these; headless runs of Grok
- * 1.0.13 were seen to connect the Claude-sourced servers anyway, which is why
- * the dispatcher tools and the deny rule above are what actually guard a run.
+ * 1.0.13 were seen to connect the servers imported from Claude Code anyway,
+ * which is why the dispatcher tools and the deny rule above are what actually
+ * guard a run.
  */
 export const GROK_MCP_OFF_ENV: Record<string, string> = {
   GROK_CLAUDE_MCPS_ENABLED: 'false',
   GROK_CURSOR_MCPS_ENABLED: 'false',
   GROK_MANAGED_MCPS_ENABLED: 'false',
 };
-
-/** Used when `grok models` cannot be reached. */
-export const GROK_FALLBACK_MODELS: ModelInfo[] = [
-  { id: 'grok-4.7', label: 'grok-4.7 (default)' },
-  { id: 'grok-4.5', label: 'grok-4.5' },
-];
 
 /**
  * Parse `grok models`, which prints `Default model: <id>` and then one
@@ -67,15 +63,33 @@ export function parseGrokModels(text: string): ModelInfo[] {
     const match = /^[*-]\s+([A-Za-z0-9][A-Za-z0-9._-]*)\s*(\(default\))?$/.exec(line);
     if (!match) continue;
     const id = match[1]!;
-    models.push({ id, label: match[2] ? `${id} (default)` : id });
+    const model = { id, label: match[2] ? `${id} (default)` : id };
+    // The CLI's own default goes first, so it is ours too unless GROK_REVIEW_MODEL picks another.
+    if (match[2]) models.unshift(model);
+    else models.push(model);
   }
   return dedupeModels(models);
+}
+
+/** `grok models`; nothing listed is an empty list with a hint, never a guess. */
+export function discoverGrokModels(run?: CliRunner, installed?: (bin: string) => boolean): Promise<ModelDiscovery> {
+  return discoverFromCliCommand({
+    label: 'Grok CLI',
+    bin: config.grokBin,
+    args: ['models'],
+    env: grokReviewer.buildChildEnv(),
+    parse: parseGrokModels,
+    login: `run \`${config.grokBin} login\``,
+    run,
+    installed,
+  });
 }
 
 export const grokReviewer: ReviewerDefinition = {
   name: 'grok',
   label: 'Grok CLI',
-  defaultModel: config.grokReviewModel,
+  defaultModel: config.grokReviewModel ?? '',
+  defaultModelEnv: 'GROK_REVIEW_MODEL',
   bin: config.grokBin,
   buildChildEnv: () => buildBaseChildEnv(GROK_MCP_OFF_ENV),
   buildArgs(prompt: string, model: string, dir: string): string[] {
@@ -96,13 +110,7 @@ export const grokReviewer: ReviewerDefinition = {
     ];
   },
   parseStreamLine: parseAnthropicStreamLine,
-  listModels: (opts) =>
-    cachedModels('grok', async () => {
-      if (!isBinOnPath(config.grokBin)) return GROK_FALLBACK_MODELS;
-      const out = await runCli(config.grokBin, ['models'], grokReviewer.buildChildEnv());
-      const models = parseGrokModels(out.stdout);
-      return models.length > 0 ? models : GROK_FALLBACK_MODELS;
-    }, opts?.refresh),
+  discoverModels: () => discoverGrokModels(),
   isAvailable: () => isBinOnPath(config.grokBin),
   describeFailure(stderrTail: string): string | null {
     return describeAuthFailure(stderrTail, `${config.grokBin} login`);

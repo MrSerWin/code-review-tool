@@ -252,11 +252,14 @@ test('incident: stored parents with the child at position 0, targets listed chil
 function codexListing(list: string[]): import('./reviewers/types.js').ReviewerDefinition {
   const models = list.map((id) => ({ id, label: id }));
   return {
-    name: 'codex', label: 'OpenAI Codex', defaultModel: '', bin: '/bin/true',
+    name: 'codex', label: 'OpenAI Codex', defaultModel: '', defaultModelEnv: 'CODEX_REVIEW_MODEL', bin: '/bin/true',
     buildArgs: () => [], buildChildEnv: () => ({}), parseStreamLine: () => ({}),
-    listModels: async () => models,
-    resolveDefaultModel: async () => models[0]?.id ?? null,
-    noModelsMessage: () => 'Codex has no model list yet: run `codex login` or `codex` once, then retry',
+    discoverModels: async () => ({
+      models,
+      source: models.length ? 'cli-cache' : null,
+      fetchedAt: Date.now(),
+      hint: models.length ? null : 'Codex has no model list yet: run `codex login` or `codex` once, then retry',
+    }),
     isAvailable: () => true,
     describeFailure: () => null,
   };

@@ -68,12 +68,12 @@ esac
 const fakeReviewer: ReviewerDefinition = {
   name: 'claude',
   label: 'Fake reviewer',
-  defaultModel: 'fake',
+  defaultModel: 'fake', defaultModelEnv: 'REVIEW_MODEL',
   bin: '/bin/sh',
   buildArgs: (prompt) => ['-c', script, 'sh', prompt],
   buildChildEnv: () => ({ PATH: process.env.PATH, PROMPT_DIR: prompts, SYNTH_JSON: JSON.stringify(synthesis) }),
   parseStreamLine: (line) => ({ result: line }),
-  listModels: async () => [],
+  discoverModels: async () => ({ models: [], source: null, fetchedAt: Date.now(), hint: null }),
   isAvailable: () => true,
   describeFailure: () => null,
 };

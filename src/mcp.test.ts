@@ -1123,7 +1123,7 @@ test('stdio MCP server: a model the reviewer does not list is a tool error namin
       const body = JSON.parse(raw || '{}') as { model?: string };
       seen.push(`${req.method} ${req.url} ${body.model ?? ''}`.trim());
       res.writeHead(req.method === 'GET' ? 200 : 400, { 'Content-Type': 'application/json' });
-      if (req.method === 'GET' && req.url === '/api/reviewers') {
+      if (req.method === 'GET' && req.url?.startsWith('/api/reviewers')) {
         res.end(JSON.stringify({
           defaultReviewer: 'codex',
           reviewers: [{ name: 'codex', label: 'OpenAI Codex', defaultModel: null, bin: 'codex', available: true, models: [], noModelsHint: hint }],
@@ -1140,6 +1140,9 @@ test('stdio MCP server: a model the reviewer does not list is a tool error namin
     const reviewers = json(await client.callTool({ name: 'list_reviewers', arguments: {} }));
     assert.equal(reviewers.reviewers[0].default_model, null);
     assert.equal(reviewers.reviewers[0].no_models, hint);
+    // refresh asks the server to discover the lists again.
+    await client.callTool({ name: 'list_reviewers', arguments: { refresh: true } });
+    assert.deepEqual(seen.filter((s) => s.startsWith('GET /api/reviewers')), ['GET /api/reviewers', 'GET /api/reviewers?refresh=1']);
 
     for (const [name, args] of [
       ['start_review', { input: 'ABC-123', reviewer: 'codex', model: 'gpt-5.5' }],
