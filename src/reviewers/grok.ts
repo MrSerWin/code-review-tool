@@ -96,13 +96,13 @@ export const grokReviewer: ReviewerDefinition = {
     ];
   },
   parseStreamLine: parseAnthropicStreamLine,
-  listModels: () =>
+  listModels: (opts) =>
     cachedModels('grok', async () => {
       if (!isBinOnPath(config.grokBin)) return GROK_FALLBACK_MODELS;
       const out = await runCli(config.grokBin, ['models'], grokReviewer.buildChildEnv());
       const models = parseGrokModels(out.stdout);
       return models.length > 0 ? models : GROK_FALLBACK_MODELS;
-    }),
+    }, opts?.refresh),
   isAvailable: () => isBinOnPath(config.grokBin),
   describeFailure(stderrTail: string): string | null {
     return describeAuthFailure(stderrTail, `${config.grokBin} login`);

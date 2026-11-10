@@ -7,7 +7,7 @@ import { coveragePending, recomputeCoverage } from '../coverage.js';
 import { db } from '../db.js';
 import { rowLinks } from '../githubLinks.js';
 import { resolveTargets } from '../resolver.js';
-import { REVIEWER_NAMES } from '../reviewers/index.js';
+import { chooseModel, getReviewer, REVIEWER_NAMES, resolveStartChoice } from '../reviewers/index.js';
 import {
   applyGroupBases, defaultDetectDeps, detectGroupParents, GroupError, joinGroup, orderBatch, orderedMembers, setChainOrder,
   setParentByHand, ticketGroupView, type DetectDeps, type TicketGroupView,
@@ -187,6 +187,28 @@ function lastReviewChoice(key: string): { reviewer: string | null; model: string
   return { reviewer: row?.reviewer ?? null, model: row?.model ?? null };
 }
 
+/**
+ * Reviewer and model of a coverage or derivation pass started by hand. A named
+ * model must be offered; otherwise the latest review's model carries over
+ * while its reviewer is the one used and still offers it, else the default.
+ */
+async function passChoice(
+  body: { reviewer?: string; model?: string },
+  last: { reviewer: string | null; model: string | null },
+): Promise<{ reviewer: string; model: string }> {
+  let reviewer = getReviewer(body.reviewer ?? null);
+  if (!body.reviewer && last.reviewer) {
+    try {
+      reviewer = getReviewer(last.reviewer);
+    } catch {
+      // A reviewer this server no longer knows: the default one runs.
+    }
+  }
+  const inherited = reviewer.name === last.reviewer ? last.model : null;
+  const model = await chooseModel(reviewer, { requested: body.model, inherited });
+  return { reviewer: reviewer.name, model };
+}
+
 function sendGroupError(reply: { code: (n: number) => { send: (b: unknown) => unknown } }, err: unknown) {
   if (err instanceof GroupError) return reply.code(err.status).send({ error: err.message });
   return reply.code(400).send({ error: (err as Error).message });
@@ -226,7 +248,16 @@ export async function ticketGroupRoutes(app: FastifyInstance, opts: { deps?: Par
     const body = reviewBody.safeParse(req.body ?? {});
     if (!parsed.success || !body.success) return reply.code(400).send({ error: 'Invalid request body' });
     const key = parsed.data.key;
-    const { reviewer, model, requirementsText, branches, refresh = true } = body.data;
+    const { requirementsText, branches, refresh = true } = body.data;
+    let reviewer: string;
+    let model: string;
+    try {
+      const choice = await resolveStartChoice(body.data.reviewer, body.data.model);
+      reviewer = choice.reviewer.name;
+      model = choice.model;
+    } catch (err) {
+      return reply.code(400).send({ error: (err as Error).message });
+    }
 
     let ticket: TicketInfo | null = null;
     let targets: ResolvedTarget[] = [];
@@ -350,10 +381,13 @@ export async function ticketGroupRoutes(app: FastifyInstance, opts: { deps?: Par
     syncMembersFromReviews(key);
     if (!getTicketGroup(key)) return reply.code(404).send({ error: `No ticket group ${key}` });
     const last = lastReviewChoice(key);
-    const { started, done } = deps.derive(key, {
-      reviewer: body.data.reviewer ?? last.reviewer,
-      model: body.data.model ?? (body.data.reviewer && body.data.reviewer !== last.reviewer ? null : last.model),
-    });
+    let choice: { reviewer: string; model: string };
+    try {
+      choice = await passChoice(body.data, last);
+    } catch (err) {
+      return reply.code(400).send({ error: (err as Error).message });
+    }
+    const { started, done } = deps.derive(key, choice);
     if (body.data.wait) {
       try {
         await done;
@@ -373,7 +407,17 @@ export async function ticketGroupRoutes(app: FastifyInstance, opts: { deps?: Par
     const key = parsed.data.key;
     syncMembersFromReviews(key);
     if (!getTicketGroup(key)) return reply.code(404).send({ error: `No ticket group ${key}` });
-    const { started } = deps.recompute(key, { trigger: 'manual', ...body.data });
+    // Without a reviewer or model the pass picks them itself (the latest review's, else the defaults).
+    if (body.data.reviewer || body.data.model) {
+      try {
+        const choice = await passChoice(body.data, lastReviewChoice(key));
+        const { started } = deps.recompute(key, { trigger: 'manual', ...choice });
+        return reply.code(202).send({ started, coverage: coveragePayload(latestCoverage(key)) });
+      } catch (err) {
+        return reply.code(400).send({ error: (err as Error).message });
+      }
+    }
+    const { started } = deps.recompute(key, { trigger: 'manual' });
     return reply.code(202).send({ started, coverage: coveragePayload(latestCoverage(key)) });
   });
 

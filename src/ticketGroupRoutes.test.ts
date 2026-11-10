@@ -26,6 +26,7 @@ const ticketStore = await import('./ticketStore.js');
 const { ticketGroupRoutes } = await import('./routes/ticketGroups.js');
 type TicketRouteDeps = import('./routes/ticketGroups.js').TicketRouteDeps;
 const { reviewRoutes } = await import('./routes/reviews.js');
+const { setReviewerForTests } = await import('./reviewers/index.js');
 
 const ticket: TicketInfo = {
   provider: 'linear', key: 'ABC-3', title: 'Export', url: 'https://tracker.example/ABC-3', body: 'Export risks.',
@@ -36,7 +37,7 @@ const resolved: ResolvedTarget[] = [B, A].flatMap((branch) => (['web', 'svc'] as
   repo, branch, baseBranch: 'main', prNumber: null,
 })));
 
-const started: { target: ResolvedTarget; ticket: TicketInfo | null; reviewer?: string }[] = [];
+const started: { target: ResolvedTarget; ticket: TicketInfo | null; reviewer?: string; model?: string }[] = [];
 const recomputed: { key: string; opts: unknown }[] = [];
 let resolveFails = false;
 
@@ -52,8 +53,8 @@ const deps: Partial<TicketRouteDeps> = {
     defaultBranch: async () => 'main',
     localParent: async () => { throw new Error('not local'); },
   },
-  startRun: (target, t, reviewer, _model, opts) => {
-    started.push({ target, ticket: t, reviewer });
+  startRun: (target, t, reviewer, model, opts) => {
+    started.push({ target, ticket: t, reviewer, model });
     return store.createReview({
       depends_on: opts?.dependsOn ?? null,
       ticket_key: t?.key || null, ticket_title: t?.title ?? null, ticket_body: t?.body ?? null,
@@ -185,7 +186,7 @@ test('recompute coverage, and the coverage seen from one review', async () => {
   assert.equal(res.statusCode, 202);
   assert.equal(res.json().started, true);
   assert.equal(res.json().coverage.status, 'running');
-  assert.deepEqual(recomputed.at(-1), { key: 'ABC-3', opts: { trigger: 'manual', model: 'sonnet' } });
+  assert.deepEqual(recomputed.at(-1), { key: 'ABC-3', opts: { trigger: 'manual', reviewer: 'claude', model: 'sonnet' } });
   assert.equal((await app.inject({ method: 'POST', url: '/api/tickets/NOPE-2/coverage', payload: {} })).statusCode, 404);
 
   // A finished coverage, and a review of one branch reading it.
@@ -243,4 +244,83 @@ test('incident: stored parents with the child at position 0, targets listed chil
   // Positions follow the chain now: the parent sorts first.
   const positions = ticketStore.listTicketBranches(KEY).map((b) => `${b.repo}#${b.branch}:${b.position}`);
   assert.deepEqual(positions.sort(), [`svc#${C}:1`, `svc#${P}:0`, `web#${C}:1`, `web#${P}:0`]);
+});
+
+// --- the model is checked before anything is queued ------------------------
+
+/** Codex with a model list the test sets; nothing it lists is ever run. */
+function codexListing(list: string[]): import('./reviewers/types.js').ReviewerDefinition {
+  const models = list.map((id) => ({ id, label: id }));
+  return {
+    name: 'codex', label: 'OpenAI Codex', defaultModel: '', bin: '/bin/true',
+    buildArgs: () => [], buildChildEnv: () => ({}), parseStreamLine: () => ({}),
+    listModels: async () => models,
+    resolveDefaultModel: async () => models[0]?.id ?? null,
+    noModelsMessage: () => 'Codex has no model list yet: run `codex login` or `codex` once, then retry',
+    isAvailable: () => true,
+    describeFailure: () => null,
+  };
+}
+
+const reviewCount = (): number => (store.db.prepare('SELECT COUNT(*) AS n FROM reviews').get() as { n: number }).n;
+
+test('an unlisted model is a 400 naming the available ids on every start path, and nothing is queued', async () => {
+  setReviewerForTests('codex', codexListing(['gpt-6.1-sol', 'gpt-5.6-sol']));
+  try {
+    const before = reviewCount();
+    const startedBefore = started.length;
+    const recomputedBefore = recomputed.length;
+    const bad = { reviewer: 'codex', model: 'gpt-5.5' };
+    const expected = 'Model "gpt-5.5" is not available for OpenAI Codex. Available: gpt-6.1-sol, gpt-5.6-sol.';
+    const prev = store.createReview({ repo: 'svc', branch: A, base_branch: 'main', status: 'done', reviewer: 'codex', model: 'gpt-6.1-sol' });
+    const calls = [
+      { method: 'POST' as const, url: '/api/reviews', payload: { input: 'ABC-3', ...bad } },
+      { method: 'POST' as const, url: '/api/tickets/ABC-3/review', payload: { ...bad, refresh: false } },
+      { method: 'POST' as const, url: `/api/reviews/${prev.id}/rerun`, payload: bad },
+      { method: 'POST' as const, url: '/api/tickets/ABC-3/coverage', payload: bad },
+      { method: 'POST' as const, url: '/api/tickets/ABC-3/requirements/derive', payload: bad },
+    ];
+    for (const call of calls) {
+      const res = await app.inject(call);
+      assert.equal(res.statusCode, 400, `${call.url}: ${res.body}`);
+      assert.equal(res.json().error, expected, call.url);
+    }
+    assert.equal(reviewCount(), before + 1);
+    assert.equal(started.length, startedBefore);
+    assert.equal(recomputed.length, recomputedBefore);
+  } finally {
+    setReviewerForTests('codex', null);
+  }
+});
+
+test('without a model the resolved default is queued; a pass by hand gets a checked model', async () => {
+  setReviewerForTests('codex', codexListing(['gpt-6.1-sol', 'gpt-5.6-sol']));
+  try {
+    const from = started.length;
+    const res = await app.inject({ method: 'POST', url: '/api/tickets/ABC-3/review', payload: { reviewer: 'codex', refresh: false } });
+    assert.equal(res.statusCode, 201, res.body);
+    assert.ok(started.length > from);
+    assert.deepEqual(new Set(started.slice(from).map((s) => `${s.reviewer}/${s.model}`)), new Set(['codex/gpt-6.1-sol']));
+
+    const cov = await app.inject({ method: 'POST', url: '/api/tickets/ABC-3/coverage', payload: { reviewer: 'codex', model: 'gpt-5.6-sol' } });
+    assert.equal(cov.statusCode, 202, cov.body);
+    assert.deepEqual(recomputed.at(-1)!.opts, { trigger: 'manual', reviewer: 'codex', model: 'gpt-5.6-sol' });
+  } finally {
+    setReviewerForTests('codex', null);
+  }
+});
+
+test('an empty model list refuses a start with the login hint', async () => {
+  setReviewerForTests('codex', codexListing([]));
+  try {
+    const before = reviewCount();
+    for (const url of ['/api/reviews', '/api/tickets/ABC-3/review']) {
+      const res = await app.inject({ method: 'POST', url, payload: { input: 'ABC-3', reviewer: 'codex', refresh: false } });
+      assert.equal(res.statusCode, 400, res.body);
+      assert.equal(res.json().error, 'Codex has no model list yet: run `codex login` or `codex` once, then retry');
+    }
+    assert.equal(reviewCount(), before);
+  } finally {
+    setReviewerForTests('codex', null);
+  }
 });

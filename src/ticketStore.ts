@@ -197,6 +197,11 @@ export function createCoverage(
   return getCoverage(Number(info.lastInsertRowid))!;
 }
 
+/** The model a running pass settled on, once it was checked against the reviewer's list. */
+export function setCoverageModel(id: number, model: string): void {
+  db.prepare(`UPDATE ticket_coverage SET model = ? WHERE id = ?`).run(model, id);
+}
+
 export function getCoverage(id: number): TicketCoverageRow | undefined {
   return db.prepare<[number], TicketCoverageRow>(`SELECT * FROM ticket_coverage WHERE id = ?`).get(id);
 }

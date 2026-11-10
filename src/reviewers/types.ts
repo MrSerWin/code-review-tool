@@ -21,8 +21,18 @@ export interface StreamLineResult {
 export interface ReviewerDefinition {
   readonly name: ReviewerName;
   readonly label: string;
+  /**
+   * The configured default model. Empty when the default is not static (Codex
+   * takes it from the CLI's model cache): ask `resolveDefaultModel` instead.
+   */
   readonly defaultModel: string;
   readonly bin: string;
+  /**
+   * True when the CLI takes model ids it does not list (Claude Code resolves
+   * full model ids typed by hand), so a requested model is not checked
+   * against `listModels`.
+   */
+  readonly acceptsUnlistedModels?: boolean;
   /** argv before the prompt text */
   buildArgs(prompt: string, model: string, dir: string): string[];
   buildChildEnv(): NodeJS.ProcessEnv;
@@ -31,9 +41,17 @@ export interface ReviewerDefinition {
   /**
    * The models this CLI offers. Asked of the CLI where it can answer, static
    * otherwise. Never throws and never blocks for long: a failure degrades to
-   * the static list.
+   * the static list (or to an empty list where none would be honest).
+   * `refresh` skips the in-process cache and asks the source again.
    */
-  listModels(): Promise<ModelInfo[]>;
+  listModels(opts?: { refresh?: boolean }): Promise<ModelInfo[]>;
+  /**
+   * The default model as of now, or null when there is none. Absent, the
+   * default is `defaultModel`.
+   */
+  resolveDefaultModel?(): Promise<string | null>;
+  /** Why no model can be chosen when `listModels` comes back empty. */
+  noModelsMessage?(): string;
   /** Whether the binary exists on this machine. Cached after the first call. */
   isAvailable(): boolean;
   /** A human hint for a known failure, or null when the failure is unknown. */
