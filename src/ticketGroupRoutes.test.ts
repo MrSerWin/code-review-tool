@@ -90,8 +90,12 @@ test('review the ticket: every branch queued parents first, each against its par
     `svc#${A} <- main`, `svc#${B} <- ${A}`, `web#${A} <- main`, `web#${B} <- ${A}`,
   ]);
   assert.deepEqual(started.map((s) => s.target.baseReason), ['default', 'parent', 'default', 'parent']);
-  // The added text reaches every branch review, after the ticket's own text.
-  assert.match(started[1]!.ticket!.body, /^Export risks\.\n\n## Added requirements and decisions\n\nDecision: CSV is enough\.$/);
+  // The added text joins the ticket's checklist as a user item; the ticket text stays as the tracker has it.
+  assert.equal(started[1]!.ticket!.body, 'Export risks.');
+  assert.deepEqual(
+    (await import('./ticketRequirements.js')).activeChecklist('ABC-3').map((r) => [r.text, r.source]),
+    [['Decision: CSV is enough.', 'user']],
+  );
   assert.equal(body.run.status, 'running');
   assert.deepEqual(body.run.review_ids, body.reviews.map((r: ReviewRow) => r.id));
   // Each child waits for its parent's review in this batch, and the answer says so.

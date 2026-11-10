@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../api';
+import TicketChecklistCard, { requirementRef } from '../components/TicketChecklistCard';
 import TicketPreviewCard from '../components/TicketPreviewCard';
 import {
   BranchLink,
@@ -20,6 +21,7 @@ import { Link, navigate } from '../router';
 import { openTicketLabel, openTicketTitle } from '../tickets';
 import type {
   AnchorStatus,
+  ContractIssue,
   Coverage,
   CoverageStatus,
   GroupBranch,
@@ -195,6 +197,7 @@ export default function TicketView({ ticketKey }: { ticketKey: string }) {
               })
             }
           />
+          <TicketChecklistCard key={ticketKey} ticketKey={ticketKey} live={running} />
           <CoverageCard ticketKey={ticketKey} ticket={ticket} />
         </>
       )}
@@ -332,7 +335,7 @@ function TicketActions({
             className="manual-input"
             rows={4}
             value={extra}
-            placeholder="Approved decisions that change the ticket, or scope notes. Added to the ticket text for every branch and for coverage."
+            placeholder="Approved decisions that change the ticket, or scope notes. One per line; each becomes an item of the requirement checklist."
             onChange={(e) => setExtra(e.target.value)}
           />
         )}
@@ -548,6 +551,7 @@ function CoverageCard({ ticketKey, ticket }: { ticketKey: string; ticket: Ticket
         <>
           {coverage.summary && <p>{coverage.summary}</p>}
           <CoverageTable coverage={coverage} />
+          {coverage.contract_issues && <ContractIssues issues={coverage.contract_issues} />}
           <p className="muted ticket-hint">
             Coverage #{coverage.id} · {fmtTime(coverage.finished_at ?? coverage.created_at)} · read runs{' '}
             {coverage.review_ids.map((id, i) => (
@@ -578,7 +582,7 @@ function CoverageTable({ coverage }: { coverage: Coverage }) {
         <tbody>
           {coverage.requirements.map((r, i) => (
             <tr key={`${i}-${r.text}`}>
-              <td className="num mono">{i + 1}</td>
+              <td className="num mono">{r.requirement_id ? requirementRef(r.requirement_id) : i + 1}</td>
               <td>
                 {r.text}
                 {r.note && <div className="muted coverage-note">{r.note}</div>}
@@ -620,6 +624,50 @@ function CoverageTable({ coverage }: { coverage: Coverage }) {
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+/** The cross-repository contract check of a coverage pass: mismatches with both of their ends. */
+function ContractIssues({ issues }: { issues: ContractIssue[] }) {
+  return (
+    <div className="contract">
+      <h3 className="contract-title">Cross-repository contract</h3>
+      {issues.length === 0 ? (
+        <p className="muted">No contract mismatch found between the branches.</p>
+      ) : (
+        <ul className="contract-list">
+          {issues.map((issue, i) => (
+            <li key={`${i}-${issue.problem}`} className="contract-issue">
+              <div>
+                <span className={`tag ${issue.severity === 'major' ? 'req-missing' : 'req-partial'}`}>{issue.severity}</span>{' '}
+                {issue.problem}
+              </div>
+              <ul className="coverage-branches">
+                {issue.sites.map((s) => {
+                  const loc = s.line ? `${s.file}:${s.line}` : s.file;
+                  const warn = ANCHOR_WARNING[s.anchor_status];
+                  return (
+                    <li key={`${s.repo}#${s.branch}:${loc}`}>
+                      <span className="mono">
+                        {s.repo}#{s.branch}
+                      </span>
+                      <span className="coverage-evidence mono muted">
+                        {loc}
+                        {warn && s.anchor_status !== 'off_diff' && (
+                          <span className="tag anchor-warning" title={warn}>
+                            {warn}
+                          </span>
+                        )}
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }
