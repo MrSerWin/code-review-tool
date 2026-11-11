@@ -28,6 +28,18 @@ type TicketRouteDeps = import('./routes/ticketGroups.js').TicketRouteDeps;
 const { reviewRoutes } = await import('./routes/reviews.js');
 const { setReviewerForTests } = await import('./reviewers/index.js');
 
+// The routes refuse a reviewer whose CLI is missing; CI runners have none.
+setReviewerForTests('claude', {
+  name: 'claude', label: 'Claude Code', defaultModel: 'opus', defaultModelEnv: 'REVIEW_MODEL', bin: '/bin/true',
+  buildArgs: () => [], buildChildEnv: () => ({}), parseStreamLine: () => ({}),
+  discoverModels: async () => ({
+    models: [{ id: 'opus', label: 'opus' }], source: 'cli-cache', fetchedAt: Date.now(), hint: null,
+  }),
+  isAvailable: () => true,
+  describeFailure: () => null,
+  acceptsUnlistedModels: true,
+});
+
 const ticket: TicketInfo = {
   provider: 'linear', key: 'ABC-3', title: 'Export', url: 'https://tracker.example/ABC-3', body: 'Export risks.',
   state: 'Todo', branchName: null, comments: [], attachmentUrls: [],
@@ -73,6 +85,7 @@ await app.register(ticketGroupRoutes, { deps });
 await app.register(reviewRoutes);
 
 test.after(async () => {
+  setReviewerForTests('claude', null);
   await app.close();
   store.db.close();
   fs.rmSync(root, { recursive: true, force: true });
