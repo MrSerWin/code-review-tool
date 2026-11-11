@@ -29,9 +29,12 @@ Two rules shape everything else:
 ## Layout
 
 ```
-package.json  tsconfig.json  .env.example  LICENSE  README.md
+package.json  tsconfig.json  .env.example  LICENSE  README.md  CONTRIBUTING.md
+.github/      # issue and pull request templates, the CI workflow
 docker/Dockerfile.git  docker/entrypoint.sh
-docs/design.md
+docs/design.md  docs/configuration.md  docs/usage.md  docs/http-api.md
+docs/mcp.md  docs/previews.md  docs/isolation.md
+docs/images/  # README screenshots and the demo GIF
 src/
   config.ts  types.ts  db.ts  logger.ts  events.ts  logSanitize.ts  gitNames.ts
   resolver.ts  prLinks.ts  localRepos.ts  gitSandbox.ts  remoteBranches.ts
