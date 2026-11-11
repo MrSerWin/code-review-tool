@@ -5,6 +5,24 @@
   "license": "MIT",
   "type": "module",
   "description": "Local, read-only code-review tool for GitHub branches and pull requests.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MrSerWin/code-review-tool.git"
+  },
+  "homepage": "https://github.com/MrSerWin/code-review-tool#readme",
+  "bugs": {
+    "url": "https://github.com/MrSerWin/code-review-tool/issues"
+  },
+  "keywords": [
+    "code-review",
+    "ai-code-review",
+    "claude-code",
+    "codex",
+    "cursor",
+    "mcp",
+    "mcp-server",
+    "llm"
+  ],
   "bin": {
     "code-review-mcp": "dist/mcp.js"
   },
