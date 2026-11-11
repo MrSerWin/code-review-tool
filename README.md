@@ -524,7 +524,7 @@ the requirements inferred from the change.
   status; its tooltip has the breakdown. A row expands to its branches, each
   with its GitHub links and latest outcome, and that branch's runs newest
   first (five, then "N older runs"). **All runs** is the flat list, 25 runs a
-  page. The filter matches ticket key and title, repository, branch, and group
+  page; its Ticket column falls back to the title of pasted requirements. The filter matches ticket key and title, repository, branch, and group
   key. The chosen view is remembered, and the list refreshes every 4 s while
   something on screen is running.
 - **Links in run tables** — in every table of runs (All runs, an expanded
@@ -625,7 +625,7 @@ authentication. Errors come back as `{ "error": "…" }` with a 4xx or 5xx statu
 | GET | `/api/local-repos/:repo/parent` | `?branch=` | `{ branch, base, reason, distance, defaultBase }`: the detected parent; `reason` is `ancestor`, `fork-point`, or `default` |
 | GET | `/api/tickets/<input>` | | `{ ticket, targets }`: what any [input](#inputs) resolves to, without starting anything (URL-encode the input, slashes included; at most 512 characters, as for `POST /api/reviews`) |
 | POST | `/api/reviews` | `{ input, targets?, reviewer?, model?, requirementsText?, includeWorkingTree?, baseBranch? }` | `201 { reviews }`: one queued run per target; `targets` narrows a ticket to some of its branches |
-| GET | `/api/reviews` | `?q=&ticket=&repo=&branch=&group=&limit=&offset=` | `{ reviews, total }`, newest first; `limit` 1–500, default 50; each row has `links: { branch, pr }`, its GitHub URLs (`pr` null without a PR number) |
+| GET | `/api/reviews` | `?q=&ticket=&repo=&branch=&group=&limit=&offset=` | `{ reviews, total }`, newest first; `limit` 1–500, default 50; each row has `links: { branch, pr }`, its GitHub URLs (`pr` null without a PR number), and `ticket_label: { text, key, from }` (null when nothing names the ticket): the ticket key (`from: ticket`), the key in the branch name (`branch`), or the title of pasted requirements (`title`, `key` null) |
 | GET | `/api/review-groups` | `?q=&status=active\|failed\|done&limit=&offset=` | `{ groups, total }`, most recently active group first; `limit` 1–100, default 20; each branch has `prNumber` (the newest any of its runs knew) and `links: { branch, pr }` |
 | GET | `/api/reviews/:id` | | `{ review, requirements, findings, observations, changed_files, logs, comparison, links, ticket_group }`; `ticket_group` (null without a ticket) has the group key, this branch's parent, and the latest coverage with each requirement's `where` (`here`, `elsewhere`, `nowhere`) seen from this branch; `links` holds the GitHub URLs (`repo`, `branch`, `pr`, `compare`, `head`, `base`); `changed_files` is the changed set the anchor check used (`path`, `status`, `old_path`, `additions`, `deletions`) |
 | GET | `/api/reviews/:id/report` | | the Markdown report (`text/markdown`) |

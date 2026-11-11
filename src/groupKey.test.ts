@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { cleanGroupTitle, fallbackGroupKey, groupKeyFor, ticketKeyFromBranch } from './groupKey.js';
+import { cleanGroupTitle, fallbackGroupKey, groupKeyFor, ticketKeyFromBranch, ticketLabel } from './groupKey.js';
 
 test('the ticket key wins over anything in the branch name', () => {
   assert.equal(groupKeyFor({ ticket_key: 'ABC-123', repo: 'my-service', branch: 'feat/xyz-9-other' }), 'ABC-123');
@@ -53,4 +53,22 @@ test('a group title drops the heading marker and a leading copy of the key', () 
   assert.equal(cleanGroupTitle('ABC-1234: Other', 'ABC-123'), 'ABC-1234: Other');
   assert.equal(cleanGroupTitle('# ABC-123', 'ABC-123'), null);
   assert.equal(cleanGroupTitle(null, 'ABC-123'), null);
+});
+
+test('the ticket label of a run: its ticket, else the key in its branch, else the pasted title', () => {
+  const run = { repo: 'svc', branch: 'feat/loan-due-dates', ticket_key: null, ticket_title: null };
+  assert.deepEqual(
+    ticketLabel({ ...run, ticket_key: 'ABC-123', ticket_title: 'Export', group_key: 'ABC-123' }),
+    { text: 'ABC-123', key: 'ABC-123', from: 'ticket' },
+  );
+  assert.deepEqual(
+    ticketLabel({ ...run, branch: 'feat/abc-7-x', group_key: 'ABC-7' }),
+    { text: 'ABC-7', key: 'ABC-7', from: 'branch' },
+  );
+  // Pasted requirements: no key anywhere, but the first line of the text is stored as the title.
+  assert.deepEqual(
+    ticketLabel({ ...run, ticket_title: '  ABC-42: Add due dates to loans ', group_key: 'svc#feat/loan-due-dates' }),
+    { text: 'ABC-42: Add due dates to loans', key: null, from: 'title' },
+  );
+  assert.equal(ticketLabel({ ...run, ticket_title: ' ', group_key: 'svc#feat/loan-due-dates' }), null);
 });

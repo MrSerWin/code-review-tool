@@ -37,12 +37,6 @@ type ReviewerLabel = (name: string) => string;
 const stop = (e: MouseEvent): void => e.stopPropagation();
 const ticketPath = (key: string): string => `/ticket/${encodeURIComponent(key)}`;
 
-/** The group key of a run when it names a ticket, not the run's own repo#branch. */
-function ticketLikeGroup(r: Review): string | null {
-  const key = r.group_key;
-  return key && key !== `${r.repo}#${r.branch}` ? key : null;
-}
-
 export default function History({
   reviewerLabel,
   refreshToken,
@@ -345,11 +339,13 @@ function GroupRow({
           </div>
         </td>
         <td className="group-summary" title={outcomeBreakdown(group)}>
-          <span className="group-counts muted">
-            {plural(branchCount, 'branch', 'branches')} · {plural(group.runCount, 'run', 'runs')}
-          </span>
-          <GroupOutcome group={group} />
-          <span className="group-when muted">{fmtTime(group.lastActivity)}</span>
+          <div className="group-summary-line">
+            <span className="group-counts muted">
+              {plural(branchCount, 'branch', 'branches')} · {plural(group.runCount, 'run', 'runs')}
+            </span>
+            <GroupOutcome group={group} />
+            <span className="group-when muted">{fmtTime(group.lastActivity)}</span>
+          </div>
         </td>
         <td className="col-activity nowrap muted">{fmtTime(group.lastActivity)}</td>
       </tr>
@@ -553,21 +549,22 @@ function RunsTable({
 }
 
 function TicketCell({ review: r }: { review: Review }) {
-  if (r.ticket_key) {
+  const label = r.ticket_label;
+  if (!label) return <span className="muted">—</span>;
+  if (!label.key) {
     return (
-      <Link to={ticketPath(r.ticket_key)} className="mono" title={r.ticket_key}>
-        {r.ticket_key}
-      </Link>
+      <span className="ticket-title muted" title={`Pasted requirements: ${label.text}`}>
+        {label.text}
+      </span>
     );
   }
-  // Pasted requirements carry no ticket key, but the branch name may.
-  const key = ticketLikeGroup(r);
-  if (key) {
-    return (
-      <Link to={ticketPath(key)} className="mono muted" title={`${key} — key found in the branch name`}>
-        {key}
-      </Link>
-    );
-  }
-  return <span className="muted">—</span>;
+  return (
+    <Link
+      to={ticketPath(label.key)}
+      className={label.from === 'ticket' ? 'mono' : 'mono muted'}
+      title={label.from === 'ticket' ? label.key : `${label.key}: key found in the branch name`}
+    >
+      {label.text}
+    </Link>
+  );
 }

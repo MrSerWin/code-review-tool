@@ -340,3 +340,19 @@ test('a review in progress cannot be deleted; a settled one can', async () => {
   assert.equal(deleted.statusCode, 200);
   assert.equal(store.getReview(review.id), undefined);
 });
+
+test('every run in the list carries the label its ticket cell shows', async () => {
+  const pasted = store.createReview({
+    repo: 'svc', branch: 'feat/pasted-label', base_branch: 'main', status: 'done',
+    ticket_title: 'ABC-42: Add due dates to loans', ticket_body: 'ABC-42: Add due dates to loans\n\n1. Due dates.',
+  });
+  const bare = store.createReview({ repo: 'svc', branch: 'feat/no-label', base_branch: 'main', status: 'done' });
+  const { reviews } = (await app.inject({ method: 'GET', url: '/api/reviews?limit=200' })).json() as {
+    reviews: { id: number; ticket_label: unknown }[];
+  };
+  const byId = new Map(reviews.map((r) => [r.id, r.ticket_label]));
+  assert.deepEqual(byId.get(pasted.id), { text: 'ABC-42: Add due dates to loans', key: null, from: 'title' });
+  assert.equal(byId.get(bare.id), null);
+  const keyed = reviews.find((r) => (r.ticket_label as { from?: string } | null)?.from === 'ticket');
+  assert.ok(keyed, 'a run of a tracker ticket is labelled with its key');
+});

@@ -1014,9 +1014,11 @@ table.group-grid { table-layout: fixed; }
 .group-key .ext-link { flex: none; }
 .group-title { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-.group-summary { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.group-summary > * + * { margin-left: var(--space-2); }
-.group-counts { display: inline-block; min-width: 9rem; font-size: var(--fs-sm); }
+.group-summary { white-space: nowrap; }
+/* The counts give way first; the outcome badge is never clipped. */
+.group-summary-line { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
+.group-counts { flex: 0 1 9rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: var(--fs-sm); }
+.group-summary-line > .badge, .group-summary-line > .pill { flex: none; }
 /* Last activity moves into the summary cell when its own column is hidden. */
 .group-when { display: none; font-size: var(--fs-xs); }
 
@@ -1065,7 +1067,8 @@ a.branch-link { color: var(--accent); }
 .branch-title .branch-link { min-width: 0; }
 .branch-cell .branch-link { flex: 0 1 auto; min-width: 0; max-width: 28ch; }
 .runs-grid td { vertical-align: middle; }
-.runs-grid .ticket-cell > a {
+.runs-grid .ticket-cell > a,
+.runs-grid .ticket-cell > .ticket-title {
   display: inline-block;
   max-width: 20ch;
   overflow: hidden;
@@ -1135,7 +1138,7 @@ tr.group-runs > td {
   .group-grid th.col-activity, .group-grid td.col-activity { display: none; }
   .group-grid col.col-summary { width: 9.5rem; }
   .group-summary { white-space: normal; }
-  .group-summary > * + * { margin-left: 0; }
+  .group-summary-line { display: block; }
   .group-counts, .group-when { display: block; min-width: 0; }
   .group-summary .badge, .group-summary .pill { margin: 2px 0; }
   .group-line { flex-wrap: wrap; row-gap: 2px; }

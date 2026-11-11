@@ -978,8 +978,10 @@ and title (`findingCompare.ts`) into `resolved`, `new`, and `persistent` — and
 `links`, the GitHub URLs built by `githubLinks.ts` from the configured
 organization (the UI cannot know it). The list endpoints add a smaller
 `links: { branch, pr }` (`rowLinks()`) to every row of `GET /api/reviews` and to
-every branch of `GET /api/review-groups`, so run tables can link to GitHub; the
-MCP formatters pick their fields explicitly and are unaffected.
+every branch of `GET /api/review-groups`, so run tables can link to GitHub;
+`GET /api/reviews` rows also carry `ticket_label` (`ticketLabel()` in
+`groupKey.ts`), what the Ticket column shows. The MCP formatters pick their
+fields explicitly and are unaffected.
 
 ## Report writer (`src/reportWriter.ts`)
 
