@@ -195,6 +195,7 @@ export default function ReviewDetail({ id }: { id: number }) {
   const running = ACTIVE.has(review.status);
   const finished = review.status === 'done';
   const diff = diffCounts(review);
+  const shas = shaPair(review);
   const unmet = requirements.filter((r) => r.status === 'missing' || r.status === 'partial');
   const byId = requirements.some((r) => r.requirement_id);
   const checklistIds = group?.checklist ? new Set(group.checklist.map((c) => c.id)) : null;
@@ -475,7 +476,7 @@ export default function ReviewDetail({ id }: { id: number }) {
             </dd>
             <dt>Commits</dt>
             <dd className="mono">
-              {shaPair(review) ?? (
+              {shas !== null ? <span className="muted">{shas}</span> : (
                 <>
                   <ShaLink sha={review.head_sha} href={links?.head ?? null} /> /{' '}
                   <ShaLink sha={review.base_sha} href={links?.base ?? null} />
@@ -494,7 +495,7 @@ export default function ReviewDetail({ id }: { id: number }) {
               )}
             </dd>
             <dt>Requirements</dt>
-            <dd className="mono">{requirementsCount(review)}</dd>
+            <dd className={review.requirements_total === null ? 'mono muted' : 'mono'}>{requirementsCount(review)}</dd>
             <dt>Reviewer</dt>
             <dd>
               {review.reviewer ? reviewerLabel(review.reviewer) : '—'}
