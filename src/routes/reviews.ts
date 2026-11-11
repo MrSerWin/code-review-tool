@@ -350,7 +350,9 @@ export async function reviewRoutes(app: FastifyInstance): Promise<void> {
     if (!parsed.success) return reply.code(400).send({ error: 'Invalid review id' });
     const review = getReview(parsed.data.id);
     if (!review) return reply.code(404).send({ error: 'Review not found' });
-    if (ACTIVE.has(review.status)) cancelReview(review.id);
+    if (ACTIVE.has(review.status)) {
+      return reply.code(409).send({ error: `Review is still ${review.status}; cancel it first` });
+    }
 
     const abs = reportAbsPath(review);
     if (abs) {

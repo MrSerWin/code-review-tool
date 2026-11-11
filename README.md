@@ -542,7 +542,8 @@ the requirements inferred from the change.
   what is pushed. **Open in Linear** (or Jira, YouTrack, Azure DevOps, GitHub)
   opens the ticket in its tracker, and the ticket key in the Run card has a ↗
   to it as well; neither shows for pasted requirements. Actions: **Cancel** while it runs; afterwards **Re-run**,
-  **Download**, **Copy report**, and **Delete**.
+  **Download**, **Copy report**, and **Delete** (asks first; not offered while
+  the run is in progress).
 - **Ticket page** (`/ticket/<key>`) — the ticket group: its chains with
   parents and the latest run of each branch, the ticket coverage, **Review
   ticket**, **Recompute coverage** and **Re-detect order** (see
@@ -631,7 +632,7 @@ authentication. Errors come back as `{ "error": "…" }` with a 4xx or 5xx statu
 | GET | `/api/reviews/:id/events` | | server-sent events: `status`, `log`, and `done` messages |
 | POST | `/api/reviews/:id/rerun` | `{ reviewer?, model? }` | `201 { review }`: a new run of the same branch |
 | POST | `/api/reviews/:id/cancel` | | `{ review }`; `409` when it is not queued or running |
-| DELETE | `/api/reviews/:id` | | `{ ok: true }`; cancels it if needed, deletes the row, the report file, and its raw pass outputs |
+| DELETE | `/api/reviews/:id` | | `{ ok: true }`; deletes the row, the report file, and its raw pass outputs; 409 while the review is queued or running (cancel it first) |
 | GET | `/api/ticket-groups/:key` | `?run=` | `{ group, coverage, latest_coverage, coverage_pending, run }`: the chains per repository in stack order (each branch with `parent`, `parentReason`, `depth`, `latest` and `latestDone` run with `code_verdict`), the latest finished coverage, a newer running or failed pass, and the latest (or the given) ticket review run; `404` without a group |
 | GET | `/api/ticket-groups/:key/coverage/report` | `?id=` | the coverage report (`text/markdown`) |
 | GET | `/api/ticket-groups/:key/preview-plan` | `?recipe=` (optional with one recipe) | `{ ticket, recipe, roles, request, live_preview, other_live, notes }`: per role the chain tip of its repo (`branch`, `base`, `usedBase`, `source`, `chain`), the `POST /api/previews` body that runs it, a queued/starting/ready preview that runs exactly these branches, the ticket's other live previews; `404` without a group, `400` for an unknown recipe or several recipes and none named, `409` when previews are disabled |

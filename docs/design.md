@@ -1033,7 +1033,8 @@ Dark-first, compact. What each page offers is described in
   header is the location's tooltip; a tool-check finding or observation a
   `tool` badge), observations, the comparison
   with the previous run, a live log fed by SSE, and the Preview card. Actions: cancel, re-run with an optional reviewer and model,
-  download report, copy report, delete.
+  download report, copy report, delete (confirmed, and only once the run has
+  ended, as the API refuses an active one).
 - **Ticket view** (`/ticket/:key`) — the ticket group (`GET
   /api/ticket-groups/:key`): chains with parents, drag or ↑ ↓ (`PUT .../order`,
   a linear chain), a parent menu per branch (`PUT .../parent`), the latest run

@@ -402,11 +402,16 @@ export default function ReviewDetail({ id }: { id: number }) {
               <Icon name="copy" />
               Copy report
             </Button>
-            <span className="banner-divider" aria-hidden="true" />
-            <Button variant="danger" onClick={() => void remove()}>
-              <Icon name="trash" />
-              Delete
-            </Button>
+            {/* The API refuses to delete a run in progress; it is cancelled first. */}
+            {!running && (
+              <>
+                <span className="banner-divider" aria-hidden="true" />
+                <Button variant="danger" onClick={() => void remove()}>
+                  <Icon name="trash" />
+                  Delete
+                </Button>
+              </>
+            )}
           </div>
         </div>
       </div>

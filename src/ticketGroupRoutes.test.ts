@@ -327,3 +327,16 @@ test('an empty model list refuses a start with the login hint', async () => {
     setReviewerForTests('codex', null);
   }
 });
+
+test('a review in progress cannot be deleted; a settled one can', async () => {
+  const review = store.createReview({ repo: 'svc', branch: 'feat/delete-me', base_branch: 'main', status: 'reviewing' });
+  const refused = await app.inject({ method: 'DELETE', url: `/api/reviews/${review.id}` });
+  assert.equal(refused.statusCode, 409);
+  assert.match(refused.json().error, /cancel it first/i);
+  assert.equal(store.getReview(review.id)?.status, 'reviewing');
+
+  store.updateReview(review.id, { status: 'cancelled' });
+  const deleted = await app.inject({ method: 'DELETE', url: `/api/reviews/${review.id}` });
+  assert.equal(deleted.statusCode, 200);
+  assert.equal(store.getReview(review.id), undefined);
+});
