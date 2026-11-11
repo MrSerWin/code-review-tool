@@ -31,7 +31,7 @@ import { cancelReview, enqueueReview } from '../queue.js';
 import { rawOutputDir } from '../reportWriter.js';
 import { resolveTargets } from '../resolver.js';
 import { coverageForReview, coveragePending } from '../coverage.js';
-import { fallbackGroupKey, groupKeyFor } from '../groupKey.js';
+import { fallbackGroupKey, groupKeyFor, ticketLabel } from '../groupKey.js';
 import { applyGroupBases, joinGroup, orderBatch } from '../ticketGroups.js';
 import {
   createTicketRun, getTicketBranch, latestDoneCoverage, parseCoverageRequirements, syncMembersFromReviews,
@@ -207,7 +207,10 @@ export async function reviewRoutes(app: FastifyInstance): Promise<void> {
     const { limit = 50, offset = 0, ...rest } = parsed.data;
     const { reviews, total } = listReviews({ ...rest, limit, offset });
     // GitHub pages of each row's branch and PR: the UI does not know the organization.
-    return { reviews: reviews.map((r) => ({ ...r, links: rowLinks(config.GITHUB_ORG, r) })), total };
+    return {
+      reviews: reviews.map((r) => ({ ...r, links: rowLinks(config.GITHUB_ORG, r), ticket_label: ticketLabel(r) })),
+      total,
+    };
   });
 
   // The history grouped by ticket (see groupKey.ts), most recently active first.
@@ -350,7 +353,9 @@ export async function reviewRoutes(app: FastifyInstance): Promise<void> {
     if (!parsed.success) return reply.code(400).send({ error: 'Invalid review id' });
     const review = getReview(parsed.data.id);
     if (!review) return reply.code(404).send({ error: 'Review not found' });
-    if (ACTIVE.has(review.status)) cancelReview(review.id);
+    if (ACTIVE.has(review.status)) {
+      return reply.code(409).send({ error: `Review is still ${review.status}; cancel it first` });
+    }
 
     const abs = reportAbsPath(review);
     if (abs) {

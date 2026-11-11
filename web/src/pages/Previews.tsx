@@ -18,6 +18,7 @@ import RoleBranchInputs, { roleRequests } from '../components/RoleBranchInputs';
 import { Button, Card, Input, Segmented, Toolbar } from '../components/ui';
 import { Link } from '../router';
 import { readStored, writeStored } from '../storage';
+import { fmtClock } from '../time';
 import type { DumpModeRequest, Preview, PreviewLogLine, PreviewRoleRequest, RecipesPayload } from '../types';
 
 /** Lines of log shown inline when a row is expanded. */
@@ -373,7 +374,7 @@ export default function Previews() {
                             {openLogs.length === 0 && <div className="muted">No log output.</div>}
                             {openLogs.map((l) => (
                               <div key={l.id} className={`log-line log-${l.level}`}>
-                                <span className="log-ts">{(l.ts ?? '').slice(11, 19)}</span>
+                                <span className="log-ts" title={l.ts}>{fmtClock(l.ts)}</span>
                                 <span className="log-msg">{l.message}</span>
                               </div>
                             ))}

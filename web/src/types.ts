@@ -65,6 +65,15 @@ export interface Review {
   group_key?: string | null;
   /** GitHub pages of the run's branch and PR; list endpoints only, absent from older servers. */
   links?: RowLinks;
+  /** What the run's ticket cell shows; list endpoints only, absent from older servers. */
+  ticket_label?: TicketLabel | null;
+}
+
+/** A run's ticket as best known; `key` is set when there is a ticket page to link to. */
+export interface TicketLabel {
+  text: string;
+  key: string | null;
+  from: 'ticket' | 'branch' | 'title';
 }
 
 /** The GitHub pages a row of a run table links to. */

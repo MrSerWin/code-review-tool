@@ -30,7 +30,7 @@ export function parseAnthropicStreamLine(line: string, onLog: OnLog): StreamLine
       if (!Array.isArray(content)) return {};
       for (const block of content) {
         if (block?.type === 'text' && typeof block.text === 'string') {
-          const text = block.text.trim();
+          const text = logProse(block.text);
           if (text) onLog('info', truncate(text, MAX_LOG_CHARS));
         } else if (block?.type === 'tool_use') {
           onLog('info', `tool: ${block.name}${describeToolInput(block.input)}`);
@@ -56,6 +56,17 @@ export function describeToolInput(input: unknown): string {
   const hint = i.file_path ?? i.path ?? i.absolute_path ?? i.target_file
     ?? i.pattern ?? i.query ?? i.command;
   return typeof hint === 'string' ? ` ${truncate(hint, 160)}` : '';
+}
+
+/**
+ * The part of an assistant message worth a log line. A pass ends with its
+ * structured answer, which the page renders once parsed, so the JSON payload
+ * (a ```json block, closed or not, or a message that is only a JSON object)
+ * stays out of the log; the answer itself still reaches the runner untouched.
+ */
+export function logProse(text: string): string {
+  const prose = text.replace(/```json[^\n]*\n[\s\S]*?(?:```|$)/gi, '').trim();
+  return /^\{[\s\S]*\}$/.test(prose) ? '' : prose;
 }
 
 export function truncate(text: string, max: number): string {
