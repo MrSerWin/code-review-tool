@@ -332,7 +332,8 @@ npm run review -- 'local:my-service#feat/b' --base feat/a     # diff against an 
   `GET /api/local-repos/<repo>/parent?branch=<name>` shows what was detected.
 - A default-branch base is fetched fresh from GitHub inside the sandbox, so the
   diff is measured against the base as it is now; if GitHub cannot be reached,
-  the clone's own `origin/<base>` is used and the log says so. Any other base
+  the clone's own `origin/<base>` is used and the log warns that it may be
+  stale (a clone with no GitHub remote gets a plain note instead). Any other base
   may be unpushed, so it is copied from the clone (its local branch, else its
   `origin/<base>`).
 - `--working-tree` (UI: **Include uncommitted changes**; MCP:

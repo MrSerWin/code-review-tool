@@ -7,7 +7,8 @@ import type { BaseReason, CheckoutResult, OnLog, ResolvedTarget } from './types.
 import { mergeChangedFiles } from './changedFiles.js';
 import { assertSafeName } from './gitNames.js';
 import {
-  branchRefs, branchTip, captureWorkingTree, currentBranch, detectBaseBranch, localRepoPath, planBaseSource,
+  baseFallbackLog, branchRefs, branchTip, captureWorkingTree, currentBranch, detectBaseBranch, hasGithubRemote, localRepoPath,
+  planBaseSource,
 } from './localRepos.js';
 
 export function sanitizeBranchForPath(branch: string): string {
@@ -386,17 +387,21 @@ async function fetchLocalCheckout(
     if (fromGithub.code === 0) {
       onLog('info', `Base ${target.baseBranch}${reason} fetched from GitHub`);
     } else {
-      onLog('warn', `Could not fetch ${target.baseBranch} from GitHub; using the local clone's origin/${target.baseBranch} (may be stale)`);
       const fallback = await inRepo(
         ['git', 'fetch', '--no-tags', LOCAL_SRC, `+refs/remotes/origin/${target.baseBranch}:${baseDst}`],
         { readOnlyMount: mount, allowFailure: true },
       );
+      let used = `origin/${target.baseBranch}`;
       if (fallback.code !== 0) {
         await inRepo(
           ['git', 'fetch', '--no-tags', LOCAL_SRC, `+refs/heads/${target.baseBranch}:${baseDst}`],
           { readOnlyMount: mount },
         );
+        used = 'local branch';
       }
+      const baseTip = (await inRepo(['git', 'rev-parse', baseDst])).stdout.trim();
+      const githubRemote = await hasGithubRemote(localPath);
+      onLog(...baseFallbackLog({ base: target.baseBranch, reason, githubRemote, used, tip: baseTip }));
     }
   }
 

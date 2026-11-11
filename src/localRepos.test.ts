@@ -12,6 +12,9 @@ import {
   describeLocalRepo,
   describeParent,
   detectParentBranch,
+  baseFallbackLog,
+  hasGithubRemote,
+  isGithubUrl,
   looksLikeChild,
   planBaseSource,
   isSafeRelativePath,
@@ -301,6 +304,51 @@ test('base source: the default comes from GitHub, anything else from the clone',
   assert.equal(planBaseSource('feat/a', 'main', { localHead: false, originRef: true }), 'local-origin');
   assert.equal(planBaseSource('feat/a', null, { localHead: true, originRef: false }), 'local-head');
   assert.throws(() => planBaseSource('feat/a', 'main', { localHead: false, originRef: false }), /neither locally/);
+});
+
+test('a GitHub remote is recognised in https, ssh, and scp form only', () => {
+  for (const url of [
+    'https://github.com/acme/api.git',
+    'https://token@github.com/acme/api',
+    'ssh://git@github.com/acme/api.git',
+    'git@github.com:acme/api.git',
+  ]) assert.equal(isGithubUrl(url), true, url);
+  for (const url of [
+    '/tmp/bundles/api.bundle',
+    'file:///srv/git/api.git',
+    'https://gitlab.com/acme/api.git',
+    'https://github.com.evil.example/acme/api.git',
+    'git@example.com:github.com/api.git',
+  ]) assert.equal(isGithubUrl(url), false, url);
+});
+
+test('hasGithubRemote reads the remotes of the clone', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'crt-remote-'));
+  const repo = path.join(root, 'api');
+  try {
+    fs.mkdirSync(repo);
+    git(repo, 'init', '-b', 'main');
+    assert.equal(await hasGithubRemote(repo), false, 'no remote');
+    git(repo, 'remote', 'add', 'origin', path.join(root, 'api.bundle'));
+    assert.equal(await hasGithubRemote(repo), false, 'a file remote');
+    git(repo, 'remote', 'add', 'upstream', 'git@github.com:acme/api.git');
+    assert.equal(await hasGithubRemote(repo), true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a failed GitHub fetch of the base warns only when the clone has a GitHub remote', () => {
+  const stale = baseFallbackLog({ base: 'main', reason: '', githubRemote: true, used: 'origin/main', tip: 'abc1234' });
+  assert.deepEqual(stale, [
+    'warn',
+    "Could not fetch main from GitHub; using the local clone's origin/main (may be stale)",
+  ]);
+  const offline = baseFallbackLog({ base: 'main', reason: '', githubRemote: false, used: 'origin/main', tip: 'abc1234' });
+  assert.deepEqual(offline, [
+    'info',
+    'Base main taken from the local clone (origin/main @ abc1234), which has no GitHub remote',
+  ]);
 });
 
 // --- parent detection against a throwaway repository ---------------------------
