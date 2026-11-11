@@ -82,3 +82,26 @@ export function cleanGroupTitle(title: string | null | undefined, key: string): 
   text = text.replace(leadingKey, '').trim();
   return text || null;
 }
+
+/** What a run's ticket cell shows; `key` is set when there is a ticket page to link to. */
+export interface TicketLabel {
+  text: string;
+  key: string | null;
+  from: 'ticket' | 'branch' | 'title';
+}
+
+/**
+ * The ticket a run belongs to, as best known: its tracker key, else the key
+ * found in its branch name, else the title of pasted requirements (their first
+ * line), which names the work but has no ticket page.
+ */
+export function ticketLabel(
+  r: GroupKeyInput & { ticket_title: string | null | undefined; group_key: string | null | undefined },
+): TicketLabel | null {
+  const key = r.ticket_key?.trim();
+  if (key) return { text: key, key, from: 'ticket' };
+  const group = r.group_key;
+  if (group && group !== fallbackGroupKey(r.repo, r.branch)) return { text: group, key: group, from: 'branch' };
+  const title = r.ticket_title?.trim();
+  return title ? { text: title, key: null, from: 'title' } : null;
+}

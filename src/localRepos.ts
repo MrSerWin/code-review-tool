@@ -15,7 +15,7 @@ import path from 'node:path';
 import { ALLOWED_REPOS, assertAllowedRepo, config } from './config.js';
 import { assertSafeName, isSafeName } from './gitNames.js';
 import { logger } from './logger.js';
-import type { BaseReason, ResolvedTarget } from './types.js';
+import type { BaseReason, LogLevel, ResolvedTarget } from './types.js';
 
 const REPO_NAME_SAFE = /^[A-Za-z0-9._-]+$/;
 
@@ -571,6 +571,39 @@ export function planBaseSource(
   if (refs.localHead) return 'local-head';
   if (refs.originRef) return 'local-origin';
   throw new Error(`Base branch ${JSON.stringify(base)} exists neither locally nor as origin/${base} in the local clone`);
+}
+
+/** A github.com remote URL: https, ssh, or the scp-like `git@github.com:org/repo`. */
+export function isGithubUrl(url: string): boolean {
+  return /^(?:(?:https?|ssh|git):\/\/(?:[^@/\s]+@)?|[^@/\s]+@)github\.com(?::\d+)?[:/]/i.test(url.trim());
+}
+
+/** True when any remote of the clone points at GitHub; an unreadable remote list counts as one. */
+export async function hasGithubRemote(repoPath: string): Promise<boolean> {
+  const result = await gitRead(repoPath, ['remote', '-v']);
+  if (result.code !== 0) return true;
+  return result.stdout
+    .toString('utf8')
+    .split('\n')
+    .some((line) => isGithubUrl(line.split(/\s+/)[1] ?? ''));
+}
+
+/**
+ * The log line for a default-branch base GitHub did not serve. A clone with a
+ * GitHub remote may lag behind it; a clone without one has nothing to lag
+ * behind, so its own copy is simply the base.
+ */
+export function baseFallbackLog(o: {
+  base: string;
+  reason: string;
+  githubRemote: boolean;
+  used: string;
+  tip: string;
+}): [LogLevel, string] {
+  if (o.githubRemote) {
+    return ['warn', `Could not fetch ${o.base} from GitHub; using the local clone's origin/${o.base} (may be stale)`];
+  }
+  return ['info', `Base ${o.base}${o.reason} taken from the local clone (${o.used} @ ${o.tip.slice(0, 7)}), which has no GitHub remote`];
 }
 
 // ---------------------------------------------------------------------------

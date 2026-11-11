@@ -219,7 +219,7 @@ test('recompute coverage, and the coverage seen from one review', async () => {
 });
 
 test('incident: stored parents with the child at position 0, targets listed children first, frontend first', async () => {
-  // The state of ABC-1302 when a ticket review queued the children first.
+  // The state of INC-9 when a ticket review queued the children first.
   const KEY = 'INC-9';
   const P = 'feat/inc-9-export';
   const C = 'feat/inc-9-dates';
@@ -326,4 +326,41 @@ test('an empty model list refuses a start with the login hint', async () => {
   } finally {
     setReviewerForTests('codex', null);
   }
+});
+
+test('a review in progress cannot be deleted; a settled one can', async () => {
+  for (const status of ['queued', 'fetching', 'reviewing'] as const) {
+    const review = store.createReview({ repo: 'svc', branch: `feat/delete-${status}`, base_branch: 'main', status });
+    const refused = await app.inject({ method: 'DELETE', url: `/api/reviews/${review.id}` });
+    assert.equal(refused.statusCode, 409, status);
+    assert.match(refused.json().error, /cancel it first/i);
+    assert.deepEqual(store.getReview(review.id), review, `${status} row left as it was`);
+  }
+
+  for (const status of ['done', 'cancelled'] as const) {
+    const review = store.createReview({ repo: 'svc', branch: `feat/delete-${status}`, base_branch: 'main', status });
+    const deleted = await app.inject({ method: 'DELETE', url: `/api/reviews/${review.id}` });
+    assert.equal(deleted.statusCode, 200, status);
+    assert.equal(store.getReview(review.id), undefined, status);
+  }
+});
+
+test('every run in the list carries the label its ticket cell shows', async () => {
+  const row = (branch: string, extra: Partial<Parameters<typeof store.createReview>[0]> = {}) =>
+    store.createReview({ repo: 'svc', branch, base_branch: 'main', status: 'done', ...extra });
+  const keyed = row('feat/label-ticket', { ticket_key: 'ABC-3', ticket_title: 'Export' });
+  const fromBranch = row('feat/abc-7-x');
+  const pasted = row('feat/pasted-label', {
+    ticket_title: 'ABC-42: Add due dates to loans', ticket_body: 'ABC-42: Add due dates to loans\n\n1. Due dates.',
+  });
+  const bare = row('feat/no-label');
+  const { reviews } = (await app.inject({ method: 'GET', url: '/api/reviews?limit=500' })).json() as {
+    reviews: { id: number; ticket_label: unknown }[];
+  };
+  const byId = new Map(reviews.map((r) => [r.id, r.ticket_label]));
+  assert.deepEqual(byId.get(keyed.id), { text: 'ABC-3', key: 'ABC-3', from: 'ticket' });
+  assert.deepEqual(byId.get(fromBranch.id), { text: 'ABC-7', key: 'ABC-7', from: 'branch' });
+  assert.deepEqual(byId.get(pasted.id), { text: 'ABC-42: Add due dates to loans', key: null, from: 'title' });
+  assert.ok(byId.has(bare.id), 'the bare run is listed');
+  assert.equal(byId.get(bare.id), null);
 });

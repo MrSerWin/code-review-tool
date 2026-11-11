@@ -18,6 +18,8 @@ import {
 import { ModelsRefresh } from '../components/ModelsRefresh';
 import { modelSourceText, noModelsNotice, pickModel, runBlocked } from '../modelChoice';
 import { Link, navigate } from '../router';
+import { cardCount, diffCounts, emptyNote, requirementsCount, shaPair } from '../runView';
+import { fmtClock } from '../time';
 import { openTicketLabel, openTicketTitle } from '../tickets';
 import type {
   BranchCoverageLine,
@@ -105,10 +107,12 @@ export default function ReviewDetail({ id }: { id: number }) {
   const [rerunReviewer, setRerunReviewer] = useState('');
   const [rerunModel, setRerunModel] = useState('');
   const logRef = useRef<HTMLDivElement | null>(null);
+  const loadedStatus = useRef<string | null>(null);
 
   const load = useCallback(async () => {
     try {
       const payload = await api.review(id);
+      loadedStatus.current = payload.review.status;
       setData(payload);
       setLive(payload.logs);
       setError(null);
@@ -160,8 +164,9 @@ export default function ReviewDetail({ id }: { id: number }) {
         ]);
       } else if (evt.type === 'status') {
         setData((prev) => (prev ? { ...prev, review: { ...prev.review, status: evt.status } } : prev));
-        // A terminal status carries the verdict and findings; refetch them.
-        if (!ACTIVE.has(evt.status)) void load();
+        // Each new phase records more of the run (the checkout's counts, then the
+        // verdict and findings); refetch them.
+        if (evt.status !== loadedStatus.current) void load();
       } else if (evt.type === 'done') {
         void load();
       }
@@ -189,6 +194,8 @@ export default function ReviewDetail({ id }: { id: number }) {
   const observations = data.observations ?? [];
   const running = ACTIVE.has(review.status);
   const finished = review.status === 'done';
+  const diff = diffCounts(review);
+  const shas = shaPair(review);
   const unmet = requirements.filter((r) => r.status === 'missing' || r.status === 'partial');
   const byId = requirements.some((r) => r.requirement_id);
   const checklistIds = group?.checklist ? new Set(group.checklist.map((c) => c.id)) : null;
@@ -402,11 +409,16 @@ export default function ReviewDetail({ id }: { id: number }) {
               <Icon name="copy" />
               Copy report
             </Button>
-            <span className="banner-divider" aria-hidden="true" />
-            <Button variant="danger" onClick={() => void remove()}>
-              <Icon name="trash" />
-              Delete
-            </Button>
+            {/* The API refuses to delete a run in progress; it is cancelled first. */}
+            {!running && (
+              <>
+                <span className="banner-divider" aria-hidden="true" />
+                <Button variant="danger" onClick={() => void remove()}>
+                  <Icon name="trash" />
+                  Delete
+                </Button>
+              </>
+            )}
           </div>
         </div>
       </div>
@@ -464,18 +476,26 @@ export default function ReviewDetail({ id }: { id: number }) {
             </dd>
             <dt>Commits</dt>
             <dd className="mono">
-              <ShaLink sha={review.head_sha} href={links?.head ?? null} /> /{' '}
-              <ShaLink sha={review.base_sha} href={links?.base ?? null} />
+              {shas !== null ? <span className="muted">{shas}</span> : (
+                <>
+                  <ShaLink sha={review.head_sha} href={links?.head ?? null} /> /{' '}
+                  <ShaLink sha={review.base_sha} href={links?.base ?? null} />
+                </>
+              )}
             </dd>
             <dt>Diff</dt>
             <dd className="mono">
-              {review.files_changed ?? 0} files <span className="add">+{review.additions ?? 0}</span>{' '}
-              <span className="del">-{review.deletions ?? 0}</span>
+              {typeof diff === 'string' ? (
+                <span className="muted">{diff}</span>
+              ) : (
+                <>
+                  {diff.files} files <span className="add">+{diff.additions}</span>{' '}
+                  <span className="del">-{diff.deletions}</span>
+                </>
+              )}
             </dd>
             <dt>Requirements</dt>
-            <dd className="mono">
-              {review.requirements_met ?? 0}/{review.requirements_total ?? 0} met
-            </dd>
+            <dd className={review.requirements_total === null ? 'mono muted' : 'mono'}>{requirementsCount(review)}</dd>
             <dt>Reviewer</dt>
             <dd>
               {review.reviewer ? reviewerLabel(review.reviewer) : '—'}
@@ -497,7 +517,7 @@ export default function ReviewDetail({ id }: { id: number }) {
             {live.length === 0 && <div className="muted">No log output yet.</div>}
             {live.map((l) => (
               <div key={l.id} className={`log-line log-${l.level}`}>
-                <span className="log-ts">{(l.ts ?? '').slice(11, 19)}</span>
+                <span className="log-ts" title={l.ts}>{fmtClock(l.ts)}</span>
                 <span className="log-msg">{l.message}</span>
               </div>
             ))}
@@ -524,7 +544,7 @@ export default function ReviewDetail({ id }: { id: number }) {
           </p>
         )}
         {requirements.length === 0 ? (
-          <p className="muted">No requirements recorded.</p>
+          <p className="muted">{emptyNote('requirements', review.status)}</p>
         ) : (
           <div className="table-wrap">
             <table className="grid">
@@ -569,7 +589,7 @@ export default function ReviewDetail({ id }: { id: number }) {
         />
       )}
 
-      <Card title={`Findings (${findings.length})`}>
+      <Card title={cardCount('Findings', findings.length, review.status)}>
         {findings.length === 0 ? (
           verdict && verdict !== 'approve' ? (
             <div className="empty-note">
@@ -584,7 +604,7 @@ export default function ReviewDetail({ id }: { id: number }) {
               </p>
             </div>
           ) : (
-            <p className="muted">No issues found.</p>
+            <p className="muted">{emptyNote('findings', review.status)}</p>
           )
         ) : (
           grouped.map((group) => (
@@ -600,7 +620,7 @@ export default function ReviewDetail({ id }: { id: number }) {
         )}
       </Card>
 
-      <Card title={`Suggestions (non-blocking) · ${observations.length}`}>
+      <Card title={running ? 'Suggestions (non-blocking)' : `Suggestions (non-blocking) · ${observations.length}`}>
         {observations.length === 0 ? (
           <p className="muted">
             {finished

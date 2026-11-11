@@ -801,7 +801,10 @@ function text(result: unknown): string {
 }
 
 test('stdio MCP server: list, start, get, and wait against a stub API', { timeout: 60_000 }, async () => {
-  const stub = await startStub(2);
+  // Done on the fourth read, so the wait sees one running poll before it: the
+  // client SDK drops a progress notification that arrives in the same read as
+  // the response, as the one sent for the final poll may.
+  const stub = await startStub(3);
   const client = await connect({ CODE_REVIEW_API_URL: stub.url });
   try {
     const { tools } = await client.listTools();
@@ -849,7 +852,7 @@ test('stdio MCP server: list, start, get, and wait against a stub API', { timeou
     assert.equal(running.status, 'reviewing');
     assert.equal(running.verdict, null);
 
-    // The stub finishes after two polls; wait_for_review reports progress on the way.
+    // The stub finishes after three polls; wait_for_review reports progress on the way.
     const progress: string[] = [];
     const waited = json(await client.callTool(
       { name: 'wait_for_review', arguments: { id: 10, timeoutSec: 30, pollSec: 1 } },

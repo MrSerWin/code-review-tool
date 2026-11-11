@@ -1,6 +1,6 @@
 import type { OnLog } from '../types.js';
 import type { StreamLineResult } from './types.js';
-import { MAX_LOG_CHARS, truncate } from './anthropicStream.js';
+import { MAX_LOG_CHARS, logProse, truncate } from './anthropicStream.js';
 
 /**
  * Parse one line of `codex exec --json`. Codex speaks its own JSONL: a thread
@@ -68,7 +68,7 @@ function handleItem(eventType: string, item: unknown, onLog: OnLog): StreamLineR
     case 'agent_message': {
       if (eventType !== 'item.completed') return {};
       if (typeof it.text !== 'string') return {};
-      const text = it.text.trim();
+      const text = logProse(it.text);
       if (text) onLog('info', truncate(text, MAX_LOG_CHARS));
       // The last agent_message of the run is the answer; the runner keeps the
       // most recent result it was handed.

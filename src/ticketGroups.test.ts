@@ -193,7 +193,7 @@ test('remote parent choice: PR base, closest contained sibling, else the default
 });
 
 test('a batch is ordered parents first and each child names its parent in the batch', () => {
-  // As the tracker listed ABC-1302: frontend first, children before parents.
+  // As the tracker listed ABC-1: frontend first, children before parents.
   const t = (repo: string, branch: string, baseBranch: string) => ({ repo, branch, baseBranch, prNumber: null });
   const batch = [t('web', B, A), t('svc', B, A), t('web', A, 'main'), t('svc', A, 'main'), t('svc', 'lone', 'main')];
   const steps = groups.orderBatch(batch, (x) => (x.branch === 'lone' ? null : 'ABC-1'));

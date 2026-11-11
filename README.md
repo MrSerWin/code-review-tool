@@ -332,7 +332,8 @@ npm run review -- 'local:my-service#feat/b' --base feat/a     # diff against an 
   `GET /api/local-repos/<repo>/parent?branch=<name>` shows what was detected.
 - A default-branch base is fetched fresh from GitHub inside the sandbox, so the
   diff is measured against the base as it is now; if GitHub cannot be reached,
-  the clone's own `origin/<base>` is used and the log says so. Any other base
+  the clone's own `origin/<base>` is used and the log warns that it may be
+  stale (a clone with no GitHub remote gets a plain note instead). Any other base
   may be unpushed, so it is copied from the clone (its local branch, else its
   `origin/<base>`).
 - `--working-tree` (UI: **Include uncommitted changes**; MCP:
@@ -523,7 +524,7 @@ the requirements inferred from the change.
   status; its tooltip has the breakdown. A row expands to its branches, each
   with its GitHub links and latest outcome, and that branch's runs newest
   first (five, then "N older runs"). **All runs** is the flat list, 25 runs a
-  page. The filter matches ticket key and title, repository, branch, and group
+  page; its Ticket column falls back to the title of pasted requirements. The filter matches ticket key and title, repository, branch, and group
   key. The chosen view is remembered, and the list refreshes every 4 s while
   something on screen is running.
 - **Links in run tables** — in every table of runs (All runs, an expanded
@@ -541,7 +542,8 @@ the requirements inferred from the change.
   what is pushed. **Open in Linear** (or Jira, YouTrack, Azure DevOps, GitHub)
   opens the ticket in its tracker, and the ticket key in the Run card has a ↗
   to it as well; neither shows for pasted requirements. Actions: **Cancel** while it runs; afterwards **Re-run**,
-  **Download**, **Copy report**, and **Delete**.
+  **Download**, **Copy report**, and **Delete** (asks first; not offered while
+  the run is in progress).
 - **Ticket page** (`/ticket/<key>`) — the ticket group: its chains with
   parents and the latest run of each branch, the ticket coverage, **Review
   ticket**, **Recompute coverage** and **Re-detect order** (see
@@ -623,14 +625,14 @@ authentication. Errors come back as `{ "error": "…" }` with a 4xx or 5xx statu
 | GET | `/api/local-repos/:repo/parent` | `?branch=` | `{ branch, base, reason, distance, defaultBase }`: the detected parent; `reason` is `ancestor`, `fork-point`, or `default` |
 | GET | `/api/tickets/<input>` | | `{ ticket, targets }`: what any [input](#inputs) resolves to, without starting anything (URL-encode the input, slashes included; at most 512 characters, as for `POST /api/reviews`) |
 | POST | `/api/reviews` | `{ input, targets?, reviewer?, model?, requirementsText?, includeWorkingTree?, baseBranch? }` | `201 { reviews }`: one queued run per target; `targets` narrows a ticket to some of its branches |
-| GET | `/api/reviews` | `?q=&ticket=&repo=&branch=&group=&limit=&offset=` | `{ reviews, total }`, newest first; `limit` 1–500, default 50; each row has `links: { branch, pr }`, its GitHub URLs (`pr` null without a PR number) |
+| GET | `/api/reviews` | `?q=&ticket=&repo=&branch=&group=&limit=&offset=` | `{ reviews, total }`, newest first; `limit` 1–500, default 50; each row has `links: { branch, pr }`, its GitHub URLs (`pr` null without a PR number), and `ticket_label: { text, key, from }` (null when nothing names the ticket): the ticket key (`from: ticket`), the key in the branch name (`branch`), or the title of pasted requirements (`title`, `key` null) |
 | GET | `/api/review-groups` | `?q=&status=active\|failed\|done&limit=&offset=` | `{ groups, total }`, most recently active group first; `limit` 1–100, default 20; each branch has `prNumber` (the newest any of its runs knew) and `links: { branch, pr }` |
 | GET | `/api/reviews/:id` | | `{ review, requirements, findings, observations, changed_files, logs, comparison, links, ticket_group }`; `ticket_group` (null without a ticket) has the group key, this branch's parent, and the latest coverage with each requirement's `where` (`here`, `elsewhere`, `nowhere`) seen from this branch; `links` holds the GitHub URLs (`repo`, `branch`, `pr`, `compare`, `head`, `base`); `changed_files` is the changed set the anchor check used (`path`, `status`, `old_path`, `additions`, `deletions`) |
 | GET | `/api/reviews/:id/report` | | the Markdown report (`text/markdown`) |
 | GET | `/api/reviews/:id/events` | | server-sent events: `status`, `log`, and `done` messages |
 | POST | `/api/reviews/:id/rerun` | `{ reviewer?, model? }` | `201 { review }`: a new run of the same branch |
 | POST | `/api/reviews/:id/cancel` | | `{ review }`; `409` when it is not queued or running |
-| DELETE | `/api/reviews/:id` | | `{ ok: true }`; cancels it if needed, deletes the row, the report file, and its raw pass outputs |
+| DELETE | `/api/reviews/:id` | | `{ ok: true }`; deletes the row, the report file, and its raw pass outputs; 409 while the review is queued or running (cancel it first) |
 | GET | `/api/ticket-groups/:key` | `?run=` | `{ group, coverage, latest_coverage, coverage_pending, run }`: the chains per repository in stack order (each branch with `parent`, `parentReason`, `depth`, `latest` and `latestDone` run with `code_verdict`), the latest finished coverage, a newer running or failed pass, and the latest (or the given) ticket review run; `404` without a group |
 | GET | `/api/ticket-groups/:key/coverage/report` | `?id=` | the coverage report (`text/markdown`) |
 | GET | `/api/ticket-groups/:key/preview-plan` | `?recipe=` (optional with one recipe) | `{ ticket, recipe, roles, request, live_preview, other_live, notes }`: per role the chain tip of its repo (`branch`, `base`, `usedBase`, `source`, `chain`), the `POST /api/previews` body that runs it, a queued/starting/ready preview that runs exactly these branches, the ticket's other live previews; `404` without a group, `400` for an unknown recipe or several recipes and none named, `409` when previews are disabled |

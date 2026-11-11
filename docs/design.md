@@ -419,8 +419,9 @@ them are fixed.
 
 **Per process.** Every process — lens and synthesis alike — is started from the
 chosen reviewer's `buildArgs()` and `buildChildEnv()`, in its own process
-group. Its stream is parsed line by line; assistant text and tool names are
-forwarded to the log, prefixed with the lens name, and lens start and
+group. Its stream is parsed line by line; assistant text (without its JSON
+answer, which the page renders once parsed) and tool names are forwarded to
+the log, prefixed with the lens name, and lens start and
 completion are logged as `lens security: started` /
 `lens security: 2 findings, 1 observation`. The JSON payload is extracted from
 the last fenced `json` block, falling back to the last balanced `{...}`, and
@@ -977,8 +978,10 @@ and title (`findingCompare.ts`) into `resolved`, `new`, and `persistent` — and
 `links`, the GitHub URLs built by `githubLinks.ts` from the configured
 organization (the UI cannot know it). The list endpoints add a smaller
 `links: { branch, pr }` (`rowLinks()`) to every row of `GET /api/reviews` and to
-every branch of `GET /api/review-groups`, so run tables can link to GitHub; the
-MCP formatters pick their fields explicitly and are unaffected.
+every branch of `GET /api/review-groups`, so run tables can link to GitHub;
+`GET /api/reviews` rows also carry `ticket_label` (`ticketLabel()` in
+`groupKey.ts`), what the Ticket column shows. The MCP formatters pick their
+fields explicitly and are unaffected.
 
 ## Report writer (`src/reportWriter.ts`)
 
@@ -1032,7 +1035,8 @@ Dark-first, compact. What each page offers is described in
   header is the location's tooltip; a tool-check finding or observation a
   `tool` badge), observations, the comparison
   with the previous run, a live log fed by SSE, and the Preview card. Actions: cancel, re-run with an optional reviewer and model,
-  download report, copy report, delete.
+  download report, copy report, delete (confirmed, and only once the run has
+  ended, as the API refuses an active one).
 - **Ticket view** (`/ticket/:key`) — the ticket group (`GET
   /api/ticket-groups/:key`): chains with parents, drag or ↑ ↓ (`PUT .../order`,
   a linear chain), a parent menu per branch (`PUT .../parent`), the latest run
