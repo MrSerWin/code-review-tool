@@ -329,30 +329,38 @@ test('an empty model list refuses a start with the login hint', async () => {
 });
 
 test('a review in progress cannot be deleted; a settled one can', async () => {
-  const review = store.createReview({ repo: 'svc', branch: 'feat/delete-me', base_branch: 'main', status: 'reviewing' });
-  const refused = await app.inject({ method: 'DELETE', url: `/api/reviews/${review.id}` });
-  assert.equal(refused.statusCode, 409);
-  assert.match(refused.json().error, /cancel it first/i);
-  assert.equal(store.getReview(review.id)?.status, 'reviewing');
+  for (const status of ['queued', 'fetching', 'reviewing'] as const) {
+    const review = store.createReview({ repo: 'svc', branch: `feat/delete-${status}`, base_branch: 'main', status });
+    const refused = await app.inject({ method: 'DELETE', url: `/api/reviews/${review.id}` });
+    assert.equal(refused.statusCode, 409, status);
+    assert.match(refused.json().error, /cancel it first/i);
+    assert.deepEqual(store.getReview(review.id), review, `${status} row left as it was`);
+  }
 
-  store.updateReview(review.id, { status: 'cancelled' });
-  const deleted = await app.inject({ method: 'DELETE', url: `/api/reviews/${review.id}` });
-  assert.equal(deleted.statusCode, 200);
-  assert.equal(store.getReview(review.id), undefined);
+  for (const status of ['done', 'cancelled'] as const) {
+    const review = store.createReview({ repo: 'svc', branch: `feat/delete-${status}`, base_branch: 'main', status });
+    const deleted = await app.inject({ method: 'DELETE', url: `/api/reviews/${review.id}` });
+    assert.equal(deleted.statusCode, 200, status);
+    assert.equal(store.getReview(review.id), undefined, status);
+  }
 });
 
 test('every run in the list carries the label its ticket cell shows', async () => {
-  const pasted = store.createReview({
-    repo: 'svc', branch: 'feat/pasted-label', base_branch: 'main', status: 'done',
+  const row = (branch: string, extra: Partial<Parameters<typeof store.createReview>[0]> = {}) =>
+    store.createReview({ repo: 'svc', branch, base_branch: 'main', status: 'done', ...extra });
+  const keyed = row('feat/label-ticket', { ticket_key: 'ABC-3', ticket_title: 'Export' });
+  const fromBranch = row('feat/abc-7-x');
+  const pasted = row('feat/pasted-label', {
     ticket_title: 'ABC-42: Add due dates to loans', ticket_body: 'ABC-42: Add due dates to loans\n\n1. Due dates.',
   });
-  const bare = store.createReview({ repo: 'svc', branch: 'feat/no-label', base_branch: 'main', status: 'done' });
-  const { reviews } = (await app.inject({ method: 'GET', url: '/api/reviews?limit=200' })).json() as {
+  const bare = row('feat/no-label');
+  const { reviews } = (await app.inject({ method: 'GET', url: '/api/reviews?limit=500' })).json() as {
     reviews: { id: number; ticket_label: unknown }[];
   };
   const byId = new Map(reviews.map((r) => [r.id, r.ticket_label]));
+  assert.deepEqual(byId.get(keyed.id), { text: 'ABC-3', key: 'ABC-3', from: 'ticket' });
+  assert.deepEqual(byId.get(fromBranch.id), { text: 'ABC-7', key: 'ABC-7', from: 'branch' });
   assert.deepEqual(byId.get(pasted.id), { text: 'ABC-42: Add due dates to loans', key: null, from: 'title' });
+  assert.ok(byId.has(bare.id), 'the bare run is listed');
   assert.equal(byId.get(bare.id), null);
-  const keyed = reviews.find((r) => (r.ticket_label as { from?: string } | null)?.from === 'ticket');
-  assert.ok(keyed, 'a run of a tracker ticket is labelled with its key');
 });
