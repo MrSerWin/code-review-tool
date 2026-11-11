@@ -19,6 +19,7 @@ import { ModelsRefresh } from '../components/ModelsRefresh';
 import { modelSourceText, noModelsNotice, pickModel, runBlocked } from '../modelChoice';
 import { Link, navigate } from '../router';
 import { cardCount, diffCounts, emptyNote, requirementsCount, shaPair } from '../runView';
+import { fmtClock } from '../time';
 import { openTicketLabel, openTicketTitle } from '../tickets';
 import type {
   BranchCoverageLine,
@@ -515,7 +516,7 @@ export default function ReviewDetail({ id }: { id: number }) {
             {live.length === 0 && <div className="muted">No log output yet.</div>}
             {live.map((l) => (
               <div key={l.id} className={`log-line log-${l.level}`}>
-                <span className="log-ts">{(l.ts ?? '').slice(11, 19)}</span>
+                <span className="log-ts" title={l.ts}>{fmtClock(l.ts)}</span>
                 <span className="log-msg">{l.message}</span>
               </div>
             ))}

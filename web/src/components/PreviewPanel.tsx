@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api';
 import { Link } from '../router';
+import { fmtClock } from '../time';
 import type {
   DumpModeRequest,
   Preview,
@@ -402,7 +403,7 @@ export default function PreviewPanel({
               {tail.length === 0 && <div className="muted">No log output yet.</div>}
               {tail.map((l) => (
                 <div key={l.id} className={`log-line log-${l.level}`}>
-                  <span className="log-ts">{(l.ts ?? '').slice(11, 19)}</span>
+                  <span className="log-ts" title={l.ts}>{fmtClock(l.ts)}</span>
                   <span className="log-msg">{l.message}</span>
                 </div>
               ))}
