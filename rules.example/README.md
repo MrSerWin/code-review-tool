@@ -2,7 +2,7 @@
 
 Repository rules tell every review what the repository itself requires, and
 switch on deterministic tool checks for it. The setup and the check table are
-in [README › Repository rules and tool checks](../README.md#repository-rules-and-tool-checks).
+in [docs/configuration.md › Repository rules and tool checks](../docs/configuration.md#repository-rules-and-tool-checks).
 
 ## Using it
 

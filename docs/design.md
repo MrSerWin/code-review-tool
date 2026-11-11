@@ -2,8 +2,8 @@
 
 How the tool is put together, for anyone reading or extending the code. The
 user-facing setup — environment variables, accepted inputs, the CLI, the HTTP
-API, the MCP tools, and previews — lives in [../README.md](../README.md); this
-document links there instead of repeating it.
+API, the MCP tools, and previews — lives in the [README](../README.md) and the
+files it links; this document links there instead of repeating it.
 
 ## What it does
 
@@ -11,7 +11,7 @@ Input is a ticket key (`ABC-123`, optionally prefixed with its tracker as in
 `jira:ABC-123`) or the ticket's issue link, a GitHub pull request, a tree URL, `repo#branch`, or
 `local:repo#branch` for a branch of a local clone — optionally with
 requirements pasted by hand instead of a ticket (every form:
-[README › Inputs](../README.md#inputs)). The tool resolves that into one or
+[docs/usage.md › Inputs](usage.md#inputs)). The tool resolves that into one or
 more `repo` + `branch` targets, fetches each one inside a Docker sandbox, runs
 a read-only review with one of four agent CLIs (Claude Code, Cursor Agent,
 OpenAI Codex, Grok) against the ticket requirements — five independent lens
@@ -80,7 +80,7 @@ offending keys listed, so the process never starts half-configured. Only
 lives in the schema, and `.env.example` only lists them commented out. The full
 variable table, including the few variables read elsewhere (`LOG_LEVEL`,
 `CODEX_HOME`, `CODE_REVIEW_API_URL`), is in
-[README › Environment](../README.md#environment).
+[docs/configuration.md › Environment](configuration.md#environment).
 
 The same module owns the allowlist:
 
@@ -109,7 +109,7 @@ everything else.
 ## Isolation model
 
 This is the part worth understanding before changing anything. The
-user-facing summary is in [README › Isolation model](../README.md#isolation-model).
+user-facing summary is in [docs/isolation.md › Isolation model](isolation.md#isolation-model).
 
 **Authenticated git never runs on the host.** `runInSandbox()` shells out to
 `docker run --rm` with the sandbox image. The token is referenced by name in the
@@ -156,7 +156,7 @@ commit inside the checkout, never in the clone.
 **The reviewer is read-only and token-free.** Each reviewer definition in
 `src/reviewers/` builds its own argv (`buildArgs()`) and child environment
 (`buildChildEnv()`); the exact read-only and MCP-disabling flags per CLI are in
-[README › Reviewers](../README.md#reviewers). Every child environment starts
+[docs/configuration.md › Reviewers](configuration.md#reviewers). Every child environment starts
 from `buildBaseChildEnv()` in `reviewers/shared.ts`: `buildSanitizedEnv()`,
 an allowlist (`PATH`, `HOME`, `SHELL`, `LANG`, `LC_ALL`, `TERM`, `USER`,
 `LOGNAME`, `TMPDIR`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`) from which
@@ -970,7 +970,7 @@ fallback, and the API under `/api` (routes in `src/server.ts` and
 `src/routes/*.ts`). Handlers validate input with zod and return errors as
 `{ error: string }` with a proper status code. Unknown `/api/` paths are a JSON
 404; other unknown GET paths serve `index.html`. Every endpoint is listed in
-[README › HTTP API](../README.md#http-api).
+[docs/http-api.md › HTTP API](http-api.md#http-api).
 
 `GET /api/reviews/:id` also returns `comparison` — the findings of this run
 against the branch's previous finished run, matched on severity, file, line,
@@ -1007,7 +1007,7 @@ still required before merge.
 Vite + React + TypeScript, dev server on `127.0.0.1:5179` proxying `/api` to
 `PORT`. Plain CSS in `web/src/styles.css` — no UI framework, no CDN.
 Dark-first, compact. What each page offers is described in
-[README › The web UI](../README.md#the-web-ui).
+[docs/usage.md › The web UI](usage.md#the-web-ui).
 
 - **Home** — the launcher (GitHub or Local mode, reviewer, model; the choices
   are kept in `localStorage`) and the history. The placeholder follows what
@@ -1067,7 +1067,7 @@ dependency.
 and reads no `.env`. stdout carries only the protocol; diagnostics go to
 stderr. Tools are registered in `mcp/server.ts` and their output is compacted
 in `mcp/format.ts`; the tool list is in
-[README › Use from other agents](../README.md#use-from-other-agents-mcp).
+[docs/mcp.md › Use from other agents](mcp.md#use-from-other-agents-mcp).
 
 **Recursion guard.** A reviewer CLI is the same kind of agent that might have
 this server configured. Each reviewer's argv keeps user MCP servers out of the

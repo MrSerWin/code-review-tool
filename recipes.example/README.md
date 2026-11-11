@@ -4,7 +4,7 @@ A recipe teaches the preview engine how to run one product. The engine itself
 knows nothing about any product: it allocates ports, resolves branches and a
 database dump, then runs the shell commands the recipe provides. How previews
 are started and which branch each role runs is described in
-[README › Preview environments](../README.md#preview-environments-optional).
+[docs/previews.md › Preview environments](../docs/previews.md#preview-environments-optional).
 
 ## Using it
 
