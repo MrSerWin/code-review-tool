@@ -219,7 +219,7 @@ test('recompute coverage, and the coverage seen from one review', async () => {
 });
 
 test('incident: stored parents with the child at position 0, targets listed children first, frontend first', async () => {
-  // The state of CYT-1302 when a ticket review queued the children first.
+  // The state of INC-9 when a ticket review queued the children first.
   const KEY = 'INC-9';
   const P = 'feat/inc-9-export';
   const C = 'feat/inc-9-dates';
