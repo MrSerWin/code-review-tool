@@ -158,6 +158,34 @@ test('anthropic parser returns the final result', () => {
   assert.deepEqual(failed, { result: 'boom', isError: true });
 });
 
+const ANSWER_PROSE = 'I checked every candidate against the code.';
+const ANSWER_JSON = '{\n  "summary": "Adds due dates.",\n  "findings": []\n}';
+
+test('anthropic parser logs the prose of an answer, not its JSON payload', () => {
+  const { log, lines } = recorder();
+  const text = `${ANSWER_PROSE}\n\n\`\`\`json\n${ANSWER_JSON}\n\`\`\``;
+  parseAnthropicStreamLine(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text }] } }), log);
+  assert.deepEqual(lines, [`info: ${ANSWER_PROSE}`]);
+});
+
+test('anthropic parser drops an answer that is only JSON, fenced, bare, or cut off', () => {
+  const { log, lines } = recorder();
+  const say = (text: string) =>
+    parseAnthropicStreamLine(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text }] } }), log);
+  say(`\`\`\`json\n${ANSWER_JSON}\n\`\`\``);
+  say(ANSWER_JSON);
+  // A long answer whose closing fence never arrives.
+  say(`${ANSWER_PROSE}\n\`\`\`json\n{ "summary": "${'x'.repeat(900)}`);
+  assert.deepEqual(lines, [`info: ${ANSWER_PROSE}`]);
+});
+
+test('anthropic parser keeps prose that mentions JSON or quotes code', () => {
+  const { log, lines } = recorder();
+  const text = 'The handler returns `{ ok: true }` as JSON.\n```js\nreturn { ok: true };\n```';
+  parseAnthropicStreamLine(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text }] } }), log);
+  assert.deepEqual(lines, [`info: ${text}`]);
+});
+
 test('anthropic parser ignores lines that are not JSON', () => {
   const { log, lines } = recorder();
   assert.deepEqual(parseAnthropicStreamLine('not json', log), {});
@@ -185,6 +213,17 @@ test('codex parser logs commands and keeps the last agent message', () => {
   assert.deepEqual(first, { result: 'draft', isError: false });
   // The runner keeps the most recent result, so the last message wins.
   assert.deepEqual(last, { result: '{"ok":true}', isError: false });
+});
+
+test('codex parser logs the prose of the answer and still returns all of it', () => {
+  const { log, lines } = recorder();
+  const text = `${ANSWER_PROSE}\n\`\`\`json\n${ANSWER_JSON}\n\`\`\``;
+  const answer = parseCodexStreamLine(JSON.stringify({
+    type: 'item.completed',
+    item: { id: 'item_3', type: 'agent_message', text },
+  }), log);
+  assert.deepEqual(lines, [`info: ${ANSWER_PROSE}`]);
+  assert.deepEqual(answer, { result: text, isError: false });
 });
 
 test('codex parser ignores reasoning and reports a failed turn', () => {

@@ -419,8 +419,9 @@ them are fixed.
 
 **Per process.** Every process — lens and synthesis alike — is started from the
 chosen reviewer's `buildArgs()` and `buildChildEnv()`, in its own process
-group. Its stream is parsed line by line; assistant text and tool names are
-forwarded to the log, prefixed with the lens name, and lens start and
+group. Its stream is parsed line by line; assistant text (without its JSON
+answer, which the page renders once parsed) and tool names are forwarded to
+the log, prefixed with the lens name, and lens start and
 completion are logged as `lens security: started` /
 `lens security: 2 findings, 1 observation`. The JSON payload is extracted from
 the last fenced `json` block, falling back to the last balanced `{...}`, and
