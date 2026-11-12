@@ -254,7 +254,7 @@ test('scheduler: a burst of settled reviews runs one pass, after the group is id
 test('already_on_base: verified sites at the chain root base count as satisfied; an unverified claim stays missing', async () => {
   const KEY2 = 'BASE-1';
   const mk = (repo: string, branch: string, minute: number, baseSha: string) => store.createReview({
-    ticket_key: KEY2, ticket_body: 'Resolve tasks; links in notifications; is_assessed in the UI model.',
+    ticket_key: KEY2, ticket_body: 'Resolve orders; links in notifications; is_paid in the UI model.',
     repo, branch, base_branch: 'main', base_sha: baseSha, head_sha: 'f'.repeat(40), status: 'done', verdict: 'approve',
     code_verdict: 'approve', can_merge: 1, code_can_merge: 1, summary: 's', created_at: at(minute),
   });
@@ -284,7 +284,7 @@ test('already_on_base: verified sites at the chain root base count as satisfied;
   const webBaseDir = path.join(root, 'web-origin');
   fs.mkdirSync(path.join(webBaseDir, 'ui'), { recursive: true });
   git(webBaseDir, 'init', '-q', '-b', 'main');
-  fs.writeFileSync(path.join(webBaseDir, 'ui/model.ts'), 'export interface Fn {\n  is_assessed: boolean;\n}\n');
+  fs.writeFileSync(path.join(webBaseDir, 'ui/model.ts'), 'export interface Fn {\n  is_paid: boolean;\n}\n');
   git(webBaseDir, 'add', '-A');
   git(webBaseDir, 'commit', '-q', '-m', 'base');
   const webBase = git(webBaseDir, 'rev-parse', 'HEAD').trim();
@@ -308,9 +308,9 @@ test('already_on_base: verified sites at the chain root base count as satisfied;
     requirements: [
       { text: 'Resolve', status: 'covered', branches: [{ repo: 'svc', branch: 'feat/base-1-api', evidence: ['src/resolve.py:1'] }] },
       { text: 'Links helper', status: 'already_on_base', note: 'Existed on main.', base_evidence: [claim('svc', 'src/links.py', 3, 'def task_links(task):')] },
-      { text: 'UI model', status: 'already_on_base', base_evidence: [claim('web', 'model.ts', 2, 'is_assessed: boolean')] },
+      { text: 'UI model', status: 'already_on_base', base_evidence: [claim('web', 'model.ts', 2, 'is_paid: boolean')] },
       ...(bogus
-        ? [{ text: 'Digest helper', status: 'already_on_base', base_evidence: [claim('svc', 'src/links.py', 3, 'def digest_links')] }]
+        ? [{ text: 'Summary helper', status: 'already_on_base', base_evidence: [claim('svc', 'src/links.py', 3, 'def summary_links')] }]
         : []),
     ],
   });

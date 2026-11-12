@@ -103,12 +103,12 @@ test('user items are deduplicated by normalised text; a removed one comes back w
 
 test('the derivation answer: open_questions parse like the notes (strings or {text}), absent means none', () => {
   const parsed = derivation.derivationOutputSchema.parse({
-    requirements: ['Expose is_assessed'],
+    requirements: ['Expose is_paid'],
     not_verifiable_notes: null,
-    open_questions: [' Reopen and Reassign for BIA tasks: the ticket notes the gap but does not ask to fix it; confirm scope. ', { text: 'Second' }, ''],
+    open_questions: [' Refund and Reassign for orders: the ticket notes the gap but does not ask to fix it; confirm scope. ', { text: 'Second' }, ''],
   });
   assert.deepEqual(parsed.open_questions, [
-    'Reopen and Reassign for BIA tasks: the ticket notes the gap but does not ask to fix it; confirm scope.', 'Second',
+    'Refund and Reassign for orders: the ticket notes the gap but does not ask to fix it; confirm scope.', 'Second',
   ]);
   assert.deepEqual(parsed.not_verifiable_notes, []);
   assert.deepEqual(derivation.derivationOutputSchema.parse({ requirements: [] }).open_questions, []);

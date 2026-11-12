@@ -393,12 +393,12 @@ test('a coverage with requirements already on the base: their own group, verifie
       {
         requirement_id: 30, text: 'Links helper', status: 'already_on_base', note: '', branches: [],
         base_evidence: [{
-          repo: 'my-service', file: 'apps/services.py', line: 891, quote: 'def bia_task_links', base_branch: 'main',
+          repo: 'my-service', file: 'apps/services.py', line: 891, quote: 'def order_links', base_branch: 'main',
           base_sha: 'abcdef1234567890', verified: true, reason: null,
         }],
       },
       {
-        requirement_id: 31, text: 'Digest', status: 'missing', note: 'claimed already on base, not verified: x', branches: [],
+        requirement_id: 31, text: 'Summary', status: 'missing', note: 'claimed already on base, not verified: x', branches: [],
         base_evidence: [{
           repo: 'my-service', file: 'x.py', line: 1, quote: 'q', base_branch: 'main', base_sha: 'abcdef1234567890', verified: false,
           reason: 'x.py does not exist at main@abcdef1',
@@ -407,7 +407,7 @@ test('a coverage with requirements already on the base: their own group, verifie
     ],
   })!;
   assert.deepEqual(cov.already_on_base, ['R30 Links helper']);
-  assert.deepEqual(cov.open, ['missing: Button tests', 'missing: R31 Digest']);
+  assert.deepEqual(cov.open, ['missing: Button tests', 'missing: R31 Summary']);
   const onBase = cov.requirements.find((r) => r.id === 'R30')!;
   assert.deepEqual(onBase.base_evidence, [{ location: 'my-service:apps/services.py:891', at: 'main@abcdef1', verified: true }]);
   const rejected = cov.requirements.find((r) => r.id === 'R31')!;

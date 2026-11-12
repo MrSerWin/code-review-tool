@@ -381,8 +381,8 @@ test('every run in the list carries the label its ticket cell shows', async () =
 test('a slice page attributes its checklist to this branch, another slice, the base, or nowhere; pending while stale', async () => {
   const { replaceDerivedRequirements } = await import('./ticketRequirements.js');
   const KEY = 'ATT-1';
-  const items = replaceDerivedRequirements(KEY, ['API field', 'Screen reads it', 'Helper', 'FE test', 'Reopen action'], []);
-  const [api, screen, helper, feTest, reopen] = items.map((i) => i.id) as [number, number, number, number, number];
+  const items = replaceDerivedRequirements(KEY, ['API field', 'Screen reads it', 'Helper', 'FE test', 'Refund action'], []);
+  const [api, screen, helper, feTest, refund] = items.map((i) => i.id) as [number, number, number, number, number];
   const done = (repo: string, branch: string, minute: number) => store.createReview({
     ticket_key: KEY, repo, branch, base_branch: 'main', status: 'done', verdict: 'approve', code_verdict: 'approve',
     requirements_met: repo === 'svc' ? 1 : 1, requirements_total: 5, created_at: new Date(Date.UTC(2026, 1, 1, 0, minute)).toISOString(),
@@ -406,7 +406,7 @@ test('a slice page attributes its checklist to this branch, another slice, the b
       { requirement_id: screen, text: 'Screen reads it', status: 'covered', note: '', branches: [share(web)] },
       { requirement_id: helper, text: 'Helper', status: 'already_on_base', note: 'on main', branches: [], base_evidence: [] },
       { requirement_id: feTest, text: 'FE test', status: 'missing', note: 'No branch adds it.', branches: [] },
-      { requirement_id: reopen, text: 'Reopen action', status: 'partial', note: 'Reassign only.', branches: [share(svc, 'partial')] },
+      { requirement_id: refund, text: 'Refund action', status: 'partial', note: 'Reassign only.', branches: [share(svc, 'partial')] },
     ],
   });
 
