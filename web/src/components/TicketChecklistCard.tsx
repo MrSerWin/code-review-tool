@@ -209,6 +209,19 @@ export default function TicketChecklistCard({ ticketKey, live = false }: { ticke
           </ul>
         </div>
       )}
+      {(list?.open_questions?.length ?? 0) > 0 && (
+        <div className="checklist-notes">
+          <p className="muted ticket-hint">
+            Open questions (the ticket mentions these but does not ask to change them; not on the checklist until you add
+            them):
+          </p>
+          <ul>
+            {list!.open_questions!.map((n) => (
+              <li key={n}>{n}</li>
+            ))}
+          </ul>
+        </div>
+      )}
       {removed.length > 0 && (
         <div className="manual">
           <button

@@ -214,7 +214,10 @@ export function createMcpServer({ api, env = process.env }: CreateServerOptions)
     title: 'Get a review',
     description:
       'Status and, once done, the outcome of one review: verdict (approve | changes_requested | blocked), ' +
-      'can_merge, summary, requirements met/total with the unmet ones, blocking_count, counts per severity, and ' +
+      'can_merge, summary, requirements met/total with the unmet ones (for a slice of a ticket group also ' +
+      'by_attribution: in this branch, in other slices, already on base, nowhere, partial, not verifiable, pending; ' +
+      'unmet then lists only nowhere, partial and pending rows, and ticket_group.ticket_coverage is the ticket\'s own ' +
+      'verdict), blocking_count, counts per severity, and ' +
       `findings (most severe first, capped at maxFindings, default ${DEFAULT_MAX_FINDINGS}; findings_omitted says ` +
       'how many were cut). Each finding has kind (diff | regression | stale_doc | consumer: a non-diff location is an ' +
       'untouched site, and cause names the changed line behind it), anchor_status (ok | off_diff | missing_path | ' +
@@ -506,9 +509,10 @@ export function createMcpServer({ api, env = process.env }: CreateServerOptions)
   server.registerTool('get_ticket_coverage', {
     title: 'Get ticket coverage',
     description:
-      'The ticket coverage of a group: verdict (covered when every requirement is covered, else needs_work), ' +
-      'summary, and per requirement its status (covered | partial | missing) with the branches that cover it ' +
-      'and their evidence, plus contract: the cross-repository contract check (issues where what one branch\'s API ' +
+      'The ticket coverage of a group: verdict (needs_work while a requirement is missing or partial, else covered), ' +
+      'summary, and per requirement its status (covered | partial | missing | already_on_base) with the branches that cover it ' +
+      'and their evidence; already_on_base means the code existed on the base of the first slice before the ticket, with ' +
+      'base_evidence sites the tool verified at that commit (listed again under already_on_base), plus contract: the cross-repository contract check (issues where what one branch\'s API ' +
       'returns or accepts and what another branch reads or sends disagree, each with severity and both sites). ' +
       'Coverage is recomputed on its own once a batch of branch reviews ends; ' +
       'recompute=true starts a pass now (it takes a few minutes; call again with recompute=false to read it). ' +

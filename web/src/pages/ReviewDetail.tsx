@@ -18,6 +18,7 @@ import {
 import { ModelsRefresh } from '../components/ModelsRefresh';
 import { modelSourceText, noModelsNotice, pickModel, runBlocked } from '../modelChoice';
 import { Link, navigate } from '../router';
+import { attributionClass, attributionLinks, coverageStatusClass, coverageStatusLabel, ticketCoverageClass } from '../coverageView';
 import { cardCount, diffCounts, emptyNote, requirementsCount, shaPair } from '../runView';
 import { fmtClock } from '../time';
 import { openTicketLabel, openTicketTitle } from '../tickets';
@@ -32,6 +33,7 @@ import type {
   ReviewersPayload,
   RunComparison,
   ReviewTicketGroup,
+  RowAttribution,
   Severity,
   SseEvent,
 } from '../types';
@@ -284,6 +286,15 @@ export default function ReviewDetail({ id }: { id: number }) {
             <span className="banner-verdict">{verdictText}</span>
             {verdictHint && <span className="banner-hint"> — {verdictHint}</span>}
           </h1>
+          {group?.ticket_coverage && (
+            <Link
+              to={`/ticket/${encodeURIComponent(group.key)}`}
+              className={`tag banner-ticket ${ticketCoverageClass(group.ticket_coverage)}`}
+              title={`The verdict above judges this branch's code. Whether ${group.key} is done is its ticket coverage.`}
+            >
+              {group.ticket_coverage.label}
+            </Link>
+          )}
           {/* Each separator travels with the item after it, so no line ends on a "·". */}
           <div className="banner-sub mono">
             <span>{review.repo}</span>
@@ -495,7 +506,9 @@ export default function ReviewDetail({ id }: { id: number }) {
               )}
             </dd>
             <dt>Requirements</dt>
-            <dd className={review.requirements_total === null ? 'mono muted' : 'mono'}>{requirementsCount(review)}</dd>
+            <dd className={review.requirements_total === null ? 'mono muted' : 'mono'}>
+              {group?.attribution && review.requirements_total !== null ? group.attribution.summary : requirementsCount(review)}
+            </dd>
             <dt>Reviewer</dt>
             <dd>
               {review.reviewer ? reviewerLabel(review.reviewer) : '—'}
@@ -537,11 +550,16 @@ export default function ReviewDetail({ id }: { id: number }) {
 
       <Card title={group ? 'Ticket requirements (this branch)' : 'Ticket requirements'}>
         {group && requirements.length > 0 && (
-          <p className="muted ticket-hint">
-            What this branch implements, as its own review saw it. A requirement missing here may be covered by another
-            branch of {group.key}; see Ticket coverage.
-            {byId && ' The ids are the items of the ticket’s stored checklist, the same for every branch and run.'}
-          </p>
+          <>
+            {group.attribution && <p className="attribution-summary">{group.attribution.summary}</p>}
+            <p className="muted ticket-hint">
+              Where the ticket has each item: this branch, another slice of {group.key}, the base before the ticket, or
+              nowhere (only that is a gap).
+              {group.attribution && !group.attribution.fresh &&
+                ' The ticket coverage has not read this run and every other slice yet, so items this branch does not implement wait for it.'}
+              {byId && ' The ids are the items of the ticket’s stored checklist, the same for every branch and run.'}
+            </p>
+          </>
         )}
         {requirements.length === 0 ? (
           <p className="muted">{emptyNote('requirements', review.status)}</p>
@@ -569,7 +587,7 @@ export default function ReviewDetail({ id }: { id: number }) {
                       )}
                     </td>
                     <td>
-                      <RequirementStatusTag status={r.status} />
+                      {r.attribution ? <AttributionTag attribution={r.attribution} /> : <RequirementStatusTag status={r.status} />}
                     </td>
                     <td className="mono muted">{r.evidence ?? '—'}</td>
                   </tr>
@@ -641,8 +659,6 @@ export default function ReviewDetail({ id }: { id: number }) {
   );
 }
 
-const COVERAGE_TAG: Record<string, string> = { covered: 'req-met', partial: 'req-partial', missing: 'req-missing' };
-
 function sameText(a: string, b: string): boolean {
   const key = (t: string) => t.toLowerCase().replace(/\s+/g, ' ').replace(/[\s.;:,!]+$/, '').trim();
   return key(a) === key(b);
@@ -705,7 +721,31 @@ function ProposedCard({
   );
 }
 
+/** A slice row's place in the ticket: the label, links to the other slices, and the note of a partial. */
+function AttributionTag({ attribution: a }: { attribution: RowAttribution }) {
+  const links = attributionLinks(a);
+  return (
+    <>
+      {a.state === 'other_branch' && links.length > 0 ? (
+        <span className={`tag ${attributionClass(a.state)}`}>
+          in{' '}
+          {links.map((l, i) => (
+            <span key={l.label}>
+              {i > 0 && ', '}
+              {l.to ? <Link to={l.to}>{l.label}</Link> : l.label}
+            </span>
+          ))}
+        </span>
+      ) : (
+        <span className={`tag ${attributionClass(a.state)}`}>{a.label}</span>
+      )}
+      {a.state === 'partial' && a.note && <div className="muted coverage-note">{a.note}</div>}
+    </>
+  );
+}
+
 function whereLabel(line: BranchCoverageLine): string {
+  if (line.where === 'base') return 'already on base';
   if (line.where === 'nowhere') return 'not covered anywhere';
   const others = line.others.join(', ');
   if (line.where === 'elsewhere') return `in ${others}`;
@@ -774,7 +814,7 @@ function TicketCoverageCard({ group, finished }: { group: ReviewTicketGroup; fin
                       {r.note && <div className="muted coverage-note">{r.note}</div>}
                     </td>
                     <td>
-                      <span className={`tag ${COVERAGE_TAG[r.status] ?? ''}`}>{r.status}</span>
+                      <span className={`tag ${coverageStatusClass(r.status)}`}>{coverageStatusLabel(r.status)}</span>
                     </td>
                     <td className={`coverage-where where-${r.where}`}>{whereLabel(r)}</td>
                   </tr>

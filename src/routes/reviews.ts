@@ -30,14 +30,14 @@ import { subscribe } from '../events.js';
 import { cancelReview, enqueueReview } from '../queue.js';
 import { rawOutputDir } from '../reportWriter.js';
 import { resolveTargets } from '../resolver.js';
-import { coverageForReview, coveragePending } from '../coverage.js';
+import { coverageForReview, coveragePending, reviewAttribution } from '../coverage.js';
 import { fallbackGroupKey, groupKeyFor, ticketLabel } from '../groupKey.js';
 import { applyGroupBases, joinGroup, orderBatch } from '../ticketGroups.js';
 import {
   createTicketRun, getTicketBranch, latestDoneCoverage, parseCoverageRequirements, syncMembersFromReviews,
 } from '../ticketStore.js';
 import { activeChecklist, addUserRequirements, splitRequirementsText } from '../ticketRequirements.js';
-import type { ProposedRequirement, ResolvedTarget, ReviewRow, TicketInfo } from '../types.js';
+import type { ProposedRequirement, RequirementRow, ResolvedTarget, ReviewRow, TicketInfo } from '../types.js';
 
 const ACTIVE = new Set(['queued', 'fetching', 'reviewing']);
 
@@ -250,16 +250,19 @@ export async function reviewRoutes(app: FastifyInstance): Promise<void> {
         }
       : null;
 
+    const requirements = getRequirements(review.id);
+    const group = ticketGroupContext(review, requirements);
     return {
       review,
-      requirements: getRequirements(review.id),
+      // A slice of a ticket group: each row says where the ticket has it (this branch, another, the base, nowhere).
+      requirements: group ? requirements.map((r, i) => ({ ...r, attribution: group.rows[i] })) : requirements,
       findings,
       observations: getObservations(review.id),
       changed_files: getReviewFiles(review.id),
       logs: getLogs(review.id),
       comparison,
       links: githubLinks(config.GITHUB_ORG, review),
-      ticket_group: ticketGroupContext(review),
+      ticket_group: group?.context ?? null,
       proposed_requirements: parseProposed(review.proposed_requirements),
     };
   });
@@ -437,21 +440,28 @@ export async function withGroupBases(
 }
 
 /** For a review of a ticket group: its place in the group and the group's latest coverage, seen from it. */
-function ticketGroupContext(review: ReviewRow) {
+function ticketGroupContext(review: ReviewRow, requirements: RequirementRow[]) {
   if (!review.group_key || review.group_key === fallbackGroupKey(review.repo, review.branch)) return null;
   const key = review.group_key;
   syncMembersFromReviews(key);
   const member = getTicketBranch(key, review.repo, review.branch);
   const coverage = latestDoneCoverage(key);
-  return {
+  const pending = coveragePending(key);
+  const { rows, ticket_coverage, ...attribution } = reviewAttribution(key, review, pending, requirements);
+  const context = {
     key,
     parent: member?.parent_branch ?? null,
     parent_reason: member?.parent_reason ?? null,
     coverage: coverage ? coverageForReview(review, coverage, parseCoverageRequirements(coverage)) : null,
-    coverage_pending: coveragePending(key),
+    coverage_pending: pending,
+    // The slice checklist against the ticket coverage; `fresh` false: the coverage is pending for this run.
+    attribution,
+    // The ticket's verdict next to this branch's code verdict: an approved slice is not an approved ticket.
+    ticket_coverage,
     // The ticket's checklist now, to show which statuses still match an item and which proposals are already on it.
     checklist: activeChecklist(key).map((r) => ({ id: r.id, text: r.text, source: r.source })),
   };
+  return { context, rows: rows.map(({ id: _id, ...a }) => a) };
 }
 
 export function parseProposed(json: string | null | undefined): ProposedRequirement[] {

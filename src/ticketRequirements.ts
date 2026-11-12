@@ -65,7 +65,15 @@ export function getTicketRequirement(id: number): TicketRequirementRow | undefin
 }
 
 export function requirementNotes(key: string): string[] {
-  const raw = getTicketGroup(key)?.requirements_notes;
+  return parseTextList(getTicketGroup(key)?.requirements_notes);
+}
+
+/** What the ticket mentions but does not ask to change: scope questions set aside by the derivation. */
+export function requirementOpenQuestions(key: string): string[] {
+  return parseTextList(getTicketGroup(key)?.requirements_open_questions);
+}
+
+function parseTextList(raw: string | null | undefined): string[] {
   try {
     const value = JSON.parse(raw ?? '[]') as unknown;
     return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : [];
@@ -137,6 +145,7 @@ export function replaceDerivedRequirements(
   key: string,
   texts: readonly string[],
   notes: readonly string[],
+  openQuestions: readonly string[] = [],
 ): TicketRequirementRow[] {
   const run = db.transaction(() => {
     ensureGroup(key);
@@ -168,8 +177,12 @@ export function replaceDerivedRequirements(
       }
     }
     renumber(key, [...keep, ...user.map((r) => r.id)], at);
-    db.prepare(`UPDATE ticket_groups SET requirements_derived_at = ?, requirements_notes = ?, updated_at = ? WHERE key = ?`)
-      .run(at, JSON.stringify(notes.map(cleanText).filter(Boolean)), at, key);
+    db.prepare(
+      `UPDATE ticket_groups SET requirements_derived_at = ?, requirements_notes = ?, requirements_open_questions = ?, updated_at = ?
+        WHERE key = ?`,
+    ).run(
+      at, JSON.stringify(notes.map(cleanText).filter(Boolean)), JSON.stringify(openQuestions.map(cleanText).filter(Boolean)), at, key,
+    );
   });
   run();
   return activeChecklist(key);
@@ -246,6 +259,7 @@ export function checklistPayload(key: string) {
     key,
     derived_at: group?.requirements_derived_at ?? null,
     not_verifiable_notes: requirementNotes(key),
+    open_questions: requirementOpenQuestions(key),
     items: all.filter((r) => r.state === 'active'),
     removed: all.filter((r) => r.state === 'removed'),
   };

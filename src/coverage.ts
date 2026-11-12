@@ -11,12 +11,17 @@ import { z } from 'zod';
 import { createAnchorContext, checkAnchor } from './anchors.js';
 import { config } from './config.js';
 import {
-  collectContractHunks, contractGlobsFor, contractIssuesSchema, normalizeContractIssues, renderContractHunks, type ContractHunks, type DiffRunner,
+  collectContractHunks, contractGlobsFor, contractIssuesSchema, normalizeContractIssues, renderContractHunks, sandboxDiff,
+  type ContractHunks, type DiffRunner,
   type SiteTarget,
 } from './contract.js';
-import { coverageVerdict, branchCoverage, openRequirements } from './coverageView.js';
+import {
+  attributeRow, attributionCounts, attributionSummary, branchCoverage, coverageVerdict, openRequirements, ticketCoverageBadge,
+  type AttributableRow,
+} from './coverageView.js';
 import { db, getRequirements, getReviewFiles } from './db.js';
-import { checkoutDir, pruneCheckout } from './gitSandbox.js';
+import { BaseReader, collectBaseHints, renderBaseExcerpts, type BaseRoot, type GitRunner } from './baseEvidence.js';
+import { checkoutDir, fetchCheckout, pruneCheckout } from './gitSandbox.js';
 import { logger } from './logger.js';
 import { livePreviews } from './preview/store.js';
 import {
@@ -30,11 +35,11 @@ import { activeChecklist } from './ticketRequirements.js';
 import { orderChains } from './ticketChains.js';
 import { groupHeads } from './ticketGroups.js';
 import {
-  closeTicketRuns, createCoverage, finishCoverage, getCoverage, getTicketGroup, listTicketBranches, parseIds,
-  setCoverageModel, syncMembersFromReviews,
+  closeTicketRuns, createCoverage, finishCoverage, getCoverage, getTicketGroup, latestCoverage, latestDoneCoverage, listTicketBranches,
+  parseCoverageRequirements, parseIds, setCoverageModel, syncMembersFromReviews,
 } from './ticketStore.js';
 import type {
-  AnchorStatus, ContractIssue, CoverageBranch, CoverageEvidence, CoverageRequirement, CoverageStatus, OnLog, RequirementRow,
+  AnchorStatus, BaseEvidence, ContractIssue, CoverageBranch, CoverageEvidence, CoverageRequirement, CoverageStatus, OnLog, RequirementRow,
   ReviewFileRow, ReviewRow, TicketBranchRow, TicketCoverageRow,
 } from './types.js';
 
@@ -43,6 +48,7 @@ import type {
 function coverageStatus(value: unknown): CoverageStatus {
   const v = String(value ?? '').trim().toLowerCase().replace(/[\s-]+/g, '_');
   if (v === 'covered' || v === 'met' || v === 'done' || v === 'implemented') return 'covered';
+  if (v === 'already_on_base' || v === 'on_base' || v === 'already_on_main' || v === 'already_on_master') return 'already_on_base';
   if (v === 'partial' || v === 'partially_covered' || v === 'partly') return 'partial';
   return 'missing';
 }
@@ -62,10 +68,21 @@ const evidenceSchema = z.union([
 const coverageBranchSchema = z.object({
   repo: z.string().nullish().transform((v) => v?.trim() || null),
   branch: z.string().min(1),
-  status: z.unknown().optional().transform((v) => (coverageStatus(v) === 'covered' ? 'covered' : 'partial')),
+  status: z.unknown().optional().transform((v): 'covered' | 'partial' => (coverageStatus(v) === 'covered' ? 'covered' : 'partial')),
   note: z.string().nullish().transform((v) => v ?? ''),
   evidence: z.array(evidenceSchema).nullish().transform((v) => v ?? []),
 });
+
+const baseClaimSchema = z.union([
+  z.object({
+    repo: z.string().nullish().transform((v) => v?.trim() || null),
+    file: z.string().min(1),
+    line: z.coerce.number().int().nullish().transform((v) => v ?? null),
+    quote: z.string().nullish().transform((v) => v ?? ''),
+  }),
+  // `path/file.py:42` as one string: no quote, so it cannot verify.
+  z.string().min(1).transform((raw) => ({ repo: null, file: raw.trim(), line: null, quote: '' })),
+]);
 
 const coverageRequirementSchema = z.object({
   id: z.union([z.number(), z.string().regex(/^\s*R?\d+\s*$/i)]).nullish()
@@ -74,6 +91,7 @@ const coverageRequirementSchema = z.object({
   status: z.unknown().transform(coverageStatus),
   note: z.string().nullish().transform((v) => v ?? ''),
   branches: z.array(coverageBranchSchema).nullish().transform((v) => v ?? []),
+  base_evidence: z.array(baseClaimSchema).nullish().transform((v) => (v ?? []).slice(0, 10)),
 });
 
 /** The answer when the pass derives its own list: every requirement has a text. */
@@ -91,6 +109,9 @@ export const checklistCoverageOutputSchema = z.object({
 });
 
 export type CoverageOutput = z.infer<typeof coverageOutputSchema>;
+
+/** A requirement of the answer, its base claims checked by the tool (`checkBaseClaims`). */
+export type CheckedRequirement = CoverageOutput['requirements'][number] & { base_checked?: BaseEvidence[] };
 
 // --- the inputs -------------------------------------------------------------------
 
@@ -218,8 +239,9 @@ export function renderCoverageRequirementsStep(checklist: readonly ChecklistItem
   ].join('\n');
 }
 
-export async function buildCoveragePrompt(inputs: CoverageInputs): Promise<string> {
+export async function buildCoveragePrompt(inputs: CoverageInputs, base = 'No base commit is known for this ticket.'): Promise<string> {
   return renderTemplate(await loadPromptFile('coverage.md'), {
+    BASE: base,
     TICKET: inputs.ticket.text,
     BRANCHES: renderCoverageBranches(inputs.branches),
     REQUIREMENTS_STEP: renderCoverageRequirementsStep(inputs.checklist),
@@ -308,7 +330,7 @@ export function evidenceChecker(dir: string | null, files: readonly ReviewFileRo
  * a `missing` one lists no branch.
  */
 export function normalizeCoverage(
-  output: CoverageOutput,
+  output: { requirements: CheckedRequirement[] },
   branches: readonly CoverageBranchInput[],
   checkerFor: (b: CoverageBranchInput) => EvidenceChecker,
   onLog: OnLog = () => {},
@@ -316,7 +338,7 @@ export function normalizeCoverage(
 ): CoverageRequirement[] {
   if (checklist.length > 0) {
     // Statuses by id, in the checklist's order and wording; an item left out is missing.
-    const byId = new Map<number, CoverageOutput['requirements'][number]>();
+    const byId = new Map<number, CheckedRequirement>();
     const known = new Set(checklist.map((c) => c.id));
     for (const r of output.requirements) {
       if (r.id === null || !known.has(r.id)) {
@@ -330,7 +352,10 @@ export function normalizeCoverage(
       if (!r) onLog('warn', `coverage: no entry for requirement id ${c.id}; marked missing`);
       return r
         ? { ...r, id: c.id, text: c.text }
-        : { id: c.id, text: c.text, status: 'missing' as const, note: 'The coverage pass did not report on this item.', branches: [] };
+        : {
+            id: c.id, text: c.text, status: 'missing' as const, note: 'The coverage pass did not report on this item.', branches: [],
+            base_evidence: [],
+          };
     });
     return normalizeRequirements(ordered, branches, checkerFor, onLog)
       .map((r, i) => ({ requirement_id: checklist[i]!.id, ...r }));
@@ -339,14 +364,15 @@ export function normalizeCoverage(
 }
 
 function normalizeRequirements(
-  requirements: CoverageOutput['requirements'],
+  requirements: readonly CheckedRequirement[],
   branches: readonly CoverageBranchInput[],
   checkerFor: (b: CoverageBranchInput) => EvidenceChecker,
   onLog: OnLog,
 ): CoverageRequirement[] {
   const checkers = new Map<CoverageBranchInput, EvidenceChecker>();
   const find = (repo: string | null, branch: string) => findMember(branches, repo, branch);
-  return requirements.map((req) => {
+  return requirements.map((req): CoverageRequirement => {
+    if (req.status === 'already_on_base') return baseRequirement(req);
     const out: CoverageBranch[] = [];
     if (req.status !== 'missing') {
       for (const b of req.branches) {
@@ -380,6 +406,89 @@ function normalizeRequirements(
   });
 }
 
+/**
+ * An `already_on_base` claim: it stands only with at least one site the tool
+ * verified at the base commit; otherwise the requirement is `missing` and the
+ * note says why the claim failed.
+ */
+function baseRequirement(req: CheckedRequirement): CoverageRequirement {
+  const checked = req.base_checked ?? [];
+  if (checked.some((e) => e.verified)) {
+    return { text: req.text, status: 'already_on_base', note: req.note, branches: [], base_evidence: checked };
+  }
+  const reasons = [...new Set(checked.map((e) => `${e.file}${e.line ? `:${e.line}` : ''}: ${e.reason ?? 'not verified'}`))];
+  const reason = reasons.length ? reasons.join('; ') : 'no base site was given';
+  return {
+    text: req.text,
+    status: 'missing',
+    note: `claimed already on base, not verified: ${reason}`,
+    branches: [],
+    ...(checked.length ? { base_evidence: checked } : {}),
+  };
+}
+
+/** The tool's own sentence on the base check, appended to the pass summary. */
+export function baseCheckLine(onBase: number, rejected: number): string {
+  if (!onBase && !rejected) return '';
+  const parts: string[] = [];
+  if (onBase) parts.push(`${onBase} requirement(s) verified as already on the base before this ticket`);
+  if (rejected) parts.push(`${rejected} "already on base" claim(s) not verified, kept as missing`);
+  return `Tool check: ${parts.join('; ')}.`;
+}
+
+/** Verifies every base site of every `already_on_base` claim; other requirements pass through. */
+export async function checkBaseClaims(
+  requirements: CoverageOutput['requirements'],
+  reader: BaseReader | null,
+): Promise<CheckedRequirement[]> {
+  const out: CheckedRequirement[] = [];
+  for (const req of requirements) {
+    if (req.status !== 'already_on_base') {
+      out.push(req);
+      continue;
+    }
+    const checked: BaseEvidence[] = [];
+    for (const claim of req.base_evidence) {
+      checked.push(reader
+        ? await reader.verify(claim)
+        : {
+            repo: claim.repo ?? '', file: claim.file, line: claim.line, quote: claim.quote, base_branch: null, base_sha: null,
+            verified: false, reason: 'no base commit is known for this ticket',
+          });
+    }
+    out.push({ ...req, base_checked: checked });
+  }
+  return out;
+}
+
+/** Removes a base checkout fetched for the pass, and its `<repo>/<base>/` folder once empty. */
+function pruneFetchedBase(dir: string): void {
+  pruneCheckout(dir);
+  try {
+    fs.rmdirSync(path.dirname(dir));
+  } catch {
+    // Not empty: another checkout of that base is still there.
+  }
+}
+
+/** The base commit of every chain root with a finished review: what "before this ticket" means per repository. */
+export function baseRootsOf(branches: readonly CoverageBranchInput[]): BaseRoot[] {
+  const roots: BaseRoot[] = [];
+  for (const b of branches) {
+    if (b.depth !== 0 || !b.review?.base_sha) continue;
+    const baseBranch = b.review.base_branch || b.member.parent_branch || b.member.default_branch || 'main';
+    roots.push({
+      repo: b.member.repo,
+      baseBranch,
+      sha: b.review.base_sha,
+      checkout: checkoutDir(b.member, b.review.id),
+      fetchTarget: { repo: b.member.repo, branch: baseBranch, baseBranch, prNumber: null, source: b.review.source },
+      reviewId: b.review.id,
+    });
+  }
+  return roots;
+}
+
 /** The member a model-written `repo` and `branch` (or `repo#branch`) name; undefined when none or several match. */
 function findMember(branches: readonly CoverageBranchInput[], repo: string | null, branch: string): CoverageBranchInput | undefined {
   let name = branch.trim();
@@ -406,6 +515,10 @@ export interface CoverageRunOptions {
   timeoutMs?: number;
   /** For tests: how a checkout's contract diff is read (default: git in the sandbox). */
   contractDiff?: DiffRunner;
+  /** For tests: how git reads a base commit (default: git in the sandbox). */
+  baseGit?: GitRunner;
+  /** For tests: how the base branch of a root whose checkout is gone is fetched (default: a sandbox checkout). */
+  baseFetch?: (root: BaseRoot) => Promise<string>;
 }
 
 const ACTIVE_SQL = `status IN ('queued', 'fetching', 'reviewing')`;
@@ -460,6 +573,7 @@ export async function runCoverage(key: string, opts: CoverageRunOptions = {}): P
   }
 
   const workDir = path.join(config.DATA_DIR, 'coverage', sanitizeSegment(key), String(row.id));
+  let reader: BaseReader | null = null;
   try {
     if (!opts.reviewerDefinition) {
       const chosen = await chooseModel(reviewer, {
@@ -475,7 +589,19 @@ export async function runCoverage(key: string, opts: CoverageRunOptions = {}): P
     await attachContractHunks(inputs.branches, opts.contractDiff ? { run: opts.contractDiff } : {});
     const withDiff = inputs.branches.filter((b) => b.contract?.diff).length;
     log('info', `contract check: ${withDiff} branch(es) with contract hunks`);
-    const prompt = await buildCoveragePrompt(inputs);
+    const roots = baseRootsOf(inputs.branches);
+    reader = roots.length
+      ? new BaseReader(roots, {
+          run: opts.baseGit ?? sandboxDiff,
+          fetch: opts.baseFetch ?? (async (root) => (await fetchCheckout(root.fetchTarget, root.reviewId, log)).dir),
+          prune: pruneFetchedBase,
+          onLog: log,
+        })
+      : null;
+    const hints = collectBaseHints(reviewed.map((b) => ({ repo: b.member.repo, branch: b.member.branch, requirements: b.requirements })));
+    const base = await renderBaseExcerpts(hints, reader);
+    log('info', `base check: ${roots.length} chain root(s) with a base commit, ${hints.length} hint(s) from the slice reviews`);
+    const prompt = await buildCoveragePrompt(inputs, base);
     const passOpts = {
       dir: workDir,
       reviewer,
@@ -487,7 +613,11 @@ export async function runCoverage(key: string, opts: CoverageRunOptions = {}): P
       ? await runPass('coverage', prompt, checklistCoverageOutputSchema, log, passOpts)
       : await runPass('coverage', prompt, coverageOutputSchema, log, passOpts);
     const checkerFor = (b: CoverageBranchInput) => evidenceChecker(b.review ? checkoutDir(b.member, b.review.id) : null, b.files);
-    const requirements = normalizeCoverage(data, inputs.branches, checkerFor, log, inputs.checklist);
+    const checked = await checkBaseClaims(data.requirements, reader);
+    const requirements = normalizeCoverage({ requirements: checked }, inputs.branches, checkerFor, log, inputs.checklist);
+    const onBase = requirements.filter((r) => r.status === 'already_on_base').length;
+    const rejected = requirements.filter((r) => r.status === 'missing' && r.base_evidence?.length).length;
+    if (onBase || rejected) log('info', `base check: ${onBase} already on base (verified), ${rejected} claim(s) not verified`);
     const contractIssues: ContractIssue[] = normalizeContractIssues(
       data.contract_issues,
       contractResolver(inputs.branches, checkerFor),
@@ -495,9 +625,10 @@ export async function runCoverage(key: string, opts: CoverageRunOptions = {}): P
     );
     const verdict = coverageVerdict(requirements);
     const open = openRequirements(requirements);
-    const summary = data.summary.trim() || (open.length === 0
+    const modelSummary = data.summary.trim() || (open.length === 0
       ? 'Every requirement is covered by some branch.'
       : `${open.length} requirement(s) are not fully covered.`);
+    const summary = [modelSummary, baseCheckLine(onBase, rejected)].filter(Boolean).join(' ');
     const report: CoverageForReport = { id: row.id, verdict, summary, requirements, createdAt: row.created_at, contractIssues };
     const reportPath = await writeCoverageReport(
       { key, title: inputs.ticket.title, url: inputs.ticket.url },
@@ -518,6 +649,7 @@ export async function runCoverage(key: string, opts: CoverageRunOptions = {}): P
     finishCoverage(row.id, { status: 'failed', error: message });
     log('error', `failed: ${message.split('\n')[0]}`);
   } finally {
+    reader?.close();
     fs.rmSync(workDir, { recursive: true, force: true });
     settle();
   }
@@ -679,6 +811,69 @@ export function coveragePending(key: string): boolean {
 export function recomputeCoverage(key: string, opts: CoverageRunOptions = {}): { started: boolean; done: Promise<unknown> } {
   if (scheduler && !opts.reviewer && !opts.model) return scheduler.runNow(key, opts.trigger ?? 'manual');
   return { started: true, done: runCoverage(key, { trigger: 'manual', ...opts }) };
+}
+
+/**
+ * Whether a coverage speaks for this run of a branch: it read this run and the
+ * latest finished run of every member, no member has a run in progress, and
+ * no pass is waiting. Otherwise a slice page treats the coverage as pending.
+ */
+export function coverageIsFresh(
+  key: string,
+  coverage: Pick<TicketCoverageRow, 'review_ids' | 'status'> | null | undefined,
+  reviewId: number,
+  pending: boolean,
+): boolean {
+  if (!coverage || coverage.status !== 'done' || pending) return false;
+  const used = new Set(parseIds(coverage.review_ids));
+  if (!used.has(reviewId)) return false;
+  const heads = groupHeads(key);
+  for (const member of listTicketBranches(key)) {
+    const head = heads.get(`${member.repo}#${member.branch}`);
+    if (!head?.latestDone || !used.has(head.latestDone.id)) return false;
+    if (ACTIVE_STATUSES.has(head.latest.status)) return false;
+  }
+  return true;
+}
+
+const ACTIVE_STATUSES = new Set(['queued', 'fetching', 'reviewing']);
+
+/** A slice review's own checklist rows, each attributed against the ticket coverage (pending when it is not fresh). */
+export function sliceAttribution(
+  review: Pick<ReviewRow, 'repo' | 'branch'>,
+  rows: readonly AttributableRow[],
+  requirements: readonly CoverageRequirement[] | null,
+  fresh: boolean,
+) {
+  const coverage = fresh ? requirements : null;
+  const attributed = rows.map((r) => attributeRow(r, coverage, review.repo, review.branch));
+  const counts = attributionCounts(attributed);
+  return { rows: attributed, by_attribution: counts, summary: attributionSummary(counts, fresh && requirements !== null), fresh };
+}
+
+/**
+ * A slice review's checklist read against the ticket's latest coverage: each
+ * row attributed, the counts, the summary line, and the ticket coverage badge
+ * for the slice page. Null for a review outside a ticket group.
+ */
+export function reviewAttribution(
+  key: string,
+  review: Pick<ReviewRow, 'id' | 'repo' | 'branch'>,
+  pending: boolean,
+  rows: readonly (AttributableRow & { id: number })[] = getRequirements(review.id),
+) {
+  const coverage = latestDoneCoverage(key) ?? null;
+  const fresh = coverageIsFresh(key, coverage, review.id, pending || latestCoverage(key)?.status === 'running');
+  const requirements = coverage ? parseCoverageRequirements(coverage) : null;
+  const slice = sliceAttribution(review, rows, requirements, fresh);
+  return {
+    fresh,
+    coverage_id: coverage?.id ?? null,
+    by_attribution: slice.by_attribution,
+    summary: slice.summary,
+    rows: rows.map((r, i) => ({ id: r.id, ...slice.rows[i]! })),
+    ticket_coverage: ticketCoverageBadge(coverage && requirements ? { verdict: coverage.verdict, requirements } : null, fresh),
+  };
 }
 
 /** One branch's reading of the group's latest coverage, for its review page and report. */

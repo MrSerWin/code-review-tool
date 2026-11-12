@@ -736,7 +736,7 @@ CREATE TABLE ticket_coverage (
   verdict TEXT,                   -- covered|needs_work
   summary TEXT,
   review_ids TEXT NOT NULL,       -- JSON: the branch runs the pass read
-  requirements_json TEXT,         -- JSON: [{ requirement_id?, text, status, note, branches: [{ repo, branch, review_id, status, note, evidence: [{ file, line, anchor_status }] }] }]
+  requirements_json TEXT,         -- JSON: [{ requirement_id?, text, status (covered|partial|missing|already_on_base), note, branches: [{ repo, branch, review_id, status, note, evidence: [{ file, line, anchor_status }] }], base_evidence?: [{ repo, file, line, quote, base_branch, base_sha, verified, reason }] }]
   reviewer TEXT, model TEXT, report_path TEXT, error TEXT, trigger TEXT,
   created_at TEXT NOT NULL, finished_at TEXT
 );
@@ -760,7 +760,8 @@ CREATE TABLE ticket_requirements (
   state TEXT NOT NULL DEFAULT 'active',  -- active|removed (never deleted)
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
--- ticket_groups gains requirements_derived_at TEXT and requirements_notes TEXT (JSON: not verifiable work);
+-- ticket_groups gains requirements_derived_at TEXT, requirements_notes TEXT (JSON: not verifiable work) and
+-- requirements_open_questions TEXT (JSON: what the ticket mentions but does not ask to change);
 -- requirements gains requirement_id INTEGER, reviews gains proposed_requirements TEXT (JSON); NULL on older rows.
 -- ticket_coverage gains contract_json TEXT (JSON: [{ problem, severity, sites: [{ repo, branch, file, line, anchor_status }] }]).
 ```
@@ -805,8 +806,20 @@ branch, so wording and numbering differed between runs and branches, and
 coverage matched texts. Now a ticket has one list in `ticket_requirements`
 (`position`, `text`, `source` `derived`/`user`, `state` `active`/`removed`;
 rows are never deleted, so a per-review status keeps its item).
-`ticket_groups.requirements_derived_at` and `requirements_notes` record the
-derivation and the work it set aside as not verifiable.
+`ticket_groups.requirements_derived_at`, `requirements_notes` and
+`requirements_open_questions` record the derivation, the work it set aside as
+not verifiable, and the scope questions it set aside.
+
+- The derivation takes requirements only from what the ticket asks to change
+  (fix plan, API fields, acceptance criteria, tests and docs it names,
+  approved decisions). A problem description or a "gaps" list becomes a
+  requirement only when the plan or a decision picks it up; otherwise it is an
+  open question ("the ticket notes X but does not ask to fix it; confirm
+  scope"). Repository-wide rules and process constraints (no pgpubsub, em
+  dashes, business logic in the backend, stacked PRs) are never items: the
+  repository rules and tool checks enforce them. Stored lists keep their
+  items until "Re-derive"; the checklist API, the card and MCP
+  `get_ticket_requirements` return `open_questions`.
 
 - `ensureTicketRequirements()` is called by the queue for every review of a
   ticket group, after the checkout and before the lenses. It derives once per
@@ -876,9 +889,45 @@ when it fires and nothing of the group is active, one pass runs; a signal
 during a pass queues exactly one more. `runNow()` (manual recompute) skips the
 timer and joins a running pass. The server enables it at start and fails
 coverage rows a restart cut off; the CLI does not enable it.
-`coverageView.ts` is pure (types only): the group verdict and one branch's
-reading of a coverage (`here`, `elsewhere`, `nowhere`), shared with the MCP
-formatter.
+`coverageView.ts` is pure (types only): the group verdict, one branch's
+reading of a coverage (`here`, `elsewhere`, `base`, `nowhere`), and the
+attribution of a slice's checklist, shared with the MCP formatter.
+
+**Already on the base (`baseEvidence.ts`).** A requirement may be
+`already_on_base`: the code existed on the base of its repository's chain
+root before the ticket. "The base" is the root review's `base_sha` (its merge
+base with the parent). Before the prompt is built, `collectBaseHints()` takes
+the slice-review rows that are not `met` and whose evidence says "already on
+main" (or similar), with the `file:line` sites and identifiers they name;
+`renderBaseExcerpts()` reads those lines at the base (a unique path suffix
+resolves a bare file name; an identifier without a site is found with
+`git grep -w` at the base) and puts them, numbered, in `{{BASE}}`. The pass
+answers `already_on_base` with `base_evidence: [{ repo, file, line, quote }]`.
+`BaseReader.verify()` checks each site at the base commit: the file exists
+(`git show <sha>:<file>`), the line is in range, and the quote (whitespace
+runs count as one space, at least 4 characters) is on that line or within 3
+lines. Git is read-only and runs in the sandbox, in the root review's
+checkout when it is still on disk and holds the commit, else in a checkout of
+the base branch fetched with `fetchCheckout()` for the pass and pruned when it
+ends. One verified site keeps the status; otherwise the requirement is
+`missing` with the note "claimed already on base, not verified: <reason>".
+`already_on_base` counts as satisfied: the verdict is `needs_work` only for a
+`missing` or `partial` item. The summary gets a tool sentence with the
+verified and rejected counts; the report, the ticket page and MCP list these
+items in their own group ("Already on main before this ticket: N").
+
+**Slice attribution.** `reviewAttribution()` reads a slice review's own
+checklist against the ticket's latest coverage. The coverage is fresh for a
+run when it read that run and the latest finished run of every member, no
+member has a run in progress, and no pass is pending or running. Fresh, each
+row is `this_branch`, `other_branch` (with the review ids), `already_on_base`,
+`partial` (with the note), `not_verifiable`, or `nowhere`; stale, a row this
+branch implements stays `this_branch` and every other one is `pending` ("not
+in this slice (coverage pending)"), never `nowhere`. The counts are
+`by_attribution`, the companion of `requirements_met/total`, and the summary
+line reads "4 in this slice, 18 in other slices, 9 already on base, 2
+nowhere". `ticketCoverageBadge()` gives the ticket's verdict for the slice
+page: `covered`, `needs_work (N nowhere, M partial)`, or `pending`.
 
 ### History groups (`src/groupKey.ts`)
 
@@ -975,6 +1024,14 @@ fallback, and the API under `/api` (routes in `src/server.ts` and
 404; other unknown GET paths serve `index.html`. Every endpoint is listed in
 [docs/http-api.md › HTTP API](http-api.md#http-api).
 
+For a review of a ticket group, `GET /api/reviews/:id` adds `attribution` to
+each requirement row and `ticket_group.attribution` (`fresh`,
+`by_attribution`, `summary`) and `ticket_group.ticket_coverage`; each
+branch's `latestDone` in `GET /api/ticket-groups/:key` carries
+`requirements_attribution`. MCP `get_review` adds `by_attribution` and
+`attribution_summary` beside `met/total` (its `unmet` then lists only
+nowhere, partial and pending rows); `get_ticket_coverage` and
+`wait_for_ticket_review` list `already_on_base` with its verified sites.
 `GET /api/reviews/:id` also returns `comparison` — the findings of this run
 against the branch's previous finished run, matched on severity, file, line,
 and title (`findingCompare.ts`) into `resolved`, `new`, and `persistent` — and
@@ -1052,8 +1109,14 @@ Dark-first, compact. What each page offers is described in
   Open instead); then all runs of the group across
   repositories, newest first. It polls every 4 s while a run is active or
   coverage is pending. A fallback `repo#branch` group shows its runs only.
-  The review page of a slice shows the code verdict banner and a Ticket
-  coverage card read from `ticket_group`.
+  The review page of a slice shows the code verdict banner with the ticket
+  coverage badge beside it (linking to the ticket page, so an approved slice
+  is never read as an approved ticket), a Ticket coverage card read from
+  `ticket_group`, and its checklist with one attribution tag per row (green in
+  this branch, amber partial, red only nowhere, neutral otherwise, with links
+  to the other slices). A review without a ticket group is unchanged. The
+  ticket page's coverage table uses the same palette and lists
+  `already_on_base` items in their own group with the verified sites.
 - **Previews** (`/previews`, only when enabled) — start a preview from a ticket
   or from custom branches per role, and follow every preview; `?open=<id>`
   expands that preview's row.
