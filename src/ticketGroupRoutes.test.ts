@@ -377,3 +377,72 @@ test('every run in the list carries the label its ticket cell shows', async () =
   assert.ok(byId.has(bare.id), 'the bare run is listed');
   assert.equal(byId.get(bare.id), null);
 });
+
+test('a slice page attributes its checklist to this branch, another slice, the base, or nowhere; pending while stale', async () => {
+  const { replaceDerivedRequirements } = await import('./ticketRequirements.js');
+  const KEY = 'ATT-1';
+  const items = replaceDerivedRequirements(KEY, ['API field', 'Screen reads it', 'Helper', 'FE test', 'Refund action'], []);
+  const [api, screen, helper, feTest, refund] = items.map((i) => i.id) as [number, number, number, number, number];
+  const done = (repo: string, branch: string, minute: number) => store.createReview({
+    ticket_key: KEY, repo, branch, base_branch: 'main', status: 'done', verdict: 'approve', code_verdict: 'approve',
+    requirements_met: repo === 'svc' ? 1 : 1, requirements_total: 5, created_at: new Date(Date.UTC(2026, 1, 1, 0, minute)).toISOString(),
+  });
+  const svc = done('svc', 'feat/att-1-api', 1);
+  const web = done('web', 'feat/att-1-ui', 2);
+  const statuses = (met: number[]) => items.map((i) => ({
+    requirement_id: i.id, text: i.text, status: met.includes(i.id) ? 'met' as const : 'missing' as const, evidence: '',
+  }));
+  store.replaceRequirements(svc.id, statuses([api]));
+  store.replaceRequirements(web.id, statuses([screen]));
+  ticketStore.syncMembersFromReviews(KEY);
+  const share = (r: ReviewRow, status: 'covered' | 'partial' = 'covered') => ({
+    repo: r.repo, branch: r.branch, review_id: r.id, status, note: '', evidence: [],
+  });
+  const cov = ticketStore.createCoverage(KEY, { reviewIds: [svc.id, web.id], reviewer: 'claude', model: 'opus', trigger: 'test' });
+  ticketStore.finishCoverage(cov.id, {
+    status: 'done', verdict: 'needs_work', summary: 's', reportPath: null,
+    requirements: [
+      { requirement_id: api, text: 'API field', status: 'covered', note: '', branches: [share(svc)] },
+      { requirement_id: screen, text: 'Screen reads it', status: 'covered', note: '', branches: [share(web)] },
+      { requirement_id: helper, text: 'Helper', status: 'already_on_base', note: 'on main', branches: [], base_evidence: [] },
+      { requirement_id: feTest, text: 'FE test', status: 'missing', note: 'No branch adds it.', branches: [] },
+      { requirement_id: refund, text: 'Refund action', status: 'partial', note: 'Reassign only.', branches: [share(svc, 'partial')] },
+    ],
+  });
+
+  const page = (await app.inject({ method: 'GET', url: `/api/reviews/${web.id}` })).json();
+  assert.deepEqual(page.requirements.map((r: any) => r.attribution.state), ['other_branch', 'this_branch', 'already_on_base', 'nowhere', 'partial']);
+  assert.equal(page.requirements[0].attribution.label, 'in svc#feat/att-1-api');
+  assert.equal(page.requirements[0].attribution.branches[0].review_id, svc.id);
+  assert.equal(page.requirements[4].attribution.note, 'Reassign only.');
+  assert.equal(page.ticket_group.attribution.fresh, true);
+  assert.deepEqual(page.ticket_group.attribution.by_attribution, {
+    this_branch: 1, other_branch: 1, already_on_base: 1, not_verifiable: 0, nowhere: 1, partial: 1, pending: 0,
+  });
+  assert.equal(page.ticket_group.attribution.summary, '1 in this slice, 1 in other slices, 1 already on base, 1 nowhere, 1 partial');
+  assert.equal(page.ticket_group.ticket_coverage.label, 'ticket coverage: needs_work (1 nowhere, 1 partial)');
+  assert.equal(page.ticket_group.coverage.requirements[2].where, 'base');
+  assert.equal(page.review.requirements_met, 1, 'the stored met/total stay as they are');
+
+  const ticketPage = (await app.inject({ method: 'GET', url: `/api/ticket-groups/${KEY}` })).json();
+  const branches = ticketPage.group.chains.flatMap((c: any) => c.branches);
+  const ui = branches.find((b: any) => b.branch === 'feat/att-1-ui');
+  assert.equal(ui.latestDone.requirements_attribution.summary, page.ticket_group.attribution.summary);
+  assert.equal(ui.latestDone.requirements_attribution.by_attribution.nowhere, 1);
+
+  // A newer run of the sibling is under way: the coverage is stale, nothing here is red.
+  store.createReview({ ticket_key: KEY, repo: 'svc', branch: 'feat/att-1-api', base_branch: 'main', status: 'reviewing' });
+  const stale = (await app.inject({ method: 'GET', url: `/api/reviews/${web.id}` })).json();
+  assert.deepEqual(stale.requirements.map((r: any) => r.attribution.state), ['pending', 'this_branch', 'pending', 'pending', 'pending']);
+  assert.equal(stale.requirements[0].attribution.label, 'not in this slice (coverage pending)');
+  assert.equal(stale.ticket_group.attribution.fresh, false);
+  assert.equal(stale.ticket_group.attribution.summary, '1 in this slice, 4 not in this slice (coverage pending)');
+  assert.equal(stale.ticket_group.ticket_coverage.label, 'ticket coverage: pending');
+
+  // A review without a ticket group keeps its plain rows.
+  const lone = store.createReview({ repo: 'svc', branch: 'att-cleanup', base_branch: 'main', status: 'done' });
+  store.replaceRequirements(lone.id, [{ text: 'x', status: 'missing', evidence: '' }]);
+  const plain = (await app.inject({ method: 'GET', url: `/api/reviews/${lone.id}` })).json();
+  assert.equal(plain.requirements[0].attribution, undefined);
+  assert.equal(plain.ticket_group, null);
+});

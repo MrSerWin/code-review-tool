@@ -21,11 +21,12 @@ import { ModelsRefresh } from '../components/ModelsRefresh';
 import { modelSourceText, noModelsNotice, pickModel, runBlocked } from '../modelChoice';
 import { Link, navigate } from '../router';
 import { openTicketLabel, openTicketTitle } from '../tickets';
+import { baseGroupTitle, baseLocation, coverageStatusClass, coverageStatusLabel, splitBaseRequirements } from '../coverageView';
 import type {
   AnchorStatus,
   ContractIssue,
   Coverage,
-  CoverageStatus,
+  CoverageRequirement,
   GroupBranch,
   ParentReason,
   Recipe,
@@ -56,8 +57,6 @@ const PARENT_REASON: Record<ParentReason, string> = {
   stored: 'from an earlier run',
 };
 
-const COVERAGE_LABEL: Record<CoverageStatus, string> = { covered: 'covered', partial: 'partial', missing: 'missing' };
-const COVERAGE_TAG: Record<CoverageStatus, string> = { covered: 'req-met', partial: 'req-partial', missing: 'req-missing' };
 
 const ANCHOR_WARNING: Partial<Record<AnchorStatus, string>> = {
   missing_path: 'path not found',
@@ -488,6 +487,11 @@ function ChainRow({
             ))}
           </Select>
           {b.parentReason && <span className="tag cat">{PARENT_REASON[b.parentReason]}</span>}
+          {done?.requirements_attribution && (
+            <span className="muted chain-attribution" title="This branch's checklist against the ticket coverage">
+              {done.requirements_attribution.summary}
+            </span>
+          )}
           {b.parentInGroup && b.parentReviewed === false && (
             <span className="tag req-partial" title="The parent has no finished review yet">
               parent not reviewed
@@ -531,6 +535,7 @@ function ChainRow({
 
 function CoverageCard({ ticketKey, ticket }: { ticketKey: string; ticket: TicketGroupPayload }) {
   const coverage: Coverage | null = ticket.coverage;
+  const { open, onBase } = splitBaseRequirements(coverage?.requirements ?? []);
   const latest = ticket.latest_coverage;
   const state = ticket.coverage_pending
     ? 'A coverage pass is pending or running; this page updates on its own.'
@@ -564,7 +569,8 @@ function CoverageCard({ ticketKey, ticket }: { ticketKey: string; ticket: Ticket
       ) : (
         <>
           {coverage.summary && <p>{coverage.summary}</p>}
-          <CoverageTable coverage={coverage} />
+          <CoverageTable requirements={open} />
+          {onBase.length > 0 && <BaseRequirements requirements={onBase} />}
           {coverage.contract_issues && <ContractIssues issues={coverage.contract_issues} />}
           <p className="muted ticket-hint">
             Coverage #{coverage.id} · {fmtTime(coverage.finished_at ?? coverage.created_at)} · read runs{' '}
@@ -581,7 +587,35 @@ function CoverageCard({ ticketKey, ticket }: { ticketKey: string; ticket: Ticket
   );
 }
 
-function CoverageTable({ coverage }: { coverage: Coverage }) {
+/** The requirements whose code existed on the base before the ticket, with the sites the tool verified. */
+function BaseRequirements({ requirements }: { requirements: CoverageRequirement[] }) {
+  return (
+    <div className="base-requirements">
+      <h3 className="base-title">
+        {baseGroupTitle(requirements)}: {requirements.length}
+      </h3>
+      <p className="muted ticket-hint">
+        No branch needs to implement these: the tool found each quoted line at the base commit of the first slice.
+      </p>
+      <ul className="base-list">
+        {requirements.map((r, i) => (
+          <li key={`${i}-${r.text}`}>
+            <span className="mono">{r.requirement_id ? requirementRef(r.requirement_id) : i + 1}</span> {r.text}
+            {r.note && <div className="muted coverage-note">{r.note}</div>}
+            {(r.base_evidence ?? []).filter((e) => e.verified).map((e) => (
+              <div key={baseLocation(e)} className="coverage-evidence mono muted" title={e.quote}>
+                {baseLocation(e)}
+                {e.base_sha && ` @ ${e.base_branch ?? 'base'} ${e.base_sha.slice(0, 7)}`}
+              </div>
+            ))}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function CoverageTable({ requirements }: { requirements: CoverageRequirement[] }) {
   return (
     <div className="table-wrap">
       <table className="grid">
@@ -594,7 +628,7 @@ function CoverageTable({ coverage }: { coverage: Coverage }) {
           </tr>
         </thead>
         <tbody>
-          {coverage.requirements.map((r, i) => (
+          {requirements.map((r, i) => (
             <tr key={`${i}-${r.text}`}>
               <td className="num mono">{r.requirement_id ? requirementRef(r.requirement_id) : i + 1}</td>
               <td>
@@ -602,7 +636,7 @@ function CoverageTable({ coverage }: { coverage: Coverage }) {
                 {r.note && <div className="muted coverage-note">{r.note}</div>}
               </td>
               <td>
-                <span className={`tag ${COVERAGE_TAG[r.status]}`}>{COVERAGE_LABEL[r.status]}</span>
+                <span className={`tag ${coverageStatusClass(r.status)}`}>{coverageStatusLabel(r.status)}</span>
               </td>
               <td>
                 {r.branches.length === 0 ? (

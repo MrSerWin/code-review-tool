@@ -175,6 +175,38 @@ export interface Requirement {
   ord: number;
   /** The ticket checklist item this status is for; null on rows written without a stored checklist. */
   requirement_id?: number | null;
+  /** A slice of a ticket group: where the ticket has this item. Absent for a review without a group. */
+  attribution?: RowAttribution;
+}
+
+/** Where a slice's checklist item lives once the ticket coverage is known; only `nowhere` is a gap. */
+export type Attribution =
+  | 'this_branch' | 'other_branch' | 'already_on_base' | 'not_verifiable' | 'nowhere' | 'partial' | 'pending';
+
+export interface RowAttribution {
+  state: Attribution;
+  label: string;
+  branches: { repo: string; branch: string; review_id: number | null }[];
+  note: string;
+}
+
+export type AttributionCounts = Record<Attribution, number>;
+
+export interface SliceAttribution {
+  /** False while the coverage has not read this run and every sibling: rows not here show as pending. */
+  fresh: boolean;
+  coverage_id: number | null;
+  by_attribution: AttributionCounts;
+  summary: string;
+}
+
+/** The ticket's verdict as a slice page shows it next to the code verdict. */
+export interface TicketCoverageBadge {
+  state: 'covered' | 'needs_work' | 'pending';
+  nowhere: number;
+  partial: number;
+  already_on_base: number;
+  label: string;
 }
 
 /** A requirement a review suggests adding to the ticket's checklist. */
@@ -200,6 +232,8 @@ export interface TicketChecklist {
   key: string;
   derived_at: string | null;
   not_verifiable_notes: string[];
+  /** Things the ticket mentions but does not ask to change; absent from older servers. */
+  open_questions?: string[];
   items: TicketRequirement[];
   removed: TicketRequirement[];
   deriving: boolean;
@@ -498,7 +532,7 @@ export interface LocalReposPayload {
 // --- ticket groups and coverage ---
 
 export type ParentReason = 'pr' | 'detected' | 'default' | 'user' | 'stored';
-export type CoverageStatus = 'covered' | 'partial' | 'missing';
+export type CoverageStatus = 'covered' | 'partial' | 'missing' | 'already_on_base';
 export type CoverageVerdict = 'covered' | 'needs_work';
 
 export interface CoverageEvidence {
@@ -516,12 +550,25 @@ export interface CoverageBranch {
   evidence: CoverageEvidence[];
 }
 
+/** A site that held the code before the ticket, as the tool checked it at the base commit. */
+export interface BaseEvidence {
+  repo: string;
+  file: string;
+  line: number | null;
+  quote: string;
+  base_branch: string | null;
+  base_sha: string | null;
+  verified: boolean;
+  reason: string | null;
+}
+
 export interface CoverageRequirement {
   requirement_id?: number | null;
   text: string;
   status: CoverageStatus;
   note: string;
   branches: CoverageBranch[];
+  base_evidence?: BaseEvidence[];
 }
 
 /** One end of a contract mismatch between branches. */
@@ -570,6 +617,8 @@ export interface BranchRunSummary {
   blocking_count: number | null;
   requirements_met: number | null;
   requirements_total: number | null;
+  /** latestDone only: its checklist against the ticket coverage; absent from older servers. */
+  requirements_attribution?: { fresh: boolean; by_attribution: AttributionCounts; summary: string } | null;
   reviewer: string | null;
   model: string | null;
   created_at: string;
@@ -622,7 +671,7 @@ export interface BranchCoverageLine {
   requirement_id?: number | null;
   text: string;
   status: CoverageStatus;
-  where: 'here' | 'elsewhere' | 'nowhere';
+  where: 'here' | 'elsewhere' | 'base' | 'nowhere';
   here: 'covered' | 'partial' | null;
   others: string[];
   note: string;
@@ -645,4 +694,7 @@ export interface ReviewTicketGroup {
   coverage_pending: boolean;
   /** The ticket's checklist now; absent from servers older than this field. */
   checklist?: { id: number; text: string; source: 'derived' | 'user' }[];
+  /** This run's checklist against the ticket coverage; absent from older servers. */
+  attribution?: SliceAttribution;
+  ticket_coverage?: TicketCoverageBadge;
 }

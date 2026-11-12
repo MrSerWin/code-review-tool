@@ -3,7 +3,7 @@ import path from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { config } from '../config.js';
-import { coveragePending, recomputeCoverage } from '../coverage.js';
+import { coveragePending, recomputeCoverage, reviewAttribution } from '../coverage.js';
 import { db } from '../db.js';
 import { rowLinks } from '../githubLinks.js';
 import { resolveTargets } from '../resolver.js';
@@ -141,17 +141,25 @@ export function runPayload(run: TicketRunRow | undefined | null) {
   };
 }
 
-function withLinks(view: TicketGroupView) {
+function withLinks(view: TicketGroupView, pending: boolean) {
   return {
     ...view,
     chains: view.chains.map((c) => ({
       ...c,
       branches: c.branches.map((b) => ({
         ...b,
+        latestDone: b.latestDone ? { ...b.latestDone, requirements_attribution: branchAttribution(view.key, b, pending) } : null,
         links: rowLinks(config.GITHUB_ORG, { repo: b.repo, branch: b.branch, pr_number: b.prNumber }),
       })),
     })),
   };
+}
+
+/** The latest finished run's checklist against the ticket coverage, as counts: the companion of requirements_met/total. */
+function branchAttribution(key: string, b: TicketGroupView['chains'][number]['branches'][number], pending: boolean) {
+  if (!b.latestDone) return null;
+  const { fresh, by_attribution, summary } = reviewAttribution(key, { id: b.latestDone.id, repo: b.repo, branch: b.branch }, pending);
+  return { fresh, by_attribution, summary };
 }
 
 /** Everything a ticket page and `get_ticket` show. */
@@ -160,14 +168,15 @@ export function ticketPayload(key: string, pending: (key: string) => boolean = c
   if (!view) return null;
   const done = latestDoneCoverage(key);
   const latest = latestCoverage(key);
+  const isPending = pending(key) || latest?.status === 'running';
   return {
-    group: withLinks(view),
+    group: withLinks(view, isPending),
     coverage: coveragePayload(done),
     // A newer pass that is still running or failed, next to the last finished one.
     latest_coverage: latest && latest.id !== done?.id
       ? { id: latest.id, status: latest.status, error: latest.error, created_at: latest.created_at }
       : null,
-    coverage_pending: pending(key) || latest?.status === 'running',
+    coverage_pending: isPending,
     run: runPayload(runId ? ownRun(key, runId) : latestTicketRun(key)),
   };
 }

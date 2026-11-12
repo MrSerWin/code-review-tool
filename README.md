@@ -90,7 +90,11 @@ keep working. Models are discovered from each CLI at runtime.
 5. **Report.** The verdict, requirement checklist, findings, and observations
    are stored in SQLite and rendered to a Markdown report.
 6. **Ticket coverage.** For a ticket split into several branches, one more pass
-   checks the requirements across all of them.
+   checks the requirements across all of them. A requirement whose code was
+   already on `main` before the ticket counts as satisfied once the tool finds
+   the quoted line at the base commit (`already_on_base`). A slice page shows
+   each checklist item as in this branch, in another slice, already on base,
+   or nowhere (only that is red), next to the ticket's own coverage verdict.
 
 ## Safety
 

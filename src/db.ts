@@ -238,6 +238,9 @@ export function migrate(): void {
     ensureColumn('reviews', 'proposed_requirements', `ALTER TABLE reviews ADD COLUMN proposed_requirements TEXT`);
     ensureColumn('ticket_groups', 'requirements_derived_at', `ALTER TABLE ticket_groups ADD COLUMN requirements_derived_at TEXT`);
     ensureColumn('ticket_groups', 'requirements_notes', `ALTER TABLE ticket_groups ADD COLUMN requirements_notes TEXT`);
+    ensureColumn(
+      'ticket_groups', 'requirements_open_questions', `ALTER TABLE ticket_groups ADD COLUMN requirements_open_questions TEXT`,
+    );
     // The cross-repository contract check of a coverage pass; NULL on older rows (not checked).
     ensureColumn('ticket_coverage', 'contract_json', `ALTER TABLE ticket_coverage ADD COLUMN contract_json TEXT`);
     // After ensureColumn: on an older database the column only exists from here on.

@@ -12,7 +12,7 @@ import {
   ApiClient, ApiError, ApiNoAnswerError, ApiUnreachableError, apiBaseUrl, DEFAULT_API_URL,
 } from './mcp/client.js';
 import {
-  compactCoverage, compactFindings, compactGroup, compactLocalRepos, compactPreview, compactTicket, compactTicketPlan, coverageWhere,
+  compactChecklist, compactCoverage, compactFindings, compactGroup, compactLocalRepos, compactPreview, compactTicket, compactTicketPlan, coverageWhere,
   findingLocation, isPreviewSettled, isTerminalStatus, isTicketRunFinished, mutationRefusal, parseTargetSelector,
   reviewDetail, selectTargets, severityCounts, truncate, truncateReport, type CoveragePayload, type PreviewPayload, type TicketPlanPayload,
   type TicketPayload,
@@ -351,6 +351,76 @@ test('a review of a ticket group carries its code verdict and the coverage seen 
     'partly in this branch and w#x');
   const lone = reviewDetail({ review: doneRow(12) }, 'http://x/review/12');
   assert.equal(lone.ticket_group, null);
+});
+
+test('a slice review: requirements by attribution match the page, unmet lists only gaps, the ticket verdict beside the code verdict', () => {
+  const att = (state: string, label: string) => ({ state: state as never, label, branches: [], note: '' });
+  const row = (id: number, status: 'met' | 'missing', a: ReturnType<typeof att>) => ({
+    id, review_id: 10, text: `Item ${id}`, status, evidence: null, ord: id, requirement_id: 100 + id, attribution: a,
+  });
+  const counts = { this_branch: 1, other_branch: 1, already_on_base: 1, not_verifiable: 0, nowhere: 1, partial: 0, pending: 0 };
+  const detail = reviewDetail({
+    review: doneRow(10),
+    requirements: [
+      row(1, 'met', att('this_branch', 'in this branch')),
+      row(2, 'missing', att('other_branch', 'in svc#api')),
+      row(3, 'missing', att('already_on_base', 'already on base')),
+      row(4, 'missing', att('nowhere', 'nowhere')),
+    ],
+    ticket_group: {
+      key: 'ABC-123', parent: 'main', parent_reason: 'default', coverage_pending: false, coverage: null,
+      attribution: { fresh: true, coverage_id: 4, by_attribution: counts, summary: '1 in this slice, 1 in other slices, 1 already on base, 1 nowhere' },
+      ticket_coverage: { state: 'needs_work', nowhere: 1, partial: 0, already_on_base: 1, label: 'ticket coverage: needs_work (1 nowhere, 0 partial)' },
+    },
+  }, 'http://x/review/10');
+  assert.deepEqual(detail.requirements?.by_attribution, counts);
+  assert.equal(detail.requirements?.attribution_summary, '1 in this slice, 1 in other slices, 1 already on base, 1 nowhere');
+  assert.equal(detail.requirements?.coverage_fresh, true);
+  assert.deepEqual(detail.requirements?.unmet, [{ id: 'R104', status: 'missing', where: 'nowhere', text: 'Item 4' }]);
+  assert.equal(detail.ticket_group?.ticket_coverage, 'ticket coverage: needs_work (1 nowhere, 0 partial)');
+  // A review without a group: no attribution, every row that is not met is unmet.
+  const lone = reviewDetail({ review: doneRow(12), requirements: [{ id: 1, review_id: 12, text: 'x', status: 'missing', evidence: null, ord: 0, requirement_id: null }] }, 'http://x/review/12');
+  assert.equal(lone.requirements?.by_attribution, undefined);
+  assert.equal(lone.requirements?.unmet.length, 1);
+});
+
+test('a coverage with requirements already on the base: their own group, verified sites, not open', () => {
+  const base = coveragePayload();
+  const cov = compactCoverage({
+    ...base,
+    requirements: [
+      ...base.requirements,
+      {
+        requirement_id: 30, text: 'Links helper', status: 'already_on_base', note: '', branches: [],
+        base_evidence: [{
+          repo: 'my-service', file: 'apps/services.py', line: 891, quote: 'def order_links', base_branch: 'main',
+          base_sha: 'abcdef1234567890', verified: true, reason: null,
+        }],
+      },
+      {
+        requirement_id: 31, text: 'Summary', status: 'missing', note: 'claimed already on base, not verified: x', branches: [],
+        base_evidence: [{
+          repo: 'my-service', file: 'x.py', line: 1, quote: 'q', base_branch: 'main', base_sha: 'abcdef1234567890', verified: false,
+          reason: 'x.py does not exist at main@abcdef1',
+        }],
+      },
+    ],
+  })!;
+  assert.deepEqual(cov.already_on_base, ['R30 Links helper']);
+  assert.deepEqual(cov.open, ['missing: Button tests', 'missing: R31 Summary']);
+  const onBase = cov.requirements.find((r) => r.id === 'R30')!;
+  assert.deepEqual(onBase.base_evidence, [{ location: 'my-service:apps/services.py:891', at: 'main@abcdef1', verified: true }]);
+  const rejected = cov.requirements.find((r) => r.id === 'R31')!;
+  assert.equal(rejected.base_evidence![0]!.reason, 'x.py does not exist at main@abcdef1');
+});
+
+test('a checklist carries its open questions; an older server without them gives an empty list', () => {
+  const base = {
+    key: 'ABC-123', derived_at: null, not_verifiable_notes: [], items: [], removed: [], deriving: false,
+  };
+  assert.deepEqual(compactChecklist({ ...base, open_questions: ['The ticket notes X but does not ask to fix it; confirm scope.'] }).open_questions,
+    ['The ticket notes X but does not ask to fix it; confirm scope.']);
+  assert.deepEqual(compactChecklist(base).open_questions, []);
 });
 
 // --- recursion guard ----------------------------------------------------------

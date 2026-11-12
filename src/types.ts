@@ -385,6 +385,8 @@ export interface TicketGroupRow {
   requirements_derived_at: string | null;
   /** JSON array of strings: ticket work no repository can show, set aside by the derivation. */
   requirements_notes: string | null;
+  /** JSON array of strings: things the ticket mentions but does not ask to change; scope to confirm. */
+  requirements_open_questions: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -422,7 +424,8 @@ export interface TicketBranchRow {
   updated_at: string;
 }
 
-export type CoverageStatus = 'covered' | 'partial' | 'missing';
+/** `already_on_base`: the code existed on the base of the chain root before this ticket (verified by the tool). */
+export type CoverageStatus = 'covered' | 'partial' | 'missing' | 'already_on_base';
 export type CoverageVerdict = 'covered' | 'needs_work';
 export type CoverageRunStatus = 'running' | 'done' | 'failed';
 
@@ -438,9 +441,23 @@ export interface CoverageBranch {
   repo: string;
   branch: string;
   review_id: number | null;
-  status: Exclude<CoverageStatus, 'missing'>;
+  status: 'covered' | 'partial';
   note: string;
   evidence: CoverageEvidence[];
+}
+
+/** A site the coverage pass says held the code before this ticket, as the tool checked it at the base commit. */
+export interface BaseEvidence {
+  repo: string;
+  file: string;
+  line: number | null;
+  quote: string;
+  /** The base the site was checked at (the chain root's merge base); null when none was known. */
+  base_branch: string | null;
+  base_sha: string | null;
+  verified: boolean;
+  /** Why the site did not verify; null when it did. */
+  reason: string | null;
 }
 
 export interface CoverageRequirement {
@@ -450,6 +467,8 @@ export interface CoverageRequirement {
   status: CoverageStatus;
   note: string;
   branches: CoverageBranch[];
+  /** The checked base sites of an `already_on_base` claim (verified or not); absent otherwise. */
+  base_evidence?: BaseEvidence[];
 }
 
 /** Mirrors a row of the `ticket_coverage` table. */

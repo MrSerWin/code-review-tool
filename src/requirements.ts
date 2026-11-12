@@ -28,6 +28,7 @@ const textList = z
 export const derivationOutputSchema = z.object({
   requirements: textList,
   not_verifiable_notes: textList,
+  open_questions: textList,
 });
 
 export type DerivationOutput = z.infer<typeof derivationOutputSchema>;
@@ -92,6 +93,7 @@ export interface DeriveOptions {
 export interface DeriveResult {
   items: TicketRequirementRow[];
   notes: string[];
+  openQuestions: string[];
   reviewer: string;
   model: string;
 }
@@ -138,9 +140,10 @@ export async function deriveTicketRequirements(key: string, opts: DeriveOptions 
       timeoutMs: opts.timeoutMs ?? config.REVIEW_TIMEOUT_MS,
       signal: undefined,
     });
-    const items = replaceDerivedRequirements(key, data.requirements, data.not_verifiable_notes);
-    onLog('info', `checklist of ${key}: ${items.length} item(s), ${data.not_verifiable_notes.length} not verifiable note(s)`);
-    return { items, notes: data.not_verifiable_notes, reviewer: reviewer.name, model };
+    const items = replaceDerivedRequirements(key, data.requirements, data.not_verifiable_notes, data.open_questions);
+    onLog('info', `checklist of ${key}: ${items.length} item(s), ${data.not_verifiable_notes.length} not verifiable note(s), ` +
+      `${data.open_questions.length} open question(s)`);
+    return { items, notes: data.not_verifiable_notes, openQuestions: data.open_questions, reviewer: reviewer.name, model };
   } finally {
     fs.rmSync(workDir, { recursive: true, force: true });
   }

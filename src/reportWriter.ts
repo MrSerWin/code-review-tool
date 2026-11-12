@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { config } from './config.js';
-import { branchCoverage, openRequirements, whereLabel } from './coverageView.js';
+import { baseRequirements, branchCoverage, openRequirements, whereLabel } from './coverageView.js';
 import { listReviewers } from './reviewers/index.js';
 import type {
   AnchorStatus, CheckoutResult, ContractIssue, CoverageRequirement, CoverageVerdict, Finding, FindingKind, ReviewOutput, ReviewRow,
@@ -42,6 +42,7 @@ const COVERAGE_ICON: Record<string, string> = {
   covered: '✅ Covered',
   partial: '⚠️ Partial',
   missing: '❌ Missing',
+  already_on_base: '☑️ Already on base',
 };
 
 const REQ_ICON: Record<string, string> = {
@@ -362,7 +363,7 @@ export interface CoverageForReport {
 }
 
 const COVERAGE_VERDICT_TEXT: Record<CoverageVerdict, string> = {
-  covered: 'COVERED: every requirement is implemented by some branch',
+  covered: 'COVERED: every requirement is implemented by some branch or was already on the base',
   needs_work: 'NEEDS WORK: not every requirement is implemented yet',
 };
 
@@ -455,6 +456,7 @@ export function renderCoverageReport(
   lines.push('## Requirements', '');
   lines.push('| # | Requirement | Status | Covered by | Note |', '|---|---|---|---|---|');
   coverage.requirements.forEach((r, index) => {
+    if (r.status === 'already_on_base') return;
     const by = r.branches.length === 0
       ? 'not covered anywhere'
       : r.branches.map((b) => {
@@ -469,6 +471,19 @@ export function renderCoverageReport(
     lines.push(`| ${label} | ${cell(r.text)} | ${COVERAGE_ICON[r.status] ?? r.status} | ${cell(by)} | ${cell(r.note) || '-'} |`);
   });
   lines.push('');
+
+  const onBase = baseRequirements(coverage.requirements);
+  if (onBase.length) {
+    lines.push(`## ${baseGroupTitle(coverage.requirements)}: ${onBase.length}`, '');
+    lines.push('The code existed on the base of the first slice before this ticket; the tool verified each site listed.', '');
+    for (const r of onBase) {
+      const label = r.requirement_id ? `R${r.requirement_id}: ` : '';
+      const sites = (r.base_evidence ?? []).filter((e) => e.verified)
+        .map((e) => `${e.repo} \`${e.line ? `${e.file}:${e.line}` : e.file}\``).join(', ');
+      lines.push(`- ${label}${inline(r.text)}${sites ? ` (${sites})` : ''}`);
+    }
+    lines.push('');
+  }
 
   if (coverage.contractIssues) {
     lines.push('## Cross-repository contract', '');
@@ -494,6 +509,13 @@ export function renderCoverageReport(
     lines.push('');
   }
   return lines.join('\n');
+}
+
+/** "Already on main before this ticket", or "on the base" when the roots differ or none is named. */
+export function baseGroupTitle(requirements: readonly CoverageRequirement[]): string {
+  const names = new Set(requirements.flatMap((r) => (r.base_evidence ?? []).filter((e) => e.verified).map((e) => e.base_branch ?? '')));
+  const name = names.size === 1 ? [...names][0] : '';
+  return `Already on ${name || 'the base'} before this ticket`;
 }
 
 export async function writeCoverageReport(

@@ -35,6 +35,15 @@ were not shown in full.
 
 {{CONTRACT}}
 
+# Code on the base (before this ticket)
+
+Each repository's first slice was cut from a base (usually `main`). Code that
+was already there before this ticket is not missing work. Below are the base
+lines the slice reviews pointed at when they said a requirement is "already on
+main", read by the tool at the base commit. Quote from these lines.
+
+{{BASE}}
+
 # How to work
 
 {{REQUIREMENTS_STEP}}
@@ -46,9 +55,18 @@ were not shown in full.
 3. **Set the status of the requirement as a whole:**
    - `covered`: the branches listed implement all of it, together.
    - `partial`: some of it is implemented; say in `note` exactly what is not.
-   - `missing`: no branch implements it. This includes work the ticket plans
-     for a slice that has no branch yet, or whose branch is not reviewed yet:
-     say so in `note`. Never hide it.
+   - `already_on_base`: no branch implements it because the code it asks for
+     already existed on the base before this ticket, and the ticket does not
+     ask to change that code further. Give `base_evidence`: one or more sites,
+     each with `repo`, `file`, `line` at the base, and `quote`, a short exact
+     piece of that line (10 to 80 characters, copied character for character
+     from the base lines above; never paraphrase). The tool checks every site
+     at the base commit. A claim with no site that checks out is turned into
+     `missing`, so claim it only when you can quote the base. `branches` is
+     empty.
+   - `missing`: no branch implements it, and it is not on the base. This
+     includes work the ticket plans for a slice that has no branch yet, or
+     whose branch is not reviewed yet: say so in `note`. Never hide it.
 4. **Give evidence per branch.** For each branch you list, give the file and
    line in THAT branch that implement it, copied from that branch's checklist
    evidence, or a path from that branch's changed-file list. Do not move
@@ -82,8 +100,11 @@ It must match this shape exactly:
     {
       "id": "R12 (the checklist id) or null",
       "text": "the requirement in your own short words",
-      "status": "covered|partial|missing",
+      "status": "covered|partial|missing|already_on_base",
       "note": "one line: what is missing, or why it counts as covered",
+      "base_evidence": [
+        { "repo": "repository name", "file": "path/at/the/base.py", "line": 41, "quote": "exact text from that base line" }
+      ],
       "branches": [
         {
           "repo": "repository name exactly as listed above",
@@ -110,7 +131,10 @@ It must match this shape exactly:
 
 Rules for the JSON block:
 - `requirements` must never be empty when step 1 asks you to derive them.
-- `branches` is empty for a `missing` requirement, and never empty otherwise.
+- `branches` is empty for a `missing` or `already_on_base` requirement, and
+  never empty otherwise.
+- `base_evidence` is given only for `already_on_base`; leave it out or empty
+  otherwise.
 - `repo` and `branch` must name a branch from the list above.
 - `line` may be `null` when the evidence is a whole file.
 - `contract_issues` is an empty array when there is no mismatch; every issue

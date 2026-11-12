@@ -250,3 +250,101 @@ test('scheduler: a burst of settled reviews runs one pass, after the group is id
   assert.deepEqual(runs.filter((k) => k === 'K-2').length, 2);
   scheduler.cancelAll();
 });
+
+test('already_on_base: verified sites at the chain root base count as satisfied; an unverified claim stays missing', async () => {
+  const KEY2 = 'BASE-1';
+  const mk = (repo: string, branch: string, minute: number, baseSha: string) => store.createReview({
+    ticket_key: KEY2, ticket_body: 'Resolve orders; links in notifications; is_paid in the UI model.',
+    repo, branch, base_branch: 'main', base_sha: baseSha, head_sha: 'f'.repeat(40), status: 'done', verdict: 'approve',
+    code_verdict: 'approve', can_merge: 1, code_can_merge: 1, summary: 's', created_at: at(minute),
+  });
+  // svc: the root review's checkout is on disk and holds the base commit.
+  const svc = mk('svc', 'feat/base-1-api', 40, 'pending');
+  const svcOrigin = path.join(root, 'svc-origin');
+  fs.mkdirSync(path.join(svcOrigin, 'src'), { recursive: true });
+  git(svcOrigin, 'init', '-q', '-b', 'main');
+  fs.writeFileSync(path.join(svcOrigin, 'src/links.py'), 'import x\n\ndef task_links(task):\n    return {}\n');
+  git(svcOrigin, 'add', '-A');
+  git(svcOrigin, 'commit', '-q', '-m', 'base');
+  const svcBase = git(svcOrigin, 'rev-parse', 'HEAD').trim();
+  const svcDir = checkoutDir(svc, svc.id);
+  fs.mkdirSync(path.dirname(svcDir), { recursive: true });
+  git(path.dirname(svcDir), 'clone', '-q', svcOrigin, svcDir);
+  git(svcDir, 'checkout', '-q', '-b', 'feat/base-1-api');
+  fs.writeFileSync(path.join(svcDir, 'src/resolve.py'), 'def resolve():\n    pass\n');
+  git(svcDir, 'add', '-A');
+  git(svcDir, 'commit', '-q', '-m', 'slice');
+  store.updateReview(svc.id, { base_sha: svcBase });
+  store.replaceReviewFiles(svc.id, [{ path: 'src/resolve.py', status: 'A', old_path: null, additions: 2, deletions: 0 }]);
+  store.replaceRequirements(svc.id, [
+    { text: 'Resolve', status: 'met', evidence: 'src/resolve.py:1' },
+    { text: 'Links helper', status: 'missing', evidence: 'task_links already on main (src/links.py:3); not part of this diff' },
+  ]);
+  // web: the checkout is gone, so the base branch is fetched for the pass.
+  const webBaseDir = path.join(root, 'web-origin');
+  fs.mkdirSync(path.join(webBaseDir, 'ui'), { recursive: true });
+  git(webBaseDir, 'init', '-q', '-b', 'main');
+  fs.writeFileSync(path.join(webBaseDir, 'ui/model.ts'), 'export interface Fn {\n  is_paid: boolean;\n}\n');
+  git(webBaseDir, 'add', '-A');
+  git(webBaseDir, 'commit', '-q', '-m', 'base');
+  const webBase = git(webBaseDir, 'rev-parse', 'HEAD').trim();
+  const web = mk('web', 'feat/base-1-ui', 41, webBase);
+  store.replaceRequirements(web.id, [{ text: 'UI model', status: 'missing', evidence: 'Not in this diff' }]);
+  ticketStore.syncMembersFromReviews(KEY2);
+
+  const fetched: string[] = [];
+  const origins: Record<string, string> = { svc: svcOrigin, web: webBaseDir };
+  const baseFetch = async (r: { repo: string; reviewId: number; baseBranch: string }) => {
+    const dir = checkoutDir({ repo: r.repo, branch: r.baseBranch }, r.reviewId);
+    fs.mkdirSync(path.dirname(dir), { recursive: true });
+    git(path.dirname(dir), 'clone', '-q', origins[r.repo]!, dir);
+    fetched.push(dir);
+    return dir;
+  };
+  const baseGit = (dir: string, args: string[]) => Promise.resolve(git(dir, ...args));
+  const claim = (repo: string, file: string, line: number, quote: string) => ({ repo, file, line, quote });
+  const answerFor = (bogus: boolean) => ({
+    summary: 'Resolve is new; links and the model field were on main.',
+    requirements: [
+      { text: 'Resolve', status: 'covered', branches: [{ repo: 'svc', branch: 'feat/base-1-api', evidence: ['src/resolve.py:1'] }] },
+      { text: 'Links helper', status: 'already_on_base', note: 'Existed on main.', base_evidence: [claim('svc', 'src/links.py', 3, 'def task_links(task):')] },
+      { text: 'UI model', status: 'already_on_base', base_evidence: [claim('web', 'model.ts', 2, 'is_paid: boolean')] },
+      ...(bogus
+        ? [{ text: 'Summary helper', status: 'already_on_base', base_evidence: [claim('svc', 'src/links.py', 3, 'def summary_links')] }]
+        : []),
+    ],
+  });
+
+  const row = await coverage.runCoverage(KEY2, {
+    reviewerDefinition: reviewer(answerFor(true)), timeoutMs: 20_000, baseGit, baseFetch, contractDiff: async () => '',
+  });
+  assert.equal(row.status, 'done', row.error ?? '');
+  const reqs = ticketStore.parseCoverageRequirements(row);
+  assert.deepEqual(reqs.map((r) => r.status), ['covered', 'already_on_base', 'already_on_base', 'missing']);
+  assert.equal(row.verdict, 'needs_work');
+  assert.deepEqual(reqs[1]!.base_evidence!.map((e) => [e.repo, e.file, e.line, e.verified, e.base_sha]), [['svc', 'src/links.py', 3, true, svcBase]]);
+  // A bare file name resolves to its one path at the base.
+  assert.deepEqual(reqs[2]!.base_evidence!.map((e) => [e.file, e.verified, e.base_branch]), [['ui/model.ts', true, 'main']]);
+  assert.match(reqs[3]!.note, /^claimed already on base, not verified: src\/links\.py:3: the quote is not within 3 lines of line 3$/);
+  assert.match(row.summary!, /Tool check: 2 requirement\(s\) verified as already on the base before this ticket; 1 "already on base" claim\(s\) not verified/);
+
+  // The prompt quotes the base line the slice review pointed at.
+  const prompt = fs.readdirSync(prompts).map((f) => fs.readFileSync(path.join(prompts, f), 'utf8'))
+    .find((p) => p.includes('feat/base-1-api') && p.includes('# Code on the base'))!;
+  assert.match(prompt, /`svc` `src\/links\.py` at main@[0-9a-f]{7}, lines 1-4:/);
+  assert.match(prompt, /    3\| def task_links\(task\):/);
+  // The report lists them in their own group; the fetched base checkout is pruned.
+  const report = fs.readFileSync(path.join(process.env.DATA_DIR!, row.report_path!), 'utf8');
+  assert.match(report, /## Already on main before this ticket: 2/);
+  assert.match(report, /- Links helper \(svc `src\/links\.py:3`\)/);
+  assert.equal(fetched.length, 1);
+  assert.equal(fs.existsSync(fetched[0]!), false);
+
+  const clean = await coverage.runCoverage(KEY2, {
+    reviewerDefinition: reviewer(answerFor(false)), timeoutMs: 20_000, baseGit, baseFetch, contractDiff: async () => '',
+  });
+  assert.equal(clean.verdict, 'covered', 'already_on_base satisfies the ticket');
+  // The first pass pruned the svc checkout, so this one fetched both bases.
+  assert.equal(fetched.length, 3);
+  assert.ok(fetched.every((d) => !fs.existsSync(d)));
+});

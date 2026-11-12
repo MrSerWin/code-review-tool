@@ -11,6 +11,7 @@ import type {
   ParentReason,
   PreviewRole, PreviewStatus, RequirementRow, ReviewGroup, ReviewRow, ReviewSource, ReviewStatus, Severity, Verdict,
 } from '../types.js';
+import { isSatisfied, type Attribution, type AttributionCounts, type TicketCoverageBadge } from '../coverageView.js';
 
 export const TERMINAL_STATUSES: readonly ReviewStatus[] = ['done', 'failed', 'cancelled'];
 export const ACTIVE_STATUSES: readonly ReviewStatus[] = ['queued', 'fetching', 'reviewing'];
@@ -186,10 +187,25 @@ export interface BranchCoverageLinePayload {
   requirement_id?: number | null;
   text: string;
   status: CoverageStatus;
-  where: 'here' | 'elsewhere' | 'nowhere';
+  where: 'here' | 'elsewhere' | 'base' | 'nowhere';
   here: 'covered' | 'partial' | null;
   others: string[];
   note: string;
+}
+
+/** A slice checklist row attributed against the ticket coverage (see coverageView.ts). */
+export interface RowAttributionPayload {
+  state: Attribution;
+  label: string;
+  branches: { repo: string; branch: string; review_id: number | null }[];
+  note: string;
+}
+
+export interface SliceAttributionPayload {
+  fresh: boolean;
+  coverage_id: number | null;
+  by_attribution: AttributionCounts;
+  summary: string;
 }
 
 /** `ticket_group` of `GET /api/reviews/:id`: the review's ticket group, null for a branch without one. */
@@ -208,12 +224,15 @@ export interface ReviewTicketGroupPayload {
   } | null;
   coverage_pending: boolean;
   checklist?: { id: number; text: string; source: string }[];
+  /** Absent from servers older than the attribution. */
+  attribution?: SliceAttributionPayload;
+  ticket_coverage?: TicketCoverageBadge;
 }
 
 /** What `GET /api/reviews/:id` returns (the parts the MCP uses). */
 export interface ReviewDetailPayload {
   review: ReviewRow;
-  requirements?: RequirementRow[];
+  requirements?: (RequirementRow & { attribution?: RowAttributionPayload })[];
   findings?: FindingRow[];
   logs?: LogRow[];
   ticket_group?: ReviewTicketGroupPayload | null;
@@ -227,6 +246,7 @@ export function requirementRef(id: number | null | undefined): string | null {
 
 /** `in this branch`, `in repo#b`, `not covered anywhere`. */
 export function coverageWhere(line: BranchCoverageLinePayload): string {
+  if (line.where === 'base') return 'already on base';
   if (line.where === 'nowhere') return 'not covered anywhere';
   const others = line.others.join(', ');
   if (line.where === 'elsewhere') return `in ${others}`;
@@ -243,6 +263,8 @@ export function reviewTicketGroup(group: ReviewTicketGroupPayload | null | undef
     parent: group.parent,
     parent_reason: group.parent_reason,
     coverage_pending: group.coverage_pending,
+    // The ticket's verdict, not this branch's: "pending" until the coverage read this run and every sibling.
+    ...(group.ticket_coverage ? { ticket_coverage: group.ticket_coverage.label } : {}),
     coverage: c
       ? {
           id: c.id,
@@ -272,10 +294,20 @@ export function reviewDetail(payload: ReviewDetailPayload, url: string, opts: Re
   const compact = compactFindings(findings, opts.maxFindings ?? DEFAULT_MAX_FINDINGS, opts.textMax ?? FINDING_TEXT_MAX);
   const lastLog = payload.logs && payload.logs.length > 0 ? payload.logs[payload.logs.length - 1] : undefined;
 
+  const attribution = payload.ticket_group?.attribution ?? null;
+  // A slice: a row another slice or the base holds is not open work, so only gaps and pending rows are listed.
+  const open = (r: (typeof requirements)[number]): boolean => (r.attribution
+    ? r.attribution.state === 'nowhere' || r.attribution.state === 'partial' || r.attribution.state === 'pending'
+    : r.status !== 'met');
   const unmet = requirements
-    .filter((r) => r.status !== 'met')
+    .filter(open)
     .slice(0, 20)
-    .map((r) => ({ ...(r.requirement_id ? { id: requirementRef(r.requirement_id) } : {}), status: r.status, text: truncate(r.text, 200) }));
+    .map((r) => ({
+      ...(r.requirement_id ? { id: requirementRef(r.requirement_id) } : {}),
+      status: r.status,
+      ...(r.attribution ? { where: r.attribution.label } : {}),
+      text: truncate(r.text, 200),
+    }));
   const byId = requirements.some((r) => r.requirement_id);
   const proposed = payload.proposed_requirements ?? [];
 
@@ -297,6 +329,10 @@ export function reviewDetail(payload: ReviewDetailPayload, url: string, opts: Re
           total: review.requirements_total ?? 0,
           // by_id: the statuses are for the ticket's stored checklist (see get_ticket_requirements).
           ...(byId ? { by_id: true } : {}),
+          // A slice of a ticket group: where each item lives, the same counts as the review page.
+          ...(attribution
+            ? { by_attribution: attribution.by_attribution, attribution_summary: attribution.summary, coverage_fresh: attribution.fresh }
+            : {}),
           unmet,
         }
       : null,
@@ -336,6 +372,10 @@ interface RunSummaryPayload {
   code_can_merge: boolean | null;
   base_branch: string;
   blocking_count: number | null;
+  requirements_met?: number | null;
+  requirements_total?: number | null;
+  /** latestDone only: its checklist against the ticket coverage; absent from older servers. */
+  requirements_attribution?: { fresh: boolean; by_attribution: AttributionCounts; summary: string } | null;
 }
 
 export interface TicketBranchPayload {
@@ -417,6 +457,16 @@ export function compactCoverage(c: CoveragePayload | null, maxRequirements = DEF
         })),
       })),
       ...(r.note ? { note: truncate(r.note, 200) } : {}),
+      ...(r.base_evidence?.length
+        ? {
+            base_evidence: r.base_evidence.slice(0, 5).map((e) => ({
+              location: `${e.repo}:${e.line ? `${e.file}:${e.line}` : e.file}`,
+              at: e.base_sha ? `${e.base_branch ?? 'base'}@${e.base_sha.slice(0, 7)}` : null,
+              verified: e.verified,
+              ...(e.reason ? { reason: truncate(e.reason, 200) } : {}),
+            })),
+          }
+        : {}),
     })),
     ...(c.requirements.length > reqs.length ? { requirements_omitted: c.requirements.length - reqs.length } : {}),
     // The cross-repository contract check: checked=false for a pass that predates it.
@@ -434,8 +484,12 @@ export function compactCoverage(c: CoveragePayload | null, maxRequirements = DEF
           })),
         }
       : { checked: false, issues: [] },
-    open: c.requirements.filter((r) => r.status !== 'covered')
+    // Only `missing` and `partial` keep the ticket from covered.
+    open: c.requirements.filter((r) => !isSatisfied(r.status))
       .map((r) => `${r.status}: ${r.requirement_id ? `${requirementRef(r.requirement_id)} ` : ''}${truncate(r.text, 120)}`),
+    // Verified at the base commit of the chain root: existed before this ticket, satisfied without a branch.
+    already_on_base: c.requirements.filter((r) => r.status === 'already_on_base')
+      .map((r) => `${r.requirement_id ? `${requirementRef(r.requirement_id)} ` : ''}${truncate(r.text, 120)}`),
     review_ids: c.review_ids,
     error: truncate(c.error, 600),
     created_at: c.created_at,
@@ -479,6 +533,9 @@ export function compactTicket(
         pr: b.prNumber,
         latest: compactRun(b.latest, urls.review),
         ...(b.latestDone && b.latestDone.id !== b.latest?.id ? { latest_done: compactRun(b.latestDone, urls.review) } : {}),
+        ...(b.latestDone?.requirements_attribution
+          ? { requirements: { ...b.latestDone.requirements_attribution, met: b.latestDone.requirements_met, total: b.latestDone.requirements_total } }
+          : {}),
         ...(b.parentInGroup && b.parentReviewed === false ? { note: 'parent not reviewed yet' } : {}),
       })),
     })),
@@ -499,6 +556,8 @@ export interface ChecklistPayload {
   key: string;
   derived_at: string | null;
   not_verifiable_notes: string[];
+  /** Absent from servers older than this field. */
+  open_questions?: string[];
   items: { id: number; position: number; text: string; source: 'derived' | 'user'; state: string }[];
   removed: { id: number; text: string; source: 'derived' | 'user' }[];
   deriving: boolean;
@@ -514,6 +573,8 @@ export function compactChecklist(c: ChecklistPayload, maxRemoved = 20) {
     ...(c.derive_error ? { derive_error: c.derive_error } : {}),
     items: c.items.map((r) => ({ id: requirementRef(r.id), text: r.text, source: r.source })),
     not_verifiable_notes: c.not_verifiable_notes,
+    // Things the ticket mentions but does not ask to change: confirm the scope, then add them by hand if wanted.
+    open_questions: c.open_questions ?? [],
     removed: c.removed.slice(0, maxRemoved).map((r) => ({ id: requirementRef(r.id), text: truncate(r.text, 160) })),
     ...(c.removed.length > maxRemoved ? { removed_omitted: c.removed.length - maxRemoved } : {}),
   };

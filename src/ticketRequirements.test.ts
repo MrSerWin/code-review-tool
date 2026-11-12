@@ -101,6 +101,29 @@ test('user items are deduplicated by normalised text; a removed one comes back w
   assert.deepEqual(reqs.activeChecklist('DUP-1').map((r) => r.text), ['Audit the export', 'Export to CSV']);
 });
 
+test('the derivation answer: open_questions parse like the notes (strings or {text}), absent means none', () => {
+  const parsed = derivation.derivationOutputSchema.parse({
+    requirements: ['Expose is_paid'],
+    not_verifiable_notes: null,
+    open_questions: [' Refund and Reassign for orders: the ticket notes the gap but does not ask to fix it; confirm scope. ', { text: 'Second' }, ''],
+  });
+  assert.deepEqual(parsed.open_questions, [
+    'Refund and Reassign for orders: the ticket notes the gap but does not ask to fix it; confirm scope.', 'Second',
+  ]);
+  assert.deepEqual(parsed.not_verifiable_notes, []);
+  assert.deepEqual(derivation.derivationOutputSchema.parse({ requirements: [] }).open_questions, []);
+  // Stored next to the notes; a later derivation replaces both, and a checklist set by hand keeps them.
+  reqs.replaceDerivedRequirements('OQ-1', ['A'], ['QA'], ['Q1']);
+  assert.deepEqual(reqs.checklistPayload('OQ-1').open_questions, ['Q1']);
+  reqs.setTicketRequirements('OQ-1', [{ text: 'B' }]);
+  assert.deepEqual(reqs.requirementOpenQuestions('OQ-1'), ['Q1']);
+  reqs.replaceDerivedRequirements('OQ-1', ['A'], [], []);
+  assert.deepEqual(reqs.checklistPayload('OQ-1').open_questions, []);
+  // A group derived before open questions existed has none.
+  ticketStore.upsertTicketGroup('OQ-2');
+  assert.deepEqual(reqs.checklistPayload('OQ-2').open_questions, []);
+});
+
 test('a re-derivation replaces derived items, keeps user items and the ids of unchanged texts', () => {
   reqs.addUserRequirements('DER-1', ['Decision: CSV only']);
   const one = reqs.replaceDerivedRequirements('DER-1', ['Export risks', 'Add a button', 'decision: csv only'], ['Manual QA']);
@@ -138,6 +161,7 @@ test('the derivation pass: ticket comments and user items in the prompt, an empt
     derive: {
       requirements: ['Export the risk list to CSV', 'Add an export button to the risk list', 'Decision: CSV instead of Excel'],
       not_verifiable_notes: ['Manual QA by the customer'],
+      open_questions: ['The ticket notes that the list is slow but does not ask to fix it; confirm scope.'],
     },
   }, { delaySec: 1 });
   const logs: string[] = [];
@@ -158,6 +182,11 @@ test('the derivation pass: ticket comments and user items in the prompt, an empt
   assert.match(sent[0]!, /# Items already on the checklist\n\nThese were added by hand[\s\S]*- Decision: CSV instead of Excel/);
   assert.ok(logs.some((m) => /waiting for the running derivation/.test(m)));
   assert.deepEqual(reqs.requirementNotes('REQ-1'), ['Manual QA by the customer']);
+  assert.deepEqual(reqs.requirementOpenQuestions('REQ-1'), ['The ticket notes that the list is slow but does not ask to fix it; confirm scope.']);
+  // The leaner rules: only what the ticket asks to change; gaps become open questions; repository rules never.
+  assert.match(sent[0]!, /is NOT a requirement by itself/);
+  assert.match(sent[0]!, /Never list repository-wide rules or process constraints as requirements/);
+  assert.match(sent[0]!, /"open_questions": \[/);
   // Derived once: the next call reads the stored list without a pass.
   await derivation.ensureTicketRequirements('REQ-1', opts);
   assert.equal(sentPrompts().length, 1);
@@ -317,6 +346,7 @@ test('routes: read, set, add, derive; pasted requirements deduplicated', async (
     const body = got.json();
     assert.equal(body.items.length, 3);
     assert.deepEqual(body.not_verifiable_notes, ['Manual QA by the customer']);
+    assert.deepEqual(body.open_questions, ['The ticket notes that the list is slow but does not ask to fix it; confirm scope.']);
     assert.equal(body.deriving, false);
 
     const [first, second] = body.items as { id: number; text: string }[];
