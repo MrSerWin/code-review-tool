@@ -1,5 +1,8 @@
 # code-review-tool
 
+[![CI](https://github.com/MrSerWin/code-review-tool/actions/workflows/ci.yml/badge.svg)](https://github.com/MrSerWin/code-review-tool/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/github/license/MrSerWin/code-review-tool)](LICENSE)
+
 A local, read-only code reviewer that checks a branch against its ticket requirements, using the agent CLI you already have.
 
 ![A finished review](docs/images/review.png)
