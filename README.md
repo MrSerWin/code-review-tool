@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/MrSerWin/code-review-tool/actions/workflows/ci.yml/badge.svg)](https://github.com/MrSerWin/code-review-tool/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/github/license/MrSerWin/code-review-tool)](LICENSE)
+[![Node >=20](https://img.shields.io/badge/node-%3E%3D20-339933?logo=node.js&logoColor=white)](package.json)
 
 A local, read-only code reviewer that checks a branch against its ticket requirements, using the agent CLI you already have.
 
